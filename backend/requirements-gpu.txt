@@ -1,0 +1,40 @@
+# GPU inference — "gpu" Docker target only.
+#
+# onnxruntime-gpu 1.27.0: the DEFAULT PyPI wheel is now CUDA 13 (CUDA 12 was
+# deprecated in ORT 1.27, and the cu13 component wheels are not yet cleanly on
+# public PyPI). This stack stays on CUDA 12.9 + cuDNN 9 (matching the R550+
+# host driver in docs/setup-nvidia.md), so the Dockerfile installs the
+# CUDA-12 build of the SAME 1.27.0 release from Microsoft's official
+# onnxruntime-cuda-12 package feed in a dedicated `--no-deps` step BEFORE this
+# file is applied. The pin below documents/asserts the version and is already
+# satisfied by that step.
+#
+# WARNING: do NOT `pip install -r requirements-gpu.txt` for a GPU stack without
+# that feed step — plain PyPI would install the CUDA-13 wheel, which needs
+# cu13 libs, not the cu12 wheels pinned below, and the CUDA EP would fail to
+# load. (The CPU/dev path uses requirements-cpu.txt, unaffected.)
+onnxruntime-gpu==1.27.0
+
+# ONNX Runtime's own pure-Python runtime deps. onnxruntime-gpu is installed
+# `--no-deps` in the Dockerfile (feed step), so list them here explicitly to
+# guarantee they land (numpy is already pinned in requirements.txt). Floors
+# match ORT 1.27's declared metadata.
+flatbuffers
+packaging
+protobuf>=4.25.8
+
+# CUDA 12 / cuDNN 9 runtime libraries the ORT CUDA Execution Provider dlopens,
+# supplied as pip wheels so the base image can stay minimal. LD_LIBRARY_PATH
+# (set in the Dockerfile) points at each wheel's site-packages/nvidia/<comp>/lib
+# dir. This is exactly the set ORT declares via its onnxruntime-gpu[cuda,cudnn]
+# extra (named cu13 upstream on 1.27), pinned to the matching CUDA 12.9 /
+# cuDNN 9.x wheels. Miss one and the CUDA EP fails to load. Versions verified
+# against PyPI 2026-07; the transitive graph is self-consistent
+# (cudnn→cublas→nvrtc; cufft→nvjitlink), all pinned here explicitly.
+nvidia-cuda-runtime-cu12==12.9.79     # libcudart.so.12
+nvidia-cuda-nvrtc-cu12==12.9.86       # libnvrtc.so.12 (+ libnvrtc-builtins)
+nvidia-cublas-cu12==12.9.2.10         # libcublas.so.12 + libcublasLt.so.12
+nvidia-cudnn-cu12==9.24.0.43          # libcudnn.so.9 (+ graph/ops/cnn/adv/engines/heuristic sub-libs)
+nvidia-cufft-cu12==11.4.1.4           # libcufft.so.11
+nvidia-curand-cu12==10.3.10.19        # libcurand.so.10
+nvidia-nvjitlink-cu12==12.9.86        # libnvJitLink.so.12 (JIT for nvrtc/cublas/cufft)

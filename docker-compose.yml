@@ -1,0 +1,272 @@
+name: vigilume-nvr
+
+# Vigilume is standalone: the backend does detection (D-FINE ONNX on the
+# GPU), 24/7 recording (ffmpeg stream-copy) and manages the go2rtc container
+# for live view. No Frigate, no MQTT.
+#
+# The backend image defaults to the "gpu" build target (CUDA base +
+# onnxruntime-gpu). A "cpu" target exists for dev/tests ONLY — build it
+# explicitly with `docker build --target cpu backend/`; never deploy it
+# for production detection. See backend/Dockerfile.
+
+services:
+  backend:
+    build:
+      context: ./backend
+      target: gpu
+    container_name: vigilume-backend
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ:-America/New_York}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
+      - PUBLIC_URL=${PUBLIC_URL:-}
+      # Zero-config LAN WebRTC: the backend auto-derives a go2rtc host candidate
+      # so live view uses fast WebRTC (not slow MSE) without hand-entering an IP.
+      # Inside this bridge-networked container the auto-derivation sees only the
+      # Docker IP, so set this to the HOST's LAN IP (or a hostname the browser
+      # resolves) to guarantee WebRTC connects. Empty = rely on auto-derivation
+      # + any manual Settings → System addresses. See docs/live-latency.md.
+      - VIGILUME_WEBRTC_HOST=${VIGILUME_WEBRTC_HOST:-}
+      # 1 (default): refuse to run detection on CPU when the CUDA EP is
+      # missing (detector reports ready:false + a loud log instead of
+      # silently cooking a CPU). Set 0 to consciously allow CPU inference.
+      - VIGILUME_REQUIRE_GPU=${VIGILUME_REQUIRE_GPU:-1}
+      # Inference backend: onnx (default, D-FINE on the GPU) | onnx_cpu.
+      # EMPTY default, deliberately. This is an OVERRIDE, not the source of
+      # truth: the backend is normally chosen by settings.detection.backend
+      # (Settings -> Recording -> Detection hardware). With a "-onnx" default
+      # compose injected a non-empty value on every start, build_detector saw
+      # "the env is set, it wins", and the stored setting could NEVER take
+      # effect. Empty is falsy, so settings decides; set this in .env only to
+      # force a backend regardless of what is stored.
+      - VIGILUME_DETECTOR=${VIGILUME_DETECTOR:-}
+      # NVIDIA passthrough. On Unraid (ich777 "Nvidia Driver" plugin) set
+      # NVIDIA_VISIBLE_DEVICES in .env to your GPU's UUID from `nvidia-smi -L`
+      # (e.g. GPU-xxxxxxxx-...) — more reliable than "all" and lets the array
+      # keep other GPU containers pinned to their own cards.
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-compute,utility,video}
+      - CAM1_NAME=${CAM1_NAME:-}
+      - CAM1_FRIENDLY=${CAM1_FRIENDLY:-}
+      - CAM1_MODEL=${CAM1_MODEL:-}
+      - CAM1_IP=${CAM1_IP:-}
+      - CAM1_USER=${CAM1_USER:-}
+      - CAM1_PASS=${CAM1_PASS:-}
+      - CAM2_NAME=${CAM2_NAME:-}
+      - CAM2_FRIENDLY=${CAM2_FRIENDLY:-}
+      - CAM2_MODEL=${CAM2_MODEL:-}
+      - CAM2_IP=${CAM2_IP:-}
+      - CAM2_USER=${CAM2_USER:-}
+      - CAM2_PASS=${CAM2_PASS:-}
+      - CAM3_NAME=${CAM3_NAME:-}
+      - CAM3_FRIENDLY=${CAM3_FRIENDLY:-}
+      - CAM3_MODEL=${CAM3_MODEL:-}
+      - CAM3_IP=${CAM3_IP:-}
+      - CAM3_USER=${CAM3_USER:-}
+      - CAM3_PASS=${CAM3_PASS:-}
+      # Coral Edge TPU passthrough — OPTIONAL and safe when absent.
+      #
+      # Default is /dev/null:/dev/null, a deliberate no-op: a hard
+      # "- /dev/apex_0:/dev/apex_0" would make the backend REFUSE TO START on
+      # any box without a Coral fitted ("error gathering device information"),
+      # which would be a catastrophic default for the core service.
+      #
+      # To enable, put this in the box's .env (NOT committed):
+      #     CORAL_DEVICE=/dev/apex_0
+      # The same value is used on both sides of the mapping, so the path inside
+      # the container matches the host and app/native/coral.py needs no config.
+      # Deliberately ${VAR:-default}, never ${VAR:?} — compose interpolates the
+      # WHOLE file before filtering, so a :? here would break the stack for
+      # everyone.
+    devices:
+      - ${CORAL_DEVICE:-/dev/null}:${CORAL_DEVICE:-/dev/null}
+    # USB Coral passthrough — needed for the SECOND Edge TPU.
+    #
+    # WHY NOT A `devices:` ENTRY LIKE THE PCIe ONE: a USB Coral enumerates as
+    # 1a6e:089a (Global Unichip, pre-firmware) and then RE-ENUMERATES as
+    # 18d1:9302 the first time libedgetpu uploads its firmware. That changes the
+    # device node, so a mapping pinned at container start points at a node that
+    # no longer exists — the classic "works once, then never again" Coral-in-
+    # Docker failure. Mounting the whole USB bus plus a cgroup rule for the
+    # usb_device major (189) survives the re-enumeration.
+    #
+    # SCOPE, stated plainly: this gives the backend container access to EVERY
+    # USB device on the box, not just the Coral. Docker has no per-device USB
+    # rule that survives re-enumeration. Accepted here because the alternative
+    # is no second TPU — but it IS a widening of what a compromised backend
+    # could reach, and it is worth removing if the USB Coral is ever retired.
+    #
+    # Harmless when no USB Coral is fitted: an empty bus mounts fine and the
+    # cgroup rule matches nothing.
+    device_cgroup_rules:
+      - "c 189:* rmw"
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb
+      - ./data:/data
+      # 24/7 recordings + event clips (big disk! ~135 GB/day for the
+      # three-camera default — see the Recording tab / docs).
+      - ${MEDIA_PATH:-./media}:/media
+      # Backend writes go2rtc.yaml here; the go2rtc container reads it.
+      - ./go2rtc/config:/go2rtc-config
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/system/health', timeout=5)"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  go2rtc:
+    # Restream fan-out (one RTSP session per camera stream), MSE + WebRTC
+    # live view. Config is generated by the backend, hence the healthy-gate.
+    image: alexxit/go2rtc:1.9.14
+    container_name: vigilume-go2rtc
+    restart: unless-stopped
+    volumes:
+      - ./go2rtc/config:/config
+    ports:
+      # RTSP restream (VLC etc. on the LAN)
+      - "8554:8554"
+      # WebRTC media. The backend auto-derives a LAN host candidate (or set
+      # VIGILUME_WEBRTC_HOST); add a Tailscale/extra IP with port 8555 under
+      # Settings -> System -> WebRTC addresses. See docs/live-latency.md.
+      - "8555:8555/tcp"
+      - "8555:8555/udp"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  web:
+    build: ./frontend
+    container_name: vigilume-web
+    restart: unless-stopped
+    environment:
+      # Where nginx proxies /go2rtc/ (MSE/WebRTC signaling for live view).
+      # Host-side override is VIGILUME_GO2RTC_UPSTREAM (rarely needed) — the name
+      # differs from the container env on purpose: pre-standalone .env files set
+      # GO2RTC_UPSTREAM to the external Frigate host, and a stale leftover line
+      # must not silently hijack the live-view proxy.
+      - GO2RTC_UPSTREAM=${VIGILUME_GO2RTC_UPSTREAM:-http://go2rtc:1984}
+    ports:
+      - "8080:80"
+    depends_on:
+      backend:
+        condition: service_started
+      go2rtc:
+        condition: service_started
+
+
+  # ── APNs push relay (app owner only) ────────────────────────────────────
+  # Holds the Apple .p8 and forwards E2E-encrypted push to APNs so ANY
+  # Vigilume server can reach the iOS app with a real native notification and
+  # a CallKit doorbell ring. ntfy (notifications.ntfy) is a separate channel
+  # and stays — it needs no Apple account, but its alerts land in the ntfy
+  # app: no CallKit ring, no native UI.
+  # Enable with COMPOSE_PROFILES=relay in .env.
+  push-relay:
+    build: ./relay
+    container_name: vigilume-push-relay
+    restart: unless-stopped
+    profiles: ["relay"]
+    environment:
+      # A PATH, not inline PEM: inline would put the signing key in
+      # `docker inspect` output and in the box .env.
+      APNS_KEY_P8: /keys/apns.p8
+      # `:-`, NOT `:?`. A required-variable error is tempting here, but compose
+      # interpolates the WHOLE file BEFORE it filters profiles — so `:?` on
+      # these aborts `docker compose up` for everyone who does NOT run the
+      # relay, taking the entire NVR down over a service they never enabled.
+      # (Verified, not assumed: `docker-compose config` errors with the profile
+      # off and the var unset.) The relay's own load_config() already refuses to
+      # start without each of these, with a better message, and only when it is
+      # actually running. Leave these as `:-`.
+      APNS_KEY_ID: ${APNS_KEY_ID:-}
+      APNS_TEAM_ID: ${APNS_TEAM_ID:-}
+      APNS_BUNDLE_ID: ${APNS_BUNDLE_ID:-}
+      # FALLBACK ONLY — used when a request omits `environment`. Xcode dev
+      # builds are sandbox; TestFlight/App Store are production. Defaulting to
+      # production while a dev-build token is registered = BadDeviceToken and a
+      # silently vanished push.
+      APNS_ENV: ${APNS_ENV:-production}
+      RELAY_RATE_LIMIT: "30"
+      RELAY_MAX_BODY: "4096"
+    volumes:
+      # DIRECTORY, not ./secrets/apns.p8:/keys/apns.p8:ro — on Unraid /mnt/user
+      # is shfs (FUSE) and a single-FILE bind mount fails in runc ("not a
+      # directory … mount a directory onto a file").
+      #
+      # The relay runs USER nobody, so the key must be readable BY nobody:
+      #   chown nobody:users secrets/apns.p8 && chmod 400 secrets/apns.p8
+      # (400 + the right owner, NOT 644 — this is an Apple signing key, and
+      # world-readable is a needless downgrade when chown is available.) A
+      # 0600 key owned by root is the failure you'll actually hit: the mount
+      # succeeds and the relay dies on startup unable to read it.
+      - ./secrets:/keys:ro
+    # No persistence, by contract. The relay keeps only in-memory rate-limit
+    # counters; restarts are free.
+    read_only: true
+    tmpfs:
+      - /tmp
+    ports:
+      # Published on ALL interfaces so a tunnel/reverse proxy running OUTSIDE
+      # this compose project (e.g. your own cloudflared container, or an Unraid
+      # app) can reach it at http://<box-lan-ip>:8090 — a separate project has
+      # its own docker network and CANNOT resolve `push-relay`.
+      #
+      # NOT "127.0.0.1:8090:8090". That was the old binding, and it is why
+      # relay_url=http://192.168.1.253:8090 could never work: loopback-only
+      # means nothing answers on the LAN IP, and a containerised tunnel can't
+      # reach the host's loopback either.
+      #
+      # LAN exposure is acceptable here BY DESIGN — this service is built to
+      # face the public internet (see relay/README.md "Why this is safe to
+      # expose"): device tokens are unguessable, bodies are ciphertext it
+      # cannot read, it stores nothing, and it rate-limits per token. Point
+      # your tunnel's public hostname at <box-lan-ip>:8090.
+      #
+      # THIS BOX'S OWN BACKEND MUST NOT USE THAT ROUTE: set
+      # relay_url=http://push-relay:8090 so its push never depends on the
+      # tunnel, DNS, or the internet being up.
+      - "8090:8090"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=4).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # LOCAL HTTPS terminator (compose profile "tls"). Self-signed internal CA —
+  # gives the LAN browser a SECURE CONTEXT (doorbell mic / getUserMedia, PWA
+  # install, Web Push) with NO internet, NO Cloudflare, NO DNS. Trust Caddy's
+  # root CA once per device (docs/remote-access.md). See caddy/Caddyfile.
+  caddy:
+    image: caddy:2
+    container_name: vigilume-caddy
+    restart: unless-stopped
+    profiles: ["tls"]
+    environment:
+      # Host on the self-signed cert; browse https://<this>:8443. Defaults to
+      # the box's LAN IP. A single-label mDNS name (e.g. nvr.local) works too
+      # if your LAN resolves it.
+      - TLS_HOSTNAME=${TLS_HOSTNAME:-192.168.1.253}
+    ports:
+      - "8443:8443"
+    volumes:
+      # DIRECTORY, not the Caddyfile itself: on Unraid /mnt/user is shfs (FUSE)
+      # and a single-FILE bind mount fails in runc. Caddy reads
+      # /etc/caddy/Caddyfile by default, so the path is unchanged.
+      - ./caddy:/etc/caddy:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - web
+
+volumes:
+  caddy-data:
+  caddy-config:

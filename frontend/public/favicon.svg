@@ -1,0 +1,30 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Vigilume NVR">
+  <defs>
+    <radialGradient id="field" cx="0.5" cy="0.5" r="0.62">
+      <stop offset="0" stop-color="#101724"/>
+      <stop offset="1" stop-color="#0b1017"/>
+    </radialGradient>
+  </defs>
+
+  <!-- dark rounded field + subtle inner border -->
+  <rect width="512" height="512" rx="112" fill="url(#field)"/>
+  <rect x="12" y="12" width="488" height="488" rx="103" fill="none" stroke="#223047" stroke-width="4"/>
+
+  <!-- centered Sentinel Shield: lifted dark interior + sky-blue outline
+       (reference path in a 170 box, mapped to 512 and vertically centred) -->
+  <path d="M256 88.8 C313.2 103.9 367.4 119 379.5 137 L379.5 257.5
+           C379.5 335.8 325.3 390 256 423.2 C186.7 390 132.5 335.8 132.5 257.5
+           L132.5 137 C144.6 119 198.8 103.9 256 88.8 Z"
+        fill="#0e1a2b" stroke="#38bdf8" stroke-width="15" stroke-linejoin="round"/>
+
+  <!-- ascending signal: lower chevron (dimmer) then upper (brighter) -->
+  <polyline points="210.8,335.8 256,257.5 301.2,335.8" fill="none"
+            stroke="#38bdf8" stroke-opacity="0.75" stroke-width="21"
+            stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline points="192.8,269.6 256,179.2 319.2,269.6" fill="none"
+            stroke="#7dd3fc" stroke-width="27"
+            stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- bright catch-light dot just above the top chevron -->
+  <circle cx="256" cy="164.1" r="13.5" fill="#bfe8fd"/>
+</svg>

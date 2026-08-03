@@ -1,0 +1,43 @@
+# Vigilume NVR backend — common dependencies (both Docker targets).
+# ONNX Runtime is intentionally split out: requirements-gpu.txt pins
+# onnxruntime-gpu (the "gpu" Docker target, production default) and
+# requirements-cpu.txt pins the CPU wheel (the "cpu" dev/test target and
+# the Mac dev venv).
+
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+httpx>=0.27,<1
+# No h2 here: this backend speaks plain HTTPS to the relay ({relay_url}/api/push).
+# APNs itself is HTTP/2-only, but only relay/ talks to Apple — see
+# relay/requirements.txt's httpx[http2].
+PyYAML>=6.0,<7
+aiosqlite>=0.20,<1
+# NOT for APNs — notify/apns.py signs nothing now (the .p8 lives only in the
+# relay). app/auth.py needs it for the session tokens.
+PyJWT>=2.8,<3
+pywebpush>=2.0,<3
+cryptography>=42
+
+# Camera on-board AI events over ONVIF PullPoint (app/amcrest/ai_events.py) —
+# the Dahua CGI event stream pushes nothing on the Amcrest AI turrets (firmware
+# limitation), but ONVIF PullPoint works. onvif-zeep is a THIN wrapper over zeep
+# (SOAP) + lxml; it bundles the ONVIF WSDL/XSD tree as package data (installed
+# to site-packages/wsdl), so the Docker image needs no extra apt libs — the zeep
+# / lxml / isodate deps come as manylinux wheels. Imported LAZILY inside the AI
+# listener, so the app still boots without a camera reachable.
+onvif-zeep>=0.2.12,<0.3
+
+# Outbound MQTT + Home Assistant auto-discovery publisher (app/integrations/
+# mqtt_ha.py). Imported LAZILY — the app runs fine without it / without a
+# broker; only the MQTT integration needs it. aiomqtt 2.x wraps paho-mqtt 2.x.
+aiomqtt>=2.0,<3
+
+numpy>=1.26
+
+# Detection stack pins (verified 2026-07 — see docs/native-mode-design.md):
+# - supervision <0.30: sv.ByteTrack is removed in 0.30; we never use it, the
+#   cap protects annotate.py from unrelated churn.
+# - trackers ==2.4.0 EXACTLY: the 2.5.0 wheel on PyPI is broken/empty
+#   (contains no package code; import fails). Re-check 2.5.x before bumping.
+supervision>=0.29.1,<0.30
+trackers==2.4.0

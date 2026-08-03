@@ -1,0 +1,36 @@
+# Vigilume NVR — LOCAL HTTPS front-end (compose profile "tls").
+#
+#   COMPOSE_PROFILES=tls  in .env, then:
+#   docker compose --profile tls up -d caddy
+#
+# WHY THIS EXISTS. A browser only grants "powerful features" on a SECURE
+# CONTEXT, and plain http://<lan-ip>:8080 is not one. That silently disables:
+#   * getUserMedia  -> the doorbell's two-way talk button renders DISABLED
+#                      (CameraDetail.tsx gates on window.isSecureContext, and
+#                       lib/talk.ts refuses outright)
+#   * service worker / PWA install
+#   * Web Push
+# Terminating TLS here on the LAN turns the browser into a secure context, so
+# the mic works — with the browser served entirely from your own network.
+#
+# FULLY OFFLINE. `tls internal` makes Caddy its own certificate authority: no
+# Let's Encrypt, no Cloudflare, no DNS, no outbound connection of any kind. The
+# certificate is issued for whatever host you browse (the box's LAN IP by
+# default). The one cost is trusting Caddy's root CA once per device — export
+# and install steps are in docs/remote-access.md. The root lives in the
+# `caddy-data` volume and survives container recreation, so devices trust it
+# once and never again.
+#
+# BROWSE:  https://192.168.1.253:8443   (set TLS_HOSTNAME in .env to change the
+# host — the box IP, or a single-label mDNS name like nvr.local that your LAN
+# resolves; iOS trusts a name more smoothly than a bare IP).
+
+{$TLS_HOSTNAME:192.168.1.253}:8443 {
+	tls internal
+
+	# Everything — the SPA, /api (incl. the /api/ws and /talk WebSockets) and
+	# /go2rtc (the live-view signalling WebSocket) — goes to nginx in the `web`
+	# container, which keeps its deny-by-default go2rtc allowlist. Caddy proxies
+	# WebSocket upgrades transparently, so no extra config is needed.
+	reverse_proxy web:80
+}

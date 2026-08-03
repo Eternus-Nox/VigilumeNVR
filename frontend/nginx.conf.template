@@ -1,0 +1,268 @@
+# Vigilume NVR — web container (SPA + reverse proxy, single origin).
+# Serves the PWA and proxies /api -> backend:8000, /go2rtc -> ${GO2RTC_UPSTREAM}.
+#
+# TEMPLATE: rendered at container start by the stock nginx image entrypoint
+# (20-envsubst-on-templates.sh) with NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx, so
+# this file becomes /etc/nginx/nginx.conf. envsubst substitutes ONLY env vars
+# that are actually defined in the container; every other $var below is a
+# lowercase nginx runtime variable and no defined env var shares those names,
+# so they pass through untouched. The single intended substitution is the
+# GO2RTC_UPSTREAM env (default http://go2rtc:1984, set via Dockerfile ENV).
+#
+# Upstreams use the variable-in-proxy_pass + resolver pattern so nginx starts
+# (and keeps running) even when a target hostname does not resolve yet —
+# e.g. while the go2rtc container is still waiting on the backend healthcheck
+# or is being recreated.
+
+worker_processes auto;
+# `warn` restored. It was dropped to `error` because nginx writes the full
+# request line — query string included — into this log, where `log_format` does
+# NOT apply, so a `?token=` URL printed a live 30-day admin JWT in cleartext.
+# The WebSocket routes now carry their token in Sec-WebSocket-Protocol (a
+# header, never in a URL), so warn-level lines are safe to keep again — and
+# they are worth keeping: warn is where upstream hiccups show up first.
+#
+# STILL IN URLS, by necessity: the MEDIA routes (snapshot/clip/playlist/seg),
+# because <img>/<video>/AVPlayer cannot set headers. Those tokens are
+# viewer-role and bound to one event (auth.create_media_token `res` claim), so
+# one appearing in a log is far less serious than a session JWT was.
+error_log /var/log/nginx/error.log warn;
+pid /var/run/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    types {
+        application/manifest+json webmanifest;
+    }
+
+    # $uri, NOT $request. $request is the full request line INCLUDING the query
+    # string, and several routes carry a JWT there by necessity — the browser
+    # media stack and WebSocket cannot set an Authorization header, so
+    # /api/ws?token=, /api/cameras/{n}/talk?token= and every media URL pass it
+    # as a query param. Logging $request therefore wrote 30-day full-privilege
+    # admin session tokens in cleartext into access.log, where they outlive any
+    # logout and are readable by anything that can read container logs.
+    # $uri is the decoded path with the query string already stripped.
+    log_format main '$remote_addr - [$time_local] "$request_method $uri $server_protocol" $status $body_bytes_sent "$http_user_agent"';
+    access_log /var/log/nginx/access.log main;
+
+    sendfile on;
+    tcp_nopush on;
+    keepalive_timeout 65;
+    server_tokens off;
+
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css application/json application/javascript
+               application/manifest+json image/svg+xml;
+
+    map $http_upgrade $connection_upgrade {
+        default upgrade;
+        ''      close;
+    }
+
+    # ── go2rtc surface reduction: DENY BY DEFAULT ────────────────────────────
+    # The /go2rtc/ proxy is UNAUTHENTICATED (see the location below). That was
+    # thought to mean "someone who guesses a camera slug can watch it". It is
+    # worse: in the pinned go2rtc v1.9.14, the frame/stream handlers route
+    # through streams.GetOrPatch, so `?src=<attacker-url>&name=<camera>`
+    # REPOINTS a real camera's stream at a source of the caller's choosing —
+    # the same stream the recorder writes 24/7 and the detector reads. POST
+    # api/webrtc?dst=<camera> (WHIP) can likewise inject video into it. Also
+    # exposed: api/frame.jpeg (a still), api/stream.mp4 (an unbounded
+    # download), api/stack (goroutine dump) and api/onvif (LAN WS-Discovery).
+    # None of those is used by any Vigilume client.
+    #
+    # So rather than authenticate this proxy, shrink it: allow ONLY the four
+    # paths our clients actually use, each only with a query string of exactly
+    # the right shape. No credential is involved, so nothing here can expire,
+    # leak into a log, or lock a client out.
+    map $uri $go2rtc_kind {
+        default                        deny;
+        "~^/go2rtc/api/ws$"            entry;   # web  — MSE/WebRTC negotiation
+        "~^/go2rtc/api/webrtc$"        entry;   # iOS  — WHEP
+        "~^/go2rtc/api/stream\.m3u8$"  entry;   # iOS  — HLS/fMP4
+        "~^/go2rtc/api/hls/"           hls;     # go2rtc-minted HLS children
+    }
+
+    # Match the WHOLE query string, NEVER $arg_src. nginx looks arg names up
+    # case-INSENSITIVELY while Go's Query().Get("src") is case-SENSITIVE, so a
+    # per-arg check on `?SRC=front&src=rtsp://evil` would inspect the harmless
+    # value and hand go2rtc the hostile one. Whole-$args matching also denies
+    # the `name=` and `dst=` write parameters outright.
+    # Slug bound: backend enforces ^[a-z][a-z0-9_]{0,31}$ (cameras.py), plus a
+    # `_sub` suffix — 63 leaves generous headroom.
+    map $args $go2rtc_args_ok {
+        default                                                  0;
+        "~^src=[a-z][a-z0-9_]{0,63}$"                            1;
+        "~^src=[a-z][a-z0-9_]{0,63}&mp4$"                        1;
+        # TRANSITIONAL. Web bundles built before the LivePlayer fix append the
+        # session JWT here. A cached PWA/kiosk tab can run for weeks, so this
+        # stays until those have certainly cycled — then delete this line.
+        "~^src=[a-z][a-z0-9_]{0,63}&token=[A-Za-z0-9._~+/=-]+$"  1;
+    }
+
+    # go2rtc mints the HLS child URIs itself (`?id=<...>`), and the HLS
+    # handlers use streams.Get rather than GetOrPatch, so they cannot be used
+    # to repoint a stream — hence `hls` passes with any query.
+    map "$go2rtc_kind:$go2rtc_args_ok" $go2rtc_block {
+        default    1;
+        "entry:1"  0;
+        "hls:0"    0;
+        "hls:1"    0;
+    }
+
+
+    server {
+        listen 80;
+        server_name _;
+        root /usr/share/nginx/html;
+        index index.html;
+
+        client_max_body_size 10m;
+
+        # Docker's embedded DNS. Variable proxy_pass targets are resolved at
+        # request time (re-resolved every 30s), not at startup.
+        resolver 127.0.0.11 valid=30s ipv6=off;
+
+        # ── Backend API (incl. WebSocket upgrade on /api/ws) ──
+        location /api/ {
+            set $backend_upstream http://backend:8000;
+            # No URI part + variable target: the original request URI
+            # (/api/...) is passed to the backend unchanged.
+            proxy_pass $backend_upstream;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+            proxy_buffering off;      # event streams + long polls + clip streaming
+            proxy_request_buffering off;
+        }
+
+        # ── go2rtc hardening ──
+        # The /go2rtc/ proxy is unauthenticated (the live-view video element
+        # can't attach a bearer token), and go2rtc's own API otherwise exposes
+        # camera RTSP URLs *with passwords* (GET /api/streams, /api/config) and
+        # lets anyone add/remove streams or restart the process. The clients only
+        # ever use api/ws, api/webrtc and api/stream.m3u8 (verified), so deny the
+        # metadata/admin endpoints + the go2rtc web UI while the streaming paths
+        # below still proxy. (go2rtc:1984 itself is not published to the host.)
+        location = /go2rtc/            { return 403; }   # go2rtc web UI root
+        location = /go2rtc/api         { return 403; }   # info + full config dump
+        location ^~ /go2rtc/api/streams { return 403; }  # leaks rtsp://user:pass@…
+        location ^~ /go2rtc/api/config  { return 403; }  # config get/set
+        location ^~ /go2rtc/api/restart { return 403; }
+        location ^~ /go2rtc/api/exit    { return 403; }
+        location ^~ /go2rtc/api/ffmpeg  { return 403; }
+        location ^~ /go2rtc/api/log     { return 403; }
+
+        # ── go2rtc (MSE live view WebSocket at /go2rtc/api/ws?src=<camera>) ──
+        location /go2rtc/ {
+            # Deny-by-default allowlist — see the $go2rtc_* maps above. `return`
+            # is the ONLY directive that is safe inside `if` in a location.
+            if ($go2rtc_block) { return 403; }
+            set $go2rtc_upstream ${GO2RTC_UPSTREAM};
+            # Variable proxy_pass can't carry a URI suffix to strip the
+            # prefix, so rewrite does it (query string is preserved).
+            rewrite ^/go2rtc/(.*)$ /$1 break;
+            proxy_pass $go2rtc_upstream;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+            proxy_buffering off;
+        }
+
+
+        # ── PWA control files: always revalidate ──
+        location = /index.html {
+            # Security headers repeated here: nginx add_header is inherited
+            # ONLY when the current level defines none, so the Cache-Control
+            # below would otherwise silently drop the server-level set.
+            add_header X-Content-Type-Options "nosniff" always;
+            add_header X-Frame-Options "DENY" always;
+            add_header Referrer-Policy "no-referrer" always;
+            add_header Cache-Control "no-cache";
+        }
+        location = /sw.js {
+            # Security headers repeated here: nginx add_header is inherited
+            # ONLY when the current level defines none, so the Cache-Control
+            # below would otherwise silently drop the server-level set.
+            add_header X-Content-Type-Options "nosniff" always;
+            add_header X-Frame-Options "DENY" always;
+            add_header Referrer-Policy "no-referrer" always;
+            add_header Cache-Control "no-cache";
+        }
+        location = /manifest.webmanifest {
+            # Security headers repeated here: nginx add_header is inherited
+            # ONLY when the current level defines none, so the Cache-Control
+            # below would otherwise silently drop the server-level set.
+            add_header X-Content-Type-Options "nosniff" always;
+            add_header X-Frame-Options "DENY" always;
+            add_header Referrer-Policy "no-referrer" always;
+            add_header Cache-Control "no-cache";
+        }
+
+        # ── Hashed build assets: immutable ──
+        location /assets/ {
+            # Security headers repeated here: nginx add_header is inherited
+            # ONLY when the current level defines none, so the Cache-Control
+            # below would otherwise silently drop the server-level set.
+            add_header X-Content-Type-Options "nosniff" always;
+            add_header X-Frame-Options "DENY" always;
+            add_header Referrer-Policy "no-referrer" always;
+            add_header Cache-Control "public, max-age=31536000, immutable";
+            try_files $uri =404;
+        }
+
+        # icons / favicon: cacheable but revalidated daily
+        location /icons/ {
+            # Security headers repeated here: nginx add_header is inherited
+            # ONLY when the current level defines none, so the Cache-Control
+            # below would otherwise silently drop the server-level set.
+            add_header X-Content-Type-Options "nosniff" always;
+            add_header X-Frame-Options "DENY" always;
+            add_header Referrer-Policy "no-referrer" always;
+            add_header Cache-Control "public, max-age=86400";
+            try_files $uri =404;
+        }
+
+        # ── SPA fallback ──
+        location / {
+            # ── security headers ──
+            # SCOPED TO THE DOCUMENT ORIGIN, not the whole server. The session
+            # JWT lives in localStorage, so any script execution HERE reads it;
+            # that is what these defend.
+            #   nosniff       — stop a served asset being reinterpreted as script.
+            #   DENY          — no framing, so a hostile page cannot clickjack
+            #                   the camera controls or Privacy Mode toggle.
+            #   no-referrer   — never leak a ?token= URL via Referer.
+            # `always` so they are emitted on error responses too.
+            #
+            # Deliberately NOT at server level any more: /api/ and /go2rtc/ are
+            # binary proxies, not HTML origins, so the headers bought nothing
+            # there — and nosniff on a proxied media response is a real risk of
+            # breaking playback if the upstream Content-Type is imprecise. The
+            # static-file locations below repeat the trio because nginx drops
+            # inherited add_headers as soon as a location defines its own.
+            add_header X-Content-Type-Options "nosniff" always;
+            add_header X-Frame-Options "DENY" always;
+            add_header Referrer-Policy "no-referrer" always;
+            try_files $uri $uri/ /index.html;
+        }
+    }
+}

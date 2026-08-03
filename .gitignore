@@ -1,0 +1,17 @@
+# Secrets & runtime state
+.env
+data/
+media/
+go2rtc/config/
+
+# Node
+node_modules/
+frontend/dist/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS
+.DS_Store

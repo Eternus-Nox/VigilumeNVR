@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex" />
+<title>Privacy Policy — Vigilume</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; background: #0b1017; color: #dbe4f0;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6; font-size: 16px;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 2.4rem 1.2rem 4rem; }
+  h1 { font-size: 1.7rem; letter-spacing: 0.01em; margin: 0 0 0.3rem; }
+  h2 { font-size: 1.12rem; margin: 2rem 0 0.5rem; color: #eaf2fb; }
+  a { color: #38bdf8; }
+  .brand { display: flex; align-items: center; gap: 0.6rem; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; font-size: 0.85rem; color: #8294ab; margin-bottom: 1.6rem; }
+  .brand .dot { width: 10px; height: 10px; border-radius: 3px; background: #38bdf8; }
+  .muted { color: #8294ab; }
+  .small { font-size: 0.85rem; }
+  ul { padding-left: 1.2rem; }
+  li { margin: 0.3rem 0; }
+  .card { background: #101724; border: 1px solid #1e2a3d; border-radius: 10px; padding: 0.9rem 1.1rem; margin: 1.2rem 0; }
+  footer { margin-top: 2.5rem; padding-top: 1.2rem; border-top: 1px solid #1e2a3d; color: #8294ab; font-size: 0.85rem; }
+  footer a { margin-right: 1rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand"><span class="dot"></span> Vigilume</div>
+  <h1>Privacy Policy</h1>
+  <p class="muted small">Effective 13 July 2026</p>
+
+  <p>Vigilume is a <strong>self-hosted</strong> network video recorder. You run the Vigilume server on hardware you control. Your camera streams, recordings, detection events, and account data are stored <strong>only on your own server</strong>. The Vigilume app and its authors operate no cloud service that receives, stores, or analyzes your video, and cannot access it.</p>
+
+  <h2>What data is handled, and where</h2>
+  <ul>
+    <li><strong>Video, recordings, and events</strong> — captured from your cameras and stored on your self-hosted server. Never transmitted to us or to any third party by the app.</li>
+    <li><strong>Account &amp; settings</strong> — your login and configuration live on your server.</li>
+    <li><strong>Push notifications</strong> — to deliver alerts to your device, a push token and minimal routing metadata pass through a push relay and then Apple Push Notification service (APNs). Notification <em>content</em> (camera name, snapshot reference, message) is <strong>end-to-end encrypted (AES-256-GCM)</strong> before it leaves your server; the relay forwards it but cannot read it.</li>
+    <li><strong>No analytics, no advertising, no tracking</strong> — the app contains no third-party analytics, ad, or tracking SDKs, and sends no usage telemetry.</li>
+  </ul>
+
+  <h2>Device permissions (iOS)</h2>
+  <ul>
+    <li><strong>Local network</strong> — to reach your server and cameras on your LAN.</li>
+    <li><strong>Notifications</strong> — to show event alerts.</li>
+    <li><strong>Microphone</strong> — only when you use two-way talk to a camera.</li>
+  </ul>
+  <p>These are used solely to provide app functionality. Nothing captured is sent to the app authors.</p>
+
+  <h2>You are the data controller</h2>
+  <div class="card small">Because Vigilume is self-hosted, the person or organization operating a Vigilume server is the <strong>data controller</strong> for any footage of identifiable people it records, and is responsible for using it lawfully — including any local requirements for consent, notice/signage, and audio-recording restrictions. See the <a href="/terms.html">Terms of Use</a>.</div>
+
+  <h2>Data retention &amp; deletion</h2>
+  <p>Recordings and events are retained per the retention settings you configure on your server, and are deleted from your storage accordingly. Because we hold none of your data, deletion is entirely under your control on your server.</p>
+
+  <h2>Children</h2>
+  <p>Vigilume is not directed to children and does not knowingly collect data from them.</p>
+
+  <h2>Changes</h2>
+  <p>We may update this policy; the effective date above will change. Material changes will be noted in the app or release notes.</p>
+
+  <h2>Contact</h2>
+  <p>Questions about this policy: <a href="mailto:adamrpowell94@gmail.com">adamrpowell94@gmail.com</a>.</p>
+
+  <footer>
+    <a href="/terms.html">Terms of Use</a>
+    <a href="/">Return to app</a>
+  </footer>
+</div>
+</body>
+</html>

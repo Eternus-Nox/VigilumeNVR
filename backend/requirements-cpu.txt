@@ -1,0 +1,2 @@
+# CPU inference — "cpu" Docker target (dev/tests ONLY) and dev venvs.
+onnxruntime==1.27.0

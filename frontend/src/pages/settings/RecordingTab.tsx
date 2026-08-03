@@ -1,0 +1,298 @@
+/**
+ * Settings → Recording: retention windows for Vigilume's own recorder and
+ * the object-detection engine. The detector model is now chosen through the
+ * tiered download manager (which activates instantly, out-of-band from this
+ * form); this tab keeps the retention windows and the confidence slider.
+ */
+import { useEffect, useState } from 'react';
+import { CORAL_MODELS, type CoralModel, type DetectionBackend, type DetectMode } from '../../lib/api';
+import { useAdoptSaved, type TabProps } from '../Settings';
+import DetectionModels from './DetectionModels';
+
+export default function RecordingTab({ settings, onDraftChange, pending }: TabProps) {
+  // Seed from the shell's pending draft when there is one, so leaving this tab
+  // and coming back keeps your edits (there is one Save for all tabs now).
+  const [recording, setRecording] = useState({
+    ...settings.recording,
+    ...(pending.recording ?? {}),
+  });
+  const [confidence, setConfidence] = useState(
+    pending.detection?.confidence ?? settings.detection.confidence,
+  );
+  // Global default detection-gating mode for newly added cameras. Optional on
+  // the backend — fall back to "always" (today's behavior) when absent.
+  const [defaultMode, setDefaultMode] = useState<DetectMode>(
+    pending.detection?.default_mode ?? settings.detection.default_mode ?? 'always',
+  );
+  // Which silicon runs inference. Absent on an older backend -> treat as gpu.
+  const [backend, setBackend] = useState<DetectionBackend>(
+    pending.detection?.backend ?? settings.detection.backend ?? 'auto',
+  );
+  // Edge TPU model. A SEPARATE field from the D-FINE tier, so switching backend
+  // back and forth never leaves an invalid model/backend pair.
+  const [coralModel, setCoralModel] = useState<CoralModel>(
+    pending.detection?.coral_model ?? settings.detection.coral_model ?? 'ssdlite_mobiledet',
+  );
+  // No `modelKey` mirror here any more. It existed solely so this form's PUT
+  // could re-send the current model instead of clobbering a fresh activation
+  // from <DetectionModels>. The patch names only `confidence` and
+  // `default_mode`, so it cannot touch `detection.model` at all.
+
+  // Adopt a freshly SAVED document. Skips the initial mount so the pending
+  // draft seeded above is not clobbered when you return to this tab.
+  useAdoptSaved(settings.recording, setRecording);
+  useAdoptSaved(settings.detection.confidence, setConfidence);
+  useAdoptSaved(settings.detection.default_mode ?? 'always', setDefaultMode);
+  useAdoptSaved(settings.detection.backend ?? 'auto', setBackend);
+  useAdoptSaved(settings.detection.coral_model ?? 'ssdlite_mobiledet', setCoralModel);
+
+  // Report this tab's slice up on every edit; the shell's single Save button
+  // persists it together with every other tab's pending changes.
+  useEffect(() => {
+    onDraftChange({
+      recording,
+      detection: {
+        confidence, default_mode: defaultMode, backend, coral_model: coralModel,
+      },
+    });
+  }, [recording, confidence, defaultMode, backend, coralModel, onDraftChange]);
+
+  const dayInput = (
+    label: string,
+    key: keyof typeof recording,
+    hint: string,
+  ) => (
+    <label>
+      {label}
+      <input
+        type="number"
+        min={0}
+        max={365}
+        value={recording[key]}
+        onChange={(e) =>
+          setRecording({ ...recording, [key]: Math.max(0, Math.floor(Number(e.target.value) || 0)) })
+        }
+      />
+      <span className="control-hint">{hint}</span>
+    </label>
+  );
+
+  return (
+    <div className="settings-section">
+      <section className="card">
+        <h2>Retention</h2>
+        <p className="muted small">
+          How long recordings stay on disk before the hourly cleanup removes them. Rule of
+          thumb: continuous recording uses ≈ 10.8 GB per day for every 1 Mbps of combined
+          camera bitrate (a typical 3-camera setup ≈ 135 GB/day, so 7 days ≈ 1 TB).
+        </p>
+        <div className="form-stack">
+          {dayInput('Continuous recording (days)', 'continuous_days', '24/7 footage kept on disk')}
+          {dayInput('Event clips (days)', 'event_days', 'per-event recordings')}
+          {dayInput('Snapshots (days)', 'snapshot_days', 'event snapshot images')}
+        </div>
+      </section>
+
+      <section className="card">
+        <h2>Detection model</h2>
+        <p className="muted small">
+          Pick a tier to match your hardware. Models download inside the app with progress and
+          activate live — the app keeps serving while a model loads in the background, so a
+          fresh install starts fast. Switching tiers causes a brief detection gap while the new
+          model loads.
+        </p>
+        {backend !== 'coral' ? (
+          <DetectionModels />
+        ) : (
+          // Same tier CARDS as the GPU list (.model-tier), not a radio column:
+          // the two backends are alternatives for one job, so presenting them
+          // differently made the Edge TPU read like a lesser, secondary control.
+          <div className="model-manager">
+            <div className="model-tiers">
+              {CORAL_MODELS.map((m) => {
+                const enabled = coralModel === m.key;
+                return (
+                  <div key={m.key} className={`card model-tier ${enabled ? 'active' : ''}`}>
+                    <div className="model-tier-head">
+                      <span className="model-tier-name">{m.label}</span>
+                      {enabled && <span className="pill pill-ok">Enabled</span>}
+                    </div>
+                    <p className="model-tier-blurb small">{m.blurb}</p>
+                    <div className="model-tier-meta">
+                      {/* Edge TPU SSD models emit the sparse COCO-90 id space,
+                          which the backend remaps to the same COCO-80 vocabulary
+                          the GPU models use. */}
+                      <span className="pill pill-vocab">COCO · 80 classes</span>
+                      <span className="pill">{m.map.toFixed(1)} mAP</span>
+                      <span className="pill">~{m.latencyMs} ms</span>
+                      <span className="pill">{m.inputSize}px</span>
+                    </div>
+                    {m.slow && (
+                      <div className="model-tier-rec muted small">
+                        Sustains under 10 inferences/sec — about what two cameras at 5 fps
+                        already demand.
+                      </div>
+                    )}
+                    <div className="model-tier-action">
+                      <button
+                        type="button"
+                        className={`btn btn-sm btn-block${enabled ? '' : ' btn-primary'}`}
+                        disabled={enabled}
+                        onClick={() => setCoralModel(m.key)}
+                      >
+                        {enabled ? 'Enabled' : 'Use this model'}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="muted small">
+              Downloaded and checksum-verified on first use. Switching models reloads
+              the detector — detection pauses for a few seconds.
+            </p>
+            {CORAL_MODELS.find((m) => m.key === coralModel)?.slow && (
+              <div className="banner banner-warn">
+                <span>
+                  At ~{CORAL_MODELS.find((m) => m.key === coralModel)?.latencyMs} ms the
+                  model you have selected sustains under 10 inferences/sec — roughly what
+                  two cameras at 5 fps already demand. Frames will be dropped under load.
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>Detection hardware</h2>
+        <p className="muted small">
+          Which silicon runs object detection. Takes effect on the next{' '}
+          <strong>backend restart</strong> (Settings → System → Restart server).
+        </p>
+        {/* Segmented control, matching the spotlight / night-vision pickers
+            elsewhere — two mutually exclusive choices read better side by side
+            than as a stacked radio list. */}
+        <div className="seg seg-full" role="group" aria-label="Detection hardware">
+          {([
+            { key: 'auto', label: 'Automatic' },
+            { key: 'gpu', label: 'GPU' },
+            { key: 'coral', label: 'Coral Edge TPU' },
+          ] as const).map(({ key, label }) => (
+            <button
+              key={key}
+              type="button"
+              className={`seg-btn${backend === key ? ' seg-on' : ''}`}
+              aria-pressed={backend === key}
+              onClick={() => setBackend(key)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <p className="muted small">
+          {backend === 'auto'
+            ? 'Uses a Coral Edge TPU when one is fitted, otherwise the GPU. '
+              + 'Fit or remove a Coral and it is picked up on the next restart.'
+            : backend === 'gpu'
+              ? 'D-FINE on CUDA — highest accuracy.'
+              : 'SSDLite MobileDet on the Edge TPU — about 2 W instead of the GPU.'}
+        </p>
+        {backend === 'coral' && (
+          <div className="banner banner-warn">
+            <span>
+              <strong>Requires a Coral Edge TPU fitted to this machine.</strong> If it is
+              missing or the driver is not loaded, detection will not start at all —
+              check Settings → System for the detector status after restarting.
+              Accuracy also drops (COCO mAP ~54 → ~33), and the loss falls hardest on
+              small, distant and night-time people.
+            </span>
+          </div>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>Default detection mode</h2>
+        <p className="muted small">
+          How the GPU detector is scheduled for a newly added camera. Cameras with their own
+          on-camera AI (SMD human/vehicle, IVS tripwire/intrusion) can gate detection on that
+          signal to cut GPU load. Change it per camera under Settings → Cameras → Edit.
+        </p>
+        <div className="form-stack">
+          {/* Primary control mirrors the per-camera one: ON = camera_ai, OFF =
+              always. The advanced segmented control keeps camera_ai_only
+              reachable. All three write the same default_mode. */}
+          <div className="switch-row">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={defaultMode !== 'always'}
+              aria-label="Default to camera AI detection"
+              className={`switch ${defaultMode !== 'always' ? 'switch-on' : ''}`}
+              onClick={() =>
+                setDefaultMode(defaultMode !== 'always' ? 'always' : 'camera_ai')
+              }
+            >
+              <span className="switch-knob" />
+            </button>
+            <span className="switch-label">
+              {defaultMode !== 'always'
+                ? 'New cameras gate the GPU on their on-board AI'
+                : 'New cameras run continuous server detection'}
+            </span>
+          </div>
+          <details className="advanced-section" open={defaultMode === 'camera_ai_only'}>
+            <summary>Advanced — where detection runs</summary>
+            <div className="seg" role="group" aria-label="Default detection mode">
+              {(
+                [
+                  ['always', 'Server'],
+                  ['camera_ai', 'Camera-triggered'],
+                  ['camera_ai_only', 'On-camera only'],
+                ] as [DetectMode, string][]
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  className={`seg-btn ${defaultMode === value ? 'seg-on' : ''}`}
+                  aria-pressed={defaultMode === value}
+                  onClick={() => setDefaultMode(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <span className="control-hint">
+              <strong>Camera-triggered</strong> runs detection only when a camera&rsquo;s own AI
+              sees motion — big GPU savings; may miss what the camera AI misses. Only applies to
+              cameras that report on-camera AI; others always run detection.
+            </span>
+          </details>
+        </div>
+      </section>
+
+      <section className="card">
+        <h2>Confidence</h2>
+        <div className="form-stack">
+          <label>
+            Confidence threshold: {Math.round(confidence * 100)}%
+            <input
+              type="range"
+              min={0.2}
+              max={0.9}
+              step={0.05}
+              value={confidence}
+              onChange={(e) => setConfidence(Number(e.target.value))}
+            />
+            <span className="control-hint">
+              Lower catches more (and more false positives); higher only keeps sure detections.
+            </span>
+          </label>
+        </div>
+      </section>
+
+      {/* No Save button here by design — the shell owns the single Save for
+          every settings tab. This page reports its slice via onDraftChange. */}
+    </div>
+  );
+}
