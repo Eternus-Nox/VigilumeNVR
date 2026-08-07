@@ -1,11 +1,11 @@
-// Generates the "Sentinel Shield" app icon (a centered shield with an ascending
+// Generates the "Vigilume Shield" app icon (a centered shield with an ascending
 // signal of nested chevrons) as PNGs, with zero dependencies. Pure-math
 // rasterizer (signed distance fields, 1px feathered AA) + minimal PNG encoder
 // (RGBA8 *and* opaque RGB8, via node:zlib). Deterministic — no randomness.
 //
 // Outputs:
 //   • Web PWA icons -> frontend/public/icons  (run as the `prebuild` npm script)
-//   • iOS AppIcon   -> ios/Sentinel/Assets.xcassets/AppIcon.appiconset (opaque,
+//   • iOS AppIcon   -> ios/Vigilume/Assets.xcassets/AppIcon.appiconset (opaque,
 //     RGB, no alpha — the App Store rejects alpha on the 1024 master). Written
 //     only when that directory exists, so the web build stays self-contained.
 //
@@ -24,7 +24,7 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = join(SCRIPT_DIR, '..', 'public', 'icons');
 const IOS_DIR = join(
   SCRIPT_DIR, '..', '..',
-  'ios', 'Sentinel', 'Assets.xcassets', 'AppIcon.appiconset',
+  'ios', 'Vigilume', 'Assets.xcassets', 'AppIcon.appiconset',
 );
 
 // ---------- PNG encoding ----------

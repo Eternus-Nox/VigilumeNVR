@@ -34,7 +34,7 @@ const FRAME_SAMPLES = 320;
 
 /** Inline AudioWorklet module: forwards raw Float32 capture chunks to main. */
 const WORKLET_SOURCE = `
-class SentinelPttCapture extends AudioWorkletProcessor {
+class VigilumePttCapture extends AudioWorkletProcessor {
   process(inputs) {
     const ch = inputs[0] && inputs[0][0];
     if (ch && ch.length) {
@@ -44,7 +44,7 @@ class SentinelPttCapture extends AudioWorkletProcessor {
     return true;
   }
 }
-registerProcessor('sentinel-ptt-capture', SentinelPttCapture);
+registerProcessor('vigilume-ptt-capture', VigilumePttCapture);
 `;
 
 function faultForClose(code: number): TalkFault | null {
@@ -272,7 +272,7 @@ export class TalkSession {
         } finally {
           URL.revokeObjectURL(blobUrl);
         }
-        const node = new AudioWorkletNode(ctx, 'sentinel-ptt-capture', {
+        const node = new AudioWorkletNode(ctx, 'vigilume-ptt-capture', {
           numberOfInputs: 1,
           numberOfOutputs: 1,
           channelCount: 1,

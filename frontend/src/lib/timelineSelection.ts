@@ -8,7 +8,11 @@
  * a deleted/renamed camera silently drops out.
  */
 
-export const TIMELINE_CAMERAS_KEY = 'sentinel.timeline.cameras';
+import { migrateKey } from './legacyStorage';
+
+export const TIMELINE_CAMERAS_KEY = 'vigilume.timeline.cameras';
+/** Pre-rename key (the app shipped as "Sentinel"), migrated on first read. */
+const LEGACY_TIMELINE_CAMERAS_KEY = 'sentinel.timeline.cameras';
 
 /**
  * Max cameras scrubbed in sync. Bounded by consumer NVIDIA NVENC concurrent
@@ -23,7 +27,7 @@ export const MAX_TIMELINE_CAMERAS = 4;
  */
 export function readStoredCameras(): string[] | null {
   try {
-    const raw = localStorage.getItem(TIMELINE_CAMERAS_KEY);
+    const raw = migrateKey(TIMELINE_CAMERAS_KEY, LEGACY_TIMELINE_CAMERAS_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as unknown;
     if (Array.isArray(parsed)) {

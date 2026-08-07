@@ -24,7 +24,7 @@ const isCandidateEntry = (v: string) => v.length <= 64 && IP_ISH.test(v);
 
 /** Human labels for where the backend detected the host candidate. */
 const SOURCE_LABEL: Record<NonNullable<WebrtcStatus['source']>, string> = {
-  env: 'SENTINEL_WEBRTC_HOST',
+  env: 'VIGILUME_WEBRTC_HOST',
   public_url: 'the public URL',
   auto: 'the host LAN IP',
 };

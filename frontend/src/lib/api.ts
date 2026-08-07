@@ -4,9 +4,16 @@
  * any 401 clears it and redirects to /login (preserving the return path).
  */
 
-const TOKEN_KEY = 'sentinel_token';
-const ROLE_KEY = 'sentinel_role';
-const USERNAME_KEY = 'sentinel_username';
+import { migrateKey } from './legacyStorage';
+
+const TOKEN_KEY = 'vigilume_token';
+const ROLE_KEY = 'vigilume_role';
+const USERNAME_KEY = 'vigilume_username';
+// Pre-rename keys (the app shipped as "Sentinel"). Read-through migrated on
+// first access so an existing session is preserved rather than signed out.
+const LEGACY_TOKEN_KEY = 'sentinel_token';
+const LEGACY_ROLE_KEY = 'sentinel_role';
+const LEGACY_USERNAME_KEY = 'sentinel_username';
 
 /**
  * RBAC roles. `admin` has full access (everything the app did before roles
@@ -17,11 +24,7 @@ const USERNAME_KEY = 'sentinel_username';
 export type Role = 'admin' | 'viewer';
 
 export function getToken(): string | null {
-  try {
-    return localStorage.getItem(TOKEN_KEY);
-  } catch {
-    return null;
-  }
+  return migrateKey(TOKEN_KEY, LEGACY_TOKEN_KEY);
 }
 
 export function setToken(token: string): void {
@@ -36,12 +39,8 @@ export function setToken(token: string): void {
  * (matching the backend's legacy-token compatibility).
  */
 export function getRole(): Role | null {
-  try {
-    const r = localStorage.getItem(ROLE_KEY);
-    return r === 'admin' || r === 'viewer' ? r : null;
-  } catch {
-    return null;
-  }
+  const r = migrateKey(ROLE_KEY, LEGACY_ROLE_KEY);
+  return r === 'admin' || r === 'viewer' ? r : null;
 }
 
 export function setRole(role: Role): void {
@@ -53,11 +52,7 @@ export function setRole(role: Role): void {
 }
 
 export function getUsername(): string | null {
-  try {
-    return localStorage.getItem(USERNAME_KEY);
-  } catch {
-    return null;
-  }
+  return migrateKey(USERNAME_KEY, LEGACY_USERNAME_KEY);
 }
 
 export function setUsername(username: string): void {
@@ -73,6 +68,11 @@ export function clearToken(): void {
   try {
     localStorage.removeItem(ROLE_KEY);
     localStorage.removeItem(USERNAME_KEY);
+    // Sign-out must clear the pre-rename copies too, or a stale legacy token
+    // would be migrated straight back in on the next read.
+    localStorage.removeItem(LEGACY_TOKEN_KEY);
+    localStorage.removeItem(LEGACY_ROLE_KEY);
+    localStorage.removeItem(LEGACY_USERNAME_KEY);
   } catch {
     /* ignore */
   }

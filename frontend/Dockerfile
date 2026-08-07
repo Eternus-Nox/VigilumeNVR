@@ -11,7 +11,7 @@ RUN npm run build
 # ── runtime stage ────────────────────────────────────────────
 FROM nginx:alpine
 
-# go2rtc upstream for the /go2rtc/ proxy — the Sentinel-managed go2rtc
+# go2rtc upstream for the /go2rtc/ proxy — the Vigilume-managed go2rtc
 # container (docker-compose.yml sets the same value; override via env).
 ENV GO2RTC_UPSTREAM=http://go2rtc:1984
 

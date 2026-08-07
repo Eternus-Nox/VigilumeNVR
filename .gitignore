@@ -3,6 +3,11 @@
 data/
 media/
 go2rtc/config/
+# The APNs signing key lives here. Apple lets you download a .p8 EXACTLY ONCE,
+# and a leaked one can push to every install of the app until it is revoked.
+# deploy.sh already excludes this from the rsync to the box; this line is what
+# stops a `git add -A` on a machine that HAS the key from publishing it.
+secrets/
 
 # Node
 node_modules/

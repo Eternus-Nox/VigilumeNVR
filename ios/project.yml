@@ -1,0 +1,156 @@
+name: VigilumeNVR
+options:
+  bundleIdPrefix: com.vigilume
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+# Prebuilt WebRTC binary (stasel/WebRTC — a signed dynamic xcframework shipped
+# via SPM). Powers the sub-second WHEP live path (Sources/Features/Live/
+# WHEPPlayer.swift). Pinned to an exact version so the build is reproducible;
+# `xcodebuild -resolvePackageDependencies` fetches the (~large) xcframework zip.
+packages:
+  WebRTC:
+    url: https://github.com/stasel/WebRTC
+    exactVersion: 150.0.0
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    CODE_SIGN_STYLE: Automatic
+    # DEVELOPMENT_TEAM deliberately unset — the user selects his team in Xcode.
+targets:
+  VigilumeNVR:
+    type: application
+    platform: iOS
+    # Directory glob: EVERY .swift file under Vigilume/Sources is picked up on
+    # `xcodegen generate` — feature agents add files without editing this yml.
+    sources:
+      - path: Vigilume/Sources
+      # App icon (AppIcon.appiconset — 1024px brand shield, generated from the
+      # geometry in frontend/scripts/gen-icons.mjs).
+      - path: Vigilume/Assets.xcassets
+      # Compiled into BOTH targets (E2E push crypto + shared keychain reads).
+      - path: Shared
+    dependencies:
+      - target: NotificationService   # app-extension deps embed into PlugIns automatically
+      - package: WebRTC               # dynamic xcframework — links + embeds into the app
+    entitlements:
+      path: Vigilume/Vigilume.entitlements
+      properties:
+        aps-environment: development   # auto-signing flips to production on distribution
+        # Shared with the NotificationService extension so it can read the
+        # per-server E2E push keys (docs/push-architecture.md §2). Listed
+        # FIRST (and only), so it is also the default keychain write group.
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.vigilume.app.shared
+    info:
+      path: Vigilume/Info.plist
+      properties:
+        CFBundleDisplayName: Vigilume
+        # SHIPPING version + build (the generated Info.plist takes these literals,
+        # NOT the CURRENT_PROJECT_VERSION build setting — nothing references it via
+        # $(...)). Bump CFBundleVersion for EVERY TestFlight/App Store upload: Apple
+        # requires each build be higher than the last, and the app and its
+        # NotificationService extension MUST carry the same version + build.
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "16"
+        # WebRTC.framework (live view) links AVCaptureDevice / RTCCameraVideoCapturer,
+        # so Apple's static check DEMANDS a camera purpose string even though the app
+        # never captures from the device camera — omitting it fails the upload in
+        # processing with ITMS-90683. Honest string: the app streams FROM security
+        # cameras and does not record from the phone. (Mic + photo-add strings live
+        # in Info.plist directly; keep this list and the plist in sync.)
+        NSCameraUsageDescription: >-
+          Vigilume shows live video from your security cameras. It does not record
+          from your device's own camera; this notice is required because the
+          live-streaming component links Apple's camera API.
+        # Export compliance. The app's only encryption is AES-256-GCM via Apple's
+        # CryptoKit (E2E push, Shared/PushCrypto.swift), the Keychain, and HTTPS —
+        # all standard OS crypto for the app's OWN data, no third-party libraries,
+        # not a VPN/messaging/security product. `false` asserts "does not use
+        # non-exempt encryption", which stops App Store Connect asking the
+        # export-compliance question on every build. Revisit if a non-standard
+        # cipher is ever added, or when distributing in France (extra local rules).
+        ITSAppUsesNonExemptEncryption: false
+        UILaunchScreen: {}
+        # The app is portrait by default (AppDelegate.orientationLock), but the
+        # fullscreen live view opts into landscape while it's on screen. All
+        # three must be listed here for that runtime unlock to take effect.
+        # NO PortraitUpsideDown on iPhone: nothing wants a live view hanging
+        # upside down, and Face ID phones ignore it anyway.
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # iPad MUST declare all four or App Store Connect rejects the upload
+        # with 90474 ("Invalid bundle … to support iPad multitasking"), because
+        # TARGETED_DEVICE_FAMILY below includes iPad (2) and we do not set
+        # UIRequiresFullScreen. This ~ipad key exists so satisfying that rule
+        # does NOT drag PortraitUpsideDown onto the iPhone — a bare
+        # UISupportedInterfaceOrientations applies to both device families.
+        # Keep the two lists in sync except for PortraitUpsideDown.
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # remote-notification = normal alert pushes; voip = PushKit VoIP pushes
+        # for the CallKit doorbell call (the AD410 button rings the phone).
+        UIBackgroundModes: [remote-notification, voip]
+        NSMicrophoneUsageDescription: >-
+          Vigilume uses the microphone for two-way talk through your
+          doorbell/camera speaker.
+        NSPhotoLibraryAddUsageDescription: >-
+          Saves event clips you choose to your photo library.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true   # user-entered plain-http server URLs (see docs/ios-design.md §5)
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.vigilume.app
+        # Product name is the user-facing "Vigilume" while the Xcode
+        # target/scheme/project stay "VigilumeNVR".
+        PRODUCT_NAME: Vigilume
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  NotificationService:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: NotificationService/Sources
+      - path: Shared
+    entitlements:
+      path: NotificationService/NotificationService.entitlements
+      properties:
+        # Same group as the app: the extension decrypts pushes with the
+        # per-server keys the app stored (docs/push-architecture.md §2).
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.vigilume.app.shared
+    info:
+      path: NotificationService/Info.plist
+      properties:
+        CFBundleDisplayName: VigilumeNotificationService
+        # MUST equal the app's version + build above, bumped in lockstep — Apple
+        # rejects an app whose embedded extension carries a different version.
+        # (No ITSAppUsesNonExemptEncryption here: export compliance is declared
+        # once, on the primary app.)
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "16"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.vigilume.app.NotificationService
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+schemes:
+  VigilumeNVR:
+    build:
+      targets: { VigilumeNVR: all }
+    run:
+      config: Debug

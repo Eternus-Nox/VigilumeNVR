@@ -1,0 +1,132 @@
+# ── Vigilume NVR — Portainer stack ───────────────────────────────────────────
+#
+# Paste this into Portainer → Stacks → Add stack → Web editor, fill in the
+# environment variables listed below, Deploy. Full walkthrough:
+# docs/portainer.md
+#
+# WHY THIS FILE EXISTS INSTEAD OF docker-compose.yml. The main compose file is
+# written for `docker compose` run FROM the project directory on the NVR host.
+# Two of its properties do not survive being run by Portainer:
+#
+#  1. RELATIVE BIND PATHS. `./data`, `./go2rtc/config` and friends are resolved
+#     by compose against its PROJECT DIRECTORY — which, under Portainer, is a
+#     directory inside the Portainer container (/data/compose/<stackID>/). The
+#     resulting absolute path is then handed to the HOST docker daemon, which
+#     has never heard of Portainer's filesystem and creates a same-named path
+#     at the host root. On Unraid `/` is a RAM-backed tmpfs: the database would
+#     live in RAM and be empty again after every reboot. Every bind mount here
+#     is therefore an ABSOLUTE host path, supplied by you.
+#
+#  2. LOCAL BUILD CONTEXTS. The main file builds backend/, frontend/ and
+#     relay/ from source. A pasted stack has no source tree, and Portainer's
+#     builder does not reliably enable BuildKit — which backend/Dockerfile
+#     needs for its heredoc CUDA check. This file only ever PULLS images.
+#
+# Everything else — the GPU reservation, the go2rtc config hand-off, the
+# healthcheck gate — is identical to docker-compose.yml on purpose. Keep the
+# two in step when you change one.
+#
+# NOTE: no `name:` key and no `container_name:` keys, deliberately. Portainer
+# derives the compose project name from the stack name, and hardcoding either
+# would let this stack collide with — or silently adopt — containers from a
+# `docker compose` run of the main file.
+
+services:
+  backend:
+    # Published by .github/workflows/publish-images.yml. To run images you
+    # built yourself instead, see docs/portainer.md → "Option B".
+    image: ${VIGILUME_BACKEND_IMAGE:-ghcr.io/eternus-nox/vigilume-backend:latest}
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ:-America/New_York}
+      # The web/app admin login. `:?` on purpose — an unset value aborts the
+      # deploy with a clear message. DO NOT "fix" a red banner by changing this
+      # to `:-` or by dropping the guard: config.py strips the value without
+      # falling back to a default, so an empty variable yields a BLANK admin
+      # password on an NVR that is reachable from your LAN.
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?set ADMIN_PASSWORD in the stack's environment variables}
+      - CAMERA_TIMEZONE=${CAMERA_TIMEZONE:-America/New_York}
+      - PUBLIC_URL=${PUBLIC_URL:-}
+      # Strongly recommended here. The backend normally auto-derives a LAN
+      # WebRTC candidate, but inside a bridge network it can only see the
+      # Docker IP — so set this to the NVR host's LAN IP or live view falls
+      # back to slow MSE. See docs/live-latency.md.
+      - VIGILUME_WEBRTC_HOST=${VIGILUME_WEBRTC_HOST:-}
+      - VIGILUME_REQUIRE_GPU=${VIGILUME_REQUIRE_GPU:-1}
+      # Leave EMPTY unless you are deliberately forcing a backend. A non-empty
+      # value overrides Settings → Recording → Detection hardware and the
+      # stored setting can then never take effect.
+      - VIGILUME_DETECTOR=${VIGILUME_DETECTOR:-}
+      # On Unraid, prefer your card's UUID from `nvidia-smi -L` over "all".
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-compute,utility,video}
+    # Optional PCIe Coral. `/dev/null:/dev/null` is a deliberate no-op — a hard
+    # /dev/apex_0 mapping makes the backend REFUSE TO START on a box with no
+    # Coral fitted. Set CORAL_DEVICE=/dev/apex_0 only if you actually have one.
+    devices:
+      - ${CORAL_DEVICE:-/dev/null}:${CORAL_DEVICE:-/dev/null}
+    # USB Coral survives its post-firmware re-enumeration only if the whole USB
+    # bus is mounted; a pinned device node points at something that no longer
+    # exists. This grants the backend access to every USB device on the box —
+    # harmless when no Coral is fitted, but if you will never use a USB Coral
+    # you can safely delete this rule and the /dev/bus/usb mount below.
+    device_cgroup_rules:
+      - "c 189:* rmw"
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb
+      # Database, secrets.json, snapshots, downloaded models. Small but
+      # irreplaceable — put it on appdata. `:?` so a typo fails loudly instead
+      # of silently creating a directory in RAM.
+      - ${VIGILUME_APPDATA:?set VIGILUME_APPDATA to an absolute host path, e.g. /mnt/user/appdata/vigilume}/data:/data
+      # 24/7 recordings + event clips. BIG — roughly 45 GB/day per camera.
+      # Point this at array storage, never at appdata and never at a RAM path.
+      - ${MEDIA_PATH:?set MEDIA_PATH to an absolute host path on a big disk, e.g. /mnt/user/vigilume/media}:/media
+      # The backend WRITES go2rtc.yaml here and the go2rtc service READS it.
+      # Both mounts below must resolve to the same host directory.
+      - ${VIGILUME_APPDATA:?}/go2rtc/config:/go2rtc-config
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/system/health', timeout=5)"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  go2rtc:
+    image: alexxit/go2rtc:1.9.14
+    restart: unless-stopped
+    volumes:
+      - ${VIGILUME_APPDATA:?}/go2rtc/config:/config
+    ports:
+      - "${RTSP_PORT:-8554}:8554"
+      # WebRTC media needs BOTH transports. Do not drop the udp line.
+      - "${WEBRTC_PORT:-8555}:8555/tcp"
+      - "${WEBRTC_PORT:-8555}:8555/udp"
+    # go2rtc reads its config once at startup and the backend generates that
+    # config, so this gate is load-bearing, not cosmetic. It makes the stack
+    # take up to ~2.5 minutes to go fully green on a cold deploy — that is
+    # normal, not a hang.
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  web:
+    image: ${VIGILUME_WEB_IMAGE:-ghcr.io/eternus-nox/vigilume-web:latest}
+    restart: unless-stopped
+    environment:
+      - GO2RTC_UPSTREAM=${VIGILUME_GO2RTC_UPSTREAM:-http://go2rtc:1984}
+    ports:
+      # 8080 is a busy port on Unraid. Set WEB_PORT if something already has it
+      # — a single port collision fails the whole stack.
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_started
+      go2rtc:
+        condition: service_started

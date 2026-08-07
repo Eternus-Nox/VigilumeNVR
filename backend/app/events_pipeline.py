@@ -735,7 +735,7 @@ class EventsPipeline:
                 title=f"Doorbell pressed at {friendly}",
                 body="Someone is at the door",
                 event_id=event_id,
-                tag=f"sentinel-{camera}-doorbell",
+                tag=f"vigilume-{camera}-doorbell",
                 with_image=has_snapshot,
                 camera=camera,
                 camera_label=friendly,

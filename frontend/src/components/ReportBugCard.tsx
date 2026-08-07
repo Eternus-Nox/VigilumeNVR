@@ -19,10 +19,10 @@ import { describeDetector } from '../lib/detector';
 
 /**
  * The public repository issues are filed against. ONE literal, in ONE place:
- * a fork search/replaces `YOUR-USERNAME` here and nowhere else, so never inline
+ * a fork changes this ONE literal and nowhere else, so never inline
  * this URL at a call site.
  */
-const REPO_URL = 'https://github.com/YOUR-USERNAME/vigilume';
+const REPO_URL = 'https://github.com/Eternus-Nox/VigilumeNVR';
 
 /** Prefix so the tracker can tell a web report from an iOS one at a glance. */
 const ISSUE_TITLE = '[Web] ';

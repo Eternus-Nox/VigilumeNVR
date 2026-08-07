@@ -195,7 +195,7 @@ async def test_notification(request: Request) -> dict[str, Any]:
     payload = {
         "title": "Vigilume NVR test",
         "body": "Notifications are working.",
-        "tag": "sentinel-test",
+        "tag": "vigilume-test",
         "data": {"url": f"{public_url}/" if public_url else "/"},
     }
     push_result = await state.push.send_to_all(payload)

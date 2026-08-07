@@ -31,7 +31,11 @@ function hash(s: string): string {
   for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
   return h.toString(36);
 }
-const CACHE_PREFIX = 'sentinel-shell-';
+const CACHE_PREFIX = 'vigilume-shell-';
+// Pre-rename prefix (the app shipped as "Sentinel"). Kept ONLY so activation
+// still deletes those caches — a renamed prefix alone would orphan them in the
+// user's storage quota forever, since the sweep below matches by prefix.
+const LEGACY_CACHE_PREFIX = 'sentinel-shell-';
 const CACHE_NAME = CACHE_PREFIX + hash(JSON.stringify(entries));
 
 const precacheUrls = entries.map((e) => new URL(e.url, self.location.origin).href);
@@ -59,7 +63,7 @@ self.addEventListener('activate', (event: ExtendableEvent) => {
       const names = await caches.keys();
       await Promise.all(
         names
-          .filter((n) => n.startsWith(CACHE_PREFIX) && n !== CACHE_NAME)
+          .filter((n) => (n.startsWith(CACHE_PREFIX) || n.startsWith(LEGACY_CACHE_PREFIX)) && n !== CACHE_NAME)
           .map((n) => caches.delete(n)),
       );
       await self.clients.claim();

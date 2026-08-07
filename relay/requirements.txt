@@ -1,0 +1,10 @@
+# Vigilume APNs relay. Deliberately tiny — this process holds the .p8, so every
+# dependency is attack surface.
+
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+# [http2] pulls `h2`. NOT optional: APNs is HTTP/2-ONLY (the legacy binary
+# protocol died 2021-03-31). Without h2 this relay cannot talk to Apple at all.
+httpx[http2]>=0.27,<1
+# [crypto] pulls `cryptography`. ES256 (the only algorithm APNs accepts) needs it.
+pyjwt[crypto]>=2.8,<3

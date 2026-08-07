@@ -17,7 +17,7 @@ from ..db import Database
 
 log = logging.getLogger(__name__)
 
-_VAPID_CLAIMS_SUB = "mailto:admin@sentinel-nvr.local"
+_VAPID_CLAIMS_SUB = "mailto:admin@vigilume-nvr.local"
 
 
 @dataclass

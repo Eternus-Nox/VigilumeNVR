@@ -2,7 +2,7 @@
  * Display helpers for the active inference backend (detector kind + device),
  * shared by the System and Detection settings surfaces so both describe the
  * running detector identically. The detector type is env/hardware-set on the
- * backend (SENTINEL_DETECTOR) and read-only in the UI.
+ * backend (VIGILUME_DETECTOR) and read-only in the UI.
  */
 import type { DetectorDevice, DetectorKind } from './api';
 

@@ -92,7 +92,7 @@ verified — [docs/setup-nvidia.md](docs/setup-nvidia.md) steps 1–2.
 
 ```bash
 # 1. Get the code onto the NVR host
-git clone <your-repo-url> vigilume-nvr && cd vigilume-nvr
+git clone https://github.com/Eternus-Nox/VigilumeNVR.git && cd VigilumeNVR
 
 # 2. Configure
 cp .env.example .env
@@ -108,6 +108,12 @@ docker compose up -d --build
 #    Settings → Cameras → Add camera (name, model, IP, credentials).
 #    Camera prep (static IPs, RTSP users): docs/cameras-amcrest.md
 ```
+
+Prefer a GUI? [docs/portainer.md](docs/portainer.md) covers the same stack as a
+Portainer stack — use
+[docker-compose.portainer.yml](docker-compose.portainer.yml), not the file above:
+Portainer resolves relative bind paths against its own directory, which puts the
+database somewhere you did not intend.
 
 First boot: the backend downloads the detection model (~40 MB, SHA-256 verified), runs
 the GPU self-test, writes the go2rtc config, and starts recording as soon as cameras
@@ -196,11 +202,28 @@ run location without touching `.env` or runtime data, and
 | [docs/native-mode-design.md](docs/native-mode-design.md) | Engine design record: model pins + hashes, decode math, tracker settings, ffmpeg/go2rtc patterns |
 | [docs/recordings.md](docs/recordings.md) | Timeline scrubbing, event clips, the `processing` clip state, recorder logs, file layout + retention |
 | [docs/cameras-amcrest.md](docs/cameras-amcrest.md) | Per-model camera onboarding: IPs, RTSP users, stream settings, AD410 specifics |
+| [docs/portainer.md](docs/portainer.md) | Deploying as a Portainer stack: prebuilt images, the required absolute bind paths, and the two traps that silently lose data |
 | [docs/mobile-pwa.md](docs/mobile-pwa.md) | Installing the PWA on iOS/Android, enabling notifications |
 | [docs/remote-access.md](docs/remote-access.md) | HTTPS + remote access via Tailscale, LAN-only TLS alternative, WebRTC over the tailnet |
 | [docs/live-latency.md](docs/live-latency.md) | Why live view is fast or slow: the WebRTC/MSE/HLS protocol map, zero-config WebRTC candidates + the `VIGILUME_WEBRTC_HOST` override, and the camera I-frame-interval fix |
 | [docs/setup-nvidia.md](docs/setup-nvidia.md) | NVIDIA driver + container toolkit setup, GPU first-boot checklist |
 | [docs/faq.md](docs/faq.md) | GPU checks, storage sizing, model choice, tuning, backup/restore, upgrades |
+
+## Support
+
+Bug reports, questions, and feature requests all go to GitHub Issues:
+
+**https://github.com/Eternus-Nox/VigilumeNVR/issues**
+
+The web UI (Settings → Report a bug) and the iOS app (Settings → Report a bug)
+both open a pre-filled issue with the app version, platform, and — where the
+report is about a specific screen — which one. Nothing is sent anywhere until
+you press submit on GitHub, and no camera footage, snapshots, credentials, or
+addresses are ever included; review the text before posting.
+
+This is a self-hosted project maintained in spare time. There is no SLA, no
+hosted service, and no shared push relay — see [Self-hosting](#self-hosting)
+for what you run yourself.
 
 ## Roadmap (documented, not built)
 

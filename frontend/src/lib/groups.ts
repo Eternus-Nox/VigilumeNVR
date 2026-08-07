@@ -6,11 +6,15 @@
 import { useEffect, useState } from 'react';
 import { api, type Camera, type CameraGroup } from './api';
 
-export const GROUP_STORAGE_KEY = 'sentinel.dashboard.group';
+import { migrateKey } from './legacyStorage';
+
+export const GROUP_STORAGE_KEY = 'vigilume.dashboard.group';
+/** Pre-rename key (the app shipped as "Sentinel"), migrated on first read. */
+const LEGACY_GROUP_STORAGE_KEY = 'sentinel.dashboard.group';
 
 export function readStoredGroup(): string {
   try {
-    return localStorage.getItem(GROUP_STORAGE_KEY) ?? 'all';
+    return migrateKey(GROUP_STORAGE_KEY, LEGACY_GROUP_STORAGE_KEY) ?? 'all';
   } catch {
     return 'all';
   }
