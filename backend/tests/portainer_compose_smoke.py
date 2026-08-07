@@ -76,36 +76,40 @@ def bind_sources(service: dict) -> list[str]:
 def main() -> None:
     raw = COMPOSE.read_text()
 
-    # ── 1. The required-variable guards actually abort ────────────────────
+    # ── 1. ADMIN_PASSWORD is the ONE thing an operator must supply ────────
     _, missing = interpolate(raw, {})
-    for var in ("ADMIN_PASSWORD", "VIGILUME_APPDATA", "MEDIA_PATH"):
-        check(var in missing,
-              f"{var} is `:?`-guarded — an unset value aborts the deploy, "
-              f"it does not start with a bad default")
+    check(missing == ["ADMIN_PASSWORD"],
+          f"ADMIN_PASSWORD is the only `:?`-guarded variable — everything else "
+          f"has a working default (aborting on: {missing})")
 
-    # ── 2. Fully interpolated, EVERY bind source is absolute ──────────────
-    env = {
-        "ADMIN_PASSWORD": "pw",
-        "VIGILUME_APPDATA": "/mnt/user/appdata/vigilume",
-        "MEDIA_PATH": "/mnt/user/vigilume/media",
-    }
-    resolved, missing = interpolate(raw, env)
-    check(not missing, "with the three required vars set, nothing else aborts")
+    # ── 2. With NOTHING set, every bind source is still absolute ──────────
+    # This is the load-bearing check. The defaults are what a Portainer user
+    # actually gets, so it is the DEFAULTS that must be absolute — verifying
+    # only the explicitly-configured case would test the path nobody takes.
+    for label, env in (
+        ("defaults only", {"ADMIN_PASSWORD": "pw"}),
+        ("explicit overrides", {
+            "ADMIN_PASSWORD": "pw",
+            "VIGILUME_APPDATA": "/mnt/user/appdata/Setinel",
+            "MEDIA_PATH": "/mnt/disks/big/media",
+        }),
+    ):
+        resolved, missing = interpolate(raw, env)
+        check(not missing, f"{label}: interpolates with nothing left unresolved")
+        for name, svc in yaml.safe_load(resolved)["services"].items():
+            for src in bind_sources(svc):
+                host_side = src.split(":")[0]
+                check(host_side.startswith("/"),
+                      f"{label}: {name} bind source {host_side!r} is absolute "
+                      f"(a relative one resolves inside Portainer's container, "
+                      f"then lands on the host's tmpfs root)")
+                check(".." not in host_side,
+                      f"{label}: {name} bind source {host_side!r} has no ../ escape")
 
+    # Re-resolve with defaults for the structural checks below.
+    resolved, _ = interpolate(raw, {"ADMIN_PASSWORD": "pw"})
     doc = yaml.safe_load(resolved)
     services = doc["services"]
-
-    for name, svc in services.items():
-        for src in bind_sources(svc):
-            if not src or src.startswith("/") is False and ":" not in src:
-                pass
-            host_side = src.split(":")[0]
-            check(host_side.startswith("/"),
-                  f"{name}: bind source {host_side!r} is an absolute host path "
-                  f"(a relative one would resolve into Portainer's container "
-                  f"and land in RAM on the host)")
-            check(not host_side.startswith("./") and ".." not in host_side,
-                  f"{name}: bind source {host_side!r} has no ./ or ../ component")
 
     # ── 3. The backend↔go2rtc hand-off still points at ONE directory ──────
     def host_path_for(service: str, container_path: str) -> str:

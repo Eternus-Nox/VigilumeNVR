@@ -47,10 +47,14 @@ services:
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:?set ADMIN_PASSWORD in the stack's environment variables}
       - CAMERA_TIMEZONE=${CAMERA_TIMEZONE:-America/New_York}
       - PUBLIC_URL=${PUBLIC_URL:-}
-      # Strongly recommended here. The backend normally auto-derives a LAN
-      # WebRTC candidate, but inside a bridge network it can only see the
-      # Docker IP — so set this to the NVR host's LAN IP or live view falls
-      # back to slow MSE. See docs/live-latency.md.
+      # LEAVE EMPTY. Inside a bridge network the backend cannot see the host's
+      # LAN IP by inspecting its own interfaces, so it instead LEARNS the
+      # address from the one a browser actually reached it on, and advertises
+      # that as the WebRTC host candidate. Live view self-configures on the
+      # first LAN request. Only set this if you reach the NVR by a hostname
+      # rather than an IP, since learning accepts private IPv4 literals only
+      # (a caller-controlled Host header must not be able to inject a
+      # candidate). See docs/live-latency.md.
       - VIGILUME_WEBRTC_HOST=${VIGILUME_WEBRTC_HOST:-}
       - VIGILUME_REQUIRE_GPU=${VIGILUME_REQUIRE_GPU:-1}
       # Leave EMPTY unless you are deliberately forcing a backend. A non-empty
@@ -75,15 +79,26 @@ services:
     volumes:
       - /dev/bus/usb:/dev/bus/usb
       # Database, secrets.json, snapshots, downloaded models. Small but
-      # irreplaceable — put it on appdata. `:?` so a typo fails loudly instead
-      # of silently creating a directory in RAM.
-      - ${VIGILUME_APPDATA:?set VIGILUME_APPDATA to an absolute host path, e.g. /mnt/user/appdata/vigilume}/data:/data
+      # irreplaceable — belongs on appdata.
+      #
+      # THE DEFAULT IS ABSOLUTE, AND THAT IS THE WHOLE POINT. A relative
+      # default (`./data`) would be resolved by compose inside the Portainer
+      # container and then executed by the HOST daemon, creating the directory
+      # at the host root — which on Unraid is a RAM-backed tmpfs. Everything
+      # here would be gone on the next reboot. Any override you set must also
+      # be an absolute path.
+      - ${VIGILUME_APPDATA:-/mnt/user/appdata/vigilume}/data:/data
       # 24/7 recordings + event clips. BIG — roughly 45 GB/day per camera.
-      # Point this at array storage, never at appdata and never at a RAM path.
-      - ${MEDIA_PATH:?set MEDIA_PATH to an absolute host path on a big disk, e.g. /mnt/user/vigilume/media}:/media
+      #
+      # Create this as an Unraid share set to the ARRAY before you deploy. If
+      # you let Docker auto-create it, you get a share with default settings,
+      # which is usually cache-prefer — and pointing continuous recording at
+      # the cache pool fills the pool.
+      - ${MEDIA_PATH:-/mnt/user/vigilume/media}:/media
       # The backend WRITES go2rtc.yaml here and the go2rtc service READS it.
-      # Both mounts below must resolve to the same host directory.
-      - ${VIGILUME_APPDATA:?}/go2rtc/config:/go2rtc-config
+      # This default and the one in the go2rtc service must stay identical;
+      # backend/tests/portainer_compose_smoke.py fails the build if they drift.
+      - ${VIGILUME_APPDATA:-/mnt/user/appdata/vigilume}/go2rtc/config:/go2rtc-config
     deploy:
       resources:
         reservations:
@@ -102,7 +117,10 @@ services:
     image: alexxit/go2rtc:1.9.14
     restart: unless-stopped
     volumes:
-      - ${VIGILUME_APPDATA:?}/go2rtc/config:/config
+      # Must resolve to the same host directory as the backend's
+      # /go2rtc-config mount — that shared file is the only thing connecting
+      # these two containers. Live view dies silently if they diverge.
+      - ${VIGILUME_APPDATA:-/mnt/user/appdata/vigilume}/go2rtc/config:/config
     ports:
       - "${RTSP_PORT:-8554}:8554"
       # WebRTC media needs BOTH transports. Do not drop the udp line.

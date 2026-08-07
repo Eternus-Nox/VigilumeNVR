@@ -50,16 +50,22 @@ usual cause of a `No space left on device` failure partway through `pip
 install`. Fix it in **Settings → Docker** (stop Docker first): switch to
 **directory mode** on your cache/NVMe pool, or raise the vDisk to **≥ 64 GB**.
 
-**3. Host directories.** Create these before deploying, so Docker does not
-auto-create them as an Unraid share with the wrong storage settings:
+**3. Host directories.** The stack defaults to `/mnt/user/appdata/vigilume` and
+`/mnt/user/vigilume/media`, and Docker will create both if they are missing —
+but *let it* and you get an Unraid share with default settings, which is
+usually **cache-prefer**. Pointing 24/7 recording at the cache pool fills the
+pool. Create them yourself first:
 
 ```bash
 mkdir -p /mnt/user/appdata/vigilume/data /mnt/user/appdata/vigilume/go2rtc/config
 mkdir -p /mnt/user/vigilume/media
 ```
 
-Appdata belongs on the cache pool; **media belongs on the array**. Budget
-roughly **45 GB per camera per day** for 24/7 recording.
+Appdata belongs on the cache pool; set the **media** share to the **array**.
+Budget roughly **45 GB per camera per day** for 24/7 recording.
+
+Using different paths? Set `VIGILUME_APPDATA` / `MEDIA_PATH` in step 3 below.
+Both must be **absolute** — see [the first trap](#relative-bind-paths-do-not-mean-what-they-look-like).
 
 **4. Free ports.** The stack publishes 8080, 8554, 8555 (tcp *and* udp). A
 single collision fails the whole deploy. `8080` in particular is often already
@@ -75,20 +81,36 @@ ONNX models from huggingface.co. After that it runs fully offline.
 1. **Portainer → Stacks → Add stack**, name it `vigilume`.
 2. **Web editor** → paste the contents of
    [docker-compose.portainer.yml](../docker-compose.portainer.yml).
-3. Under **Environment variables**, add at minimum:
+3. Under **Environment variables**, add **one**:
 
-   | Name | Example | |
+   | Name | Value |
+   |---|---|
+   | `ADMIN_PASSWORD` | *(your password)* |
+
+   Everything else has a working default. Set any of these only if the default
+   is wrong for your box:
+
+   | Name | Default | Set it when |
    |---|---|---|
-   | `ADMIN_PASSWORD` | *(your password)* | **required** |
-   | `VIGILUME_APPDATA` | `/mnt/user/appdata/vigilume` | **required** |
-   | `MEDIA_PATH` | `/mnt/user/vigilume/media` | **required** |
-   | `VIGILUME_WEBRTC_HOST` | `192.168.1.253` | strongly recommended |
-   | `TZ` | `America/New_York` | |
-   | `NVIDIA_VISIBLE_DEVICES` | `GPU-xxxxxxxx-…` | |
+   | `VIGILUME_APPDATA` | `/mnt/user/appdata/vigilume` | Not on Unraid, or migrating an existing install |
+   | `MEDIA_PATH` | `/mnt/user/vigilume/media` | Recordings belong somewhere else |
+   | `TZ` | `America/New_York` | You are not on US Eastern |
+   | `WEB_PORT` | `8080` | Something already has 8080 |
+   | `NVIDIA_VISIBLE_DEVICES` | `all` | You want to pin one card by UUID |
+   | `VIGILUME_WEBRTC_HOST` | *(learned)* | You reach the NVR by hostname, not IP — see below |
 
-   The three required ones use compose's `:?` guard: leave one out and the
-   deploy stops with a message naming it, rather than starting with a bad
-   value. See [the ADMIN_PASSWORD trap](#never-remove-the-admin_password-guard).
+   `ADMIN_PASSWORD` is the only variable with compose's `:?` guard: leave it
+   out and the deploy stops with a message naming it, rather than starting
+   with a bad value. See
+   [the ADMIN_PASSWORD trap](#never-remove-the-admin_password-guard).
+
+   **`VIGILUME_WEBRTC_HOST` does not normally need setting.** A bridge-networked
+   container cannot discover the host's LAN IP from its own interfaces, so the
+   backend instead learns it from the address a browser actually reached it on
+   and advertises that as the WebRTC candidate. Live view configures itself on
+   the first LAN request. Learning accepts private IPv4 literals only — a
+   caller-controlled `Host` header must not be able to inject a candidate — so
+   set this explicitly if you browse to the NVR by hostname.
 
 4. **Deploy the stack.**
 
@@ -162,8 +184,12 @@ reboot gives you an empty install with no cameras, no users, no event history,
 and regenerated session secrets. If `MEDIA_PATH` is also left unset, 24/7
 recording writes there too, and filling tmpfs takes the whole box down.
 
-`docker-compose.portainer.yml` has no relative paths for this reason, and marks
-the two directory variables required so a typo fails loudly.
+`docker-compose.portainer.yml` has no relative paths for this reason — not in
+its mounts and not in its **defaults**, which is the part that matters, since
+the defaults are what most people actually deploy. If you override
+`VIGILUME_APPDATA` or `MEDIA_PATH`, the value must be absolute too;
+`backend/tests/portainer_compose_smoke.py` enforces this for the file itself
+but cannot check what you type into Portainer.
 
 ### Never remove the `ADMIN_PASSWORD` guard
 
