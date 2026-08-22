@@ -97,6 +97,8 @@ ONNX models from huggingface.co. After that it runs fully offline.
    | `TZ` | `America/New_York` | You are not on US Eastern |
    | `WEB_PORT` | `8080` | Something already has 8080 |
    | `NVIDIA_VISIBLE_DEVICES` | `all` | You want to pin one card by UUID |
+   | `CORAL_DEVICE` | *(unset)* | You have a PCIe Coral fitted (`/dev/apex_0`) |
+   | `VAAPI_DEVICE` | *(unset)* | HEVC cameras + an AMD/Intel iGPU — see below |
    | `VIGILUME_WEBRTC_HOST` | *(learned)* | You reach the NVR by hostname, not IP — see below |
 
    `ADMIN_PASSWORD` is the only variable with compose's `:?` guard: leave it
@@ -227,6 +229,34 @@ Two things to know if you add **caddy** that way:
 The relay is for the iOS app's owner only. Self-hosters want
 **Settings → Notifications → ntfy** instead — no Apple account needed. See
 [push-architecture.md](push-architecture.md).
+
+## Hardware passthrough (Coral, iGPU)
+
+Both optional device mappings are inert until you name them, so the stack
+deploys unchanged on a box that has neither:
+
+| Variable | Value | What it enables |
+|---|---|---|
+| `CORAL_DEVICE` | `/dev/apex_0` | PCIe Coral Edge TPU for detection |
+| `VAAPI_DEVICE` | `/dev/dri/renderD128` | AMD/Intel iGPU for HEVC→H.264 transcoding |
+
+Check what the host actually has first — `ls /dev/apex_0`, `ls -l /dev/dri` —
+and set only what is there; a path that does not exist stops the container from
+starting. Full walkthrough for the iGPU case, including how to confirm the
+encoder actually switched, is in
+[deploy-unraid.md → HEVC cameras: iGPU transcoding](deploy-unraid.md#6b-hevc-cameras-igpu-transcoding-on-an-amdintel-box).
+
+**VAAPI needs a recent enough image.** The Mesa VA driver lives inside the
+backend image, so an image published before VAAPI support was added cannot use
+the render node no matter how it is passed through — it logs
+`h264_vaapi failed at runtime` and falls back to the CPU. Re-pull the backend
+image (Portainer: **Re-pull image and redeploy**) after a newer one is published.
+
+**No NVIDIA card?** The backend service reserves an NVIDIA device
+(`deploy.resources.reservations.devices`). Without the Nvidia Driver plugin the
+deploy fails with *could not select device driver "nvidia"* — delete that block
+from the pasted stack. See
+[deploy-unraid.md → If you have no NVIDIA card at all](deploy-unraid.md#if-you-have-no-nvidia-card-at-all).
 
 ---
 

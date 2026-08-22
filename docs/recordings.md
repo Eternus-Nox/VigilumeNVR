@@ -160,17 +160,25 @@ choosing one. Without that check an AMD box would select NVENC, fail, and drop
 to the CPU with a perfectly good iGPU sitting idle.
 
 **Enabling VAAPI (AMD/Intel iGPU).** The render node has to be passed into the
-backend container. Find it and set it in `.env`:
+backend container. Find it first:
 
 ```bash
-ls /dev/dri          # renderD128 is the first GPU
-# in .env:
-VAAPI_DEVICE=/dev/dri/renderD128
+ls -l /dev/dri       # renderD128 is the first GPU; renderD129 a second
 ```
 
-then `docker compose up -d backend`. The image already ships the Mesa VA driver
-(`mesa-va-drivers`), so nothing else is needed. On a box with two GPUs,
-`VIGILUME_VAAPI_DEVICE` overrides which node is used.
+Then name it, where your deployment keeps its variables:
+
+- **CLI compose** — put `VAAPI_DEVICE=/dev/dri/renderD128` in `.env`, then
+  `docker compose up -d backend`.
+- **Portainer / Unraid** — add `VAAPI_DEVICE` = `/dev/dri/renderD128` under the
+  stack's **Environment variables** and redeploy. See
+  [deploy-unraid.md](deploy-unraid.md#6b-hevc-cameras-igpu-transcoding-on-an-amdintel-box).
+
+The backend image ships the Mesa VA driver (`mesa-va-drivers`), so nothing else
+is needed — but a **prebuilt image published before VAAPI support was added does
+not have it**, and will log `h264_vaapi failed at runtime` and use the CPU until
+you re-pull a newer one. On a box with two GPUs, `VIGILUME_VAAPI_DEVICE`
+overrides which node is used.
 
 **Confirming which encoder is live:**
 

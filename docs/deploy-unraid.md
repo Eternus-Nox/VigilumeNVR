@@ -123,6 +123,84 @@ Open `http://<unraid-ip>:8080`, log in, and add your three cameras in
 Settings → Cameras (model dropdown + the camera's own IP/username/password).
 Detection, recording, live view, and notifications light up from there.
 
+## 6b. HEVC cameras: iGPU transcoding on an AMD/Intel box
+
+Skip this if your cameras are all H.264, or if you have an NVIDIA card (NVENC
+is picked automatically).
+
+H.265/HEVC cameras need an HEVC→H.264 transcode for browser playback, and on a
+box with no usable GPU that runs on the CPU (`libx264`). Most Unraid boxes built
+on a Ryzen APU or an Intel CPU with Quick Sync have an iGPU that does this in
+fixed-function silicon instead — it just has to be passed into the container.
+Background: [recordings.md → Transcoding hardware](recordings.md#transcoding-hardware-nvenc-vaapi-libx264).
+
+**1. Check the render node exists.** In the Unraid terminal:
+
+```bash
+ls -l /dev/dri
+# want: renderD128 (and card0). renderD129 = a second GPU.
+```
+
+Unraid's stock kernel carries both `amdgpu` and `i915`, so on most boards the
+node is simply there. If `/dev/dri` is missing or empty, the iGPU is usually
+disabled in the BIOS (look for *IGD / iGPU Multi-Monitor / Primary Display* and
+make sure the integrated GPU stays enabled even with a discrete card fitted).
+ich777's **Radeon TOP** (AMD) / **Intel GPU TOP** (Intel) plugins from Community
+Applications are the usual way to confirm and monitor it.
+
+**2. Point Vigilume at it.** Add a stack environment variable — in Portainer
+that is **Stacks → vigilume → Environment variables**, not a `.env` file:
+
+| Name | Value |
+|---|---|
+| `VAAPI_DEVICE` | `/dev/dri/renderD128` |
+
+Redeploy the stack. Leave it unset and nothing changes (the mapping is inert).
+
+Unlike the Jellyfin/Plex guides you may have followed on Unraid, **no
+`group_add: video` is needed** — the backend container runs as root, so it can
+open the render node whatever group owns it on the host.
+
+**3. Confirm it took.**
+
+```bash
+docker logs vigilume-backend 2>&1 | grep 'transcode:'
+# want: transcode: selected H.264 encoder h264_vaapi (GPU VAAPI on /dev/dri/renderD128)
+```
+
+`selected H.264 encoder libx264 (CPU libx264)` means the node never arrived —
+recheck step 1 and that the variable is on the **stack**, not one container.
+A `h264_vaapi failed at runtime — using libx264` line means the node arrived but
+the driver could not encode; that needs the image from step 4.
+
+**4. The image must include the Mesa VA driver.** VAAPI needs
+`mesa-va-drivers` inside the backend image. If you deploy the prebuilt GHCR
+image (the Portainer path), pull a build that has it — an image published before
+VAAPI support was added will log the runtime-failure line above no matter how
+the node is passed through. `docker compose pull backend` (or Portainer's
+**Re-pull image and redeploy**) after a new image is published.
+
+### If you have no NVIDIA card at all
+
+Both compose files reserve an NVIDIA device for the backend:
+
+```yaml
+deploy:
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: 1
+          capabilities: [gpu]
+```
+
+Without the **Nvidia Driver** plugin (step 1) there is no `nvidia` runtime for
+Docker to select, and the stack fails to deploy with *could not select device
+driver "nvidia" with capabilities: [[gpu]]*. On an AMD/Intel-only box, delete
+those six lines from the stack before deploying. Detection then needs a Coral
+(`CORAL_DEVICE`) or `VIGILUME_DETECTOR=onnx_cpu` with `VIGILUME_REQUIRE_GPU=0`;
+VAAPI transcoding is unaffected either way — it uses the render node, not CUDA.
+
 ## 7. Remote access / HTTPS (`nvr.example.com`)
 
 Phones require HTTPS for PWA install + push, and browsers require it for the
