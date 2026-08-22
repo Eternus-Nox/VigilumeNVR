@@ -252,11 +252,13 @@ the render node no matter how it is passed through — it logs
 `h264_vaapi failed at runtime` and falls back to the CPU. Re-pull the backend
 image (Portainer: **Re-pull image and redeploy**) after a newer one is published.
 
-**No NVIDIA card?** The backend service reserves an NVIDIA device
-(`deploy.resources.reservations.devices`). Without the Nvidia Driver plugin the
-deploy fails with *could not select device driver "nvidia"* — delete that block
-from the pasted stack. See
-[deploy-unraid.md → If you have no NVIDIA card at all](deploy-unraid.md#if-you-have-no-nvidia-card-at-all).
+**Have an NVIDIA card?** The backend's NVIDIA reservation
+(`deploy.resources.reservations.devices`) ships **commented out**, so the stack
+deploys as-is on AMD, Intel and CPU-only boxes. Uncomment those six lines to
+give the container CUDA and NVENC — and install ich777's **Nvidia Driver**
+plugin first, or the deploy fails with *could not select device driver
+"nvidia"*. See
+[deploy-unraid.md → Switching between CPU, NVIDIA and AMD](deploy-unraid.md#6c-switching-between-cpu-nvidia-and-amd).
 
 ---
 

@@ -106,13 +106,34 @@ services:
       # This default and the one in the go2rtc service must stay identical;
       # backend/tests/portainer_compose_smoke.py fails the build if they drift.
       - ${VIGILUME_APPDATA:-/mnt/user/appdata/vigilume}/go2rtc/config:/go2rtc-config
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    # ── NVIDIA GPU — UNCOMMENT THIS BLOCK IF (AND ONLY IF) YOU HAVE ONE ──────
+    #
+    # Reserves an NVIDIA card for the backend: CUDA for detection, NVENC for
+    # HEVC->H.264 transcoding.
+    #
+    # COMMENTED OUT BY DEFAULT because on a box without an NVIDIA card and the
+    # NVIDIA container runtime the whole stack FAILS TO DEPLOY with
+    #     could not select device driver "nvidia" with capabilities: [[gpu]]
+    # — and in Portainer that is a red banner on the stack, not one sick
+    # container. A `deploy:` block cannot be made conditional with an
+    # environment variable, so uncommenting is the switch.
+    #
+    # NVIDIA users: uncomment these six lines AND install ich777's "Nvidia
+    # Driver" plugin from Community Applications, then reboot. Forgetting the
+    # plugin is not silent — detection logs "GPU UNAVAILABLE" and reports
+    # ready:false (VIGILUME_REQUIRE_GPU defaults to 1).
+    #
+    # AMD / Intel / CPU-only: LEAVE COMMENTED and pick your hardware with stack
+    # environment variables instead — VAAPI_DEVICE for an iGPU, CORAL_DEVICE for
+    # a Coral. See docs/deploy-unraid.md#6b-hevc-cameras-igpu-transcoding-on-an-amdintel-box.
+    #
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/system/health', timeout=5)"]
       interval: 10s

@@ -159,6 +159,35 @@ def main() -> None:
           "VIGILUME_DETECTOR defaults to EMPTY — a non-empty value silently "
           "overrides the stored Detection-hardware setting forever")
 
+    # ── 8. The NVIDIA reservation ships COMMENTED OUT, and uncomments clean ──
+    #
+    # An active `deploy.reservations.devices[driver: nvidia]` makes the WHOLE
+    # STACK fail to deploy on a box with no NVIDIA container runtime
+    # ("could not select device driver"), which in Portainer is a red banner
+    # rather than one sick container. AMD, Intel and CPU-only boxes are the
+    # common case, so the block is opt-in — and because it is opt-in via
+    # UNCOMMENTING, the commented form has to be indented correctly or the
+    # people who need it get a YAML error instead of a GPU.
+    for label, path in (("portainer", COMPOSE), ("cli", ROOT / "docker-compose.yml")):
+        text = path.read_text()
+        doc = yaml.safe_load(interpolate(text, {"ADMIN_PASSWORD": "pw"})[0])
+        check("deploy" not in doc["services"]["backend"],
+              f"{label}: no active NVIDIA reservation — deploys on an AMD/Intel/CPU box")
+
+        uncommented = "\n".join(
+            (m.group(1) + m.group(2)) if (m := re.match(
+                r"^(\s*)# (deploy:|  resources:|    reservations:|      devices:"
+                r"|        - driver: nvidia|          count: 1"
+                r"|          capabilities: \[gpu\])\s*$", line)) else line
+            for line in text.split("\n")
+        )
+        dep = yaml.safe_load(
+            interpolate(uncommented, {"ADMIN_PASSWORD": "pw"})[0]
+        )["services"]["backend"].get("deploy")
+        check(dep == {"resources": {"reservations": {"devices": [
+                  {"driver": "nvidia", "count": 1, "capabilities": ["gpu"]}]}}},
+              f"{label}: uncommenting the block yields a valid NVIDIA reservation")
+
     print(f"\nAll {PASS} Portainer compose checks passed.")
 
 

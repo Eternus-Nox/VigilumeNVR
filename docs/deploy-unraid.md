@@ -1,8 +1,12 @@
 # Deploying Vigilume NVR on Unraid
 
-Vigilume runs on Unraid as a small Docker Compose stack with NVIDIA GPU
-detection. This guide covers the Unraid-specific setup. The big picture is in
-the [README](../README.md); GPU internals are in [setup-nvidia.md](setup-nvidia.md).
+Vigilume runs on Unraid as a small Docker Compose stack. This guide is written
+around the NVIDIA path (the fastest for detection), but the stack also runs on
+an **AMD/Intel iGPU or CPU-only box** — the NVIDIA reservation ships commented
+out, so nothing here is mandatory. If that is your setup, read
+[6c. Switching between CPU, NVIDIA and AMD](#6c-switching-between-cpu-nvidia-and-amd)
+first and treat the NVIDIA steps as optional. The big picture is in the
+[README](../README.md); GPU internals are in [setup-nvidia.md](setup-nvidia.md).
 
 > **Why the Mac build failed:** the GPU image is built around NVIDIA CUDA and
 > only runs on a real NVIDIA card with the Linux NVIDIA driver — it cannot run
@@ -12,15 +16,20 @@ the [README](../README.md); GPU internals are in [setup-nvidia.md](setup-nvidia.
 ## 1. Prerequisites on Unraid
 
 1. **Community Applications** plugin installed (Apps tab).
-2. **Nvidia Driver** plugin (by *ich777*) → Apps → search "Nvidia Driver" →
-   install → **reboot**. This installs the NVIDIA kernel driver and the
-   container runtime that lets Docker see the GPU.
+2. **Nvidia Driver** plugin (by *ich777*) — **only if you have an NVIDIA card.**
+   Skip this entirely on an AMD/Intel or CPU-only box; see
+   [6c. Switching between CPU, NVIDIA and AMD](#6c-switching-between-cpu-nvidia-and-amd)
+   for what those boxes do instead. Apps → search "Nvidia Driver" → install →
+   **reboot**. This installs the NVIDIA kernel driver and the container runtime
+   that lets Docker see the GPU.
    - Verify in the Unraid terminal:
      ```bash
      nvidia-smi          # should list your card
      nvidia-smi -L       # copy the "GPU-xxxxxxxx-..." UUID
      ```
    - Put that UUID in `.env` as `NVIDIA_VISIBLE_DEVICES=GPU-...`.
+   - Then **uncomment the `deploy:` block** in the backend service — it ships
+     commented out so the stack deploys on GPU-less boxes.
 3. **Docker Compose** — either the *Docker Compose Manager* plugin (by
    *dcflachs*), or just run `docker compose` from the Unraid terminal
    (available on current Unraid).
@@ -180,26 +189,63 @@ VAAPI support was added will log the runtime-failure line above no matter how
 the node is passed through. `docker compose pull backend` (or Portainer's
 **Re-pull image and redeploy**) after a new image is published.
 
-### If you have no NVIDIA card at all
+## 6c. Switching between CPU, NVIDIA and AMD
 
-Both compose files reserve an NVIDIA device for the backend:
+Two independent jobs use hardware, and they need not run on the same chip — a
+Coral can do detection while an AMD iGPU does transcoding:
+
+- **Detection** — NVIDIA CUDA, a Coral Edge TPU, or the CPU.
+- **Transcoding** — HEVC→H.264 for browser playback, and *only* for H.265
+  cameras. NVIDIA NVENC, an AMD/Intel iGPU via VAAPI, or the CPU (`libx264`).
+
+Everything is switched with **stack environment variables**, with exactly one
+exception: the NVIDIA reservation, which is a `deploy:` block and cannot be
+made conditional with a variable. It therefore ships **commented out** in both
+compose files, so the stack deploys unchanged on AMD, Intel and CPU-only boxes.
+
+| Your box | `deploy:` block | Variables to set |
+|---|---|---|
+| **NVIDIA GPU** | **uncomment** | *(none — defaults are right)*; optionally `NVIDIA_VISIBLE_DEVICES=GPU-…` |
+| **AMD / Intel iGPU + Coral** | leave commented | `VAAPI_DEVICE=/dev/dri/renderD128`, `CORAL_DEVICE=/dev/apex_0`, and pick *Coral* in Settings → Recording → Detection hardware |
+| **AMD / Intel iGPU, no Coral** | leave commented | `VAAPI_DEVICE=/dev/dri/renderD128`, `VIGILUME_DETECTOR=onnx_cpu`, `VIGILUME_REQUIRE_GPU=0` |
+| **CPU only** | leave commented | `VIGILUME_DETECTOR=onnx_cpu`, `VIGILUME_REQUIRE_GPU=0` |
+
+The block to uncomment (backend service, both compose files):
 
 ```yaml
-deploy:
-  resources:
-    reservations:
-      devices:
-        - driver: nvidia
-          count: 1
-          capabilities: [gpu]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 ```
 
-Without the **Nvidia Driver** plugin (step 1) there is no `nvidia` runtime for
-Docker to select, and the stack fails to deploy with *could not select device
-driver "nvidia" with capabilities: [[gpu]]*. On an AMD/Intel-only box, delete
-those six lines from the stack before deploying. Detection then needs a Coral
-(`CORAL_DEVICE`) or `VIGILUME_DETECTOR=onnx_cpu` with `VIGILUME_REQUIRE_GPU=0`;
-VAAPI transcoding is unaffected either way — it uses the render node, not CUDA.
+Uncommenting it **without** the Nvidia Driver plugin installed fails the whole
+stack with *could not select device driver "nvidia" with capabilities:
+[[gpu]]* — in Portainer that is a red banner on the stack, not one sick
+container. Installing the plugin but forgetting to uncomment is the quieter
+failure: the stack comes up and detection logs `GPU UNAVAILABLE` with
+`ready:false` (because `VIGILUME_REQUIRE_GPU` defaults to `1`), which is the
+intended loud-rather-than-slow behavior.
+
+Two things that trip people up when switching:
+
+- **`VIGILUME_DETECTOR` is an override, not the setting.** Leave it unset and
+  the stored *Settings → Recording → Detection hardware* choice wins. Set it to
+  a non-empty value and that choice can never take effect again — a box with
+  `VIGILUME_DETECTOR=onnx` in its environment cannot be switched to the Coral
+  from the UI, no matter what you click. Only set it to force CPU (`onnx_cpu`).
+- **VAAPI is independent of all of the above.** It uses the render node, never
+  CUDA, so it works the same whether detection runs on a Coral, the CPU, or an
+  NVIDIA card you also happen to have.
+
+Confirm what actually got picked:
+
+```bash
+docker logs vigilume-backend 2>&1 | grep -E 'transcode:|GPU OK|GPU UNAVAILABLE'
+```
 
 ## 7. Remote access / HTTPS (`nvr.example.com`)
 

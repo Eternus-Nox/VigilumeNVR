@@ -125,13 +125,35 @@ services:
       - ${MEDIA_PATH:-./media}:/media
       # Backend writes go2rtc.yaml here; the go2rtc container reads it.
       - ./go2rtc/config:/go2rtc-config
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    # ── NVIDIA GPU — UNCOMMENT THIS BLOCK IF (AND ONLY IF) YOU HAVE ONE ──────
+    #
+    # This reserves an NVIDIA card for the backend. It is what gives the
+    # container CUDA (detection) and NVENC (HEVC->H.264 transcoding).
+    #
+    # It is COMMENTED OUT BY DEFAULT because it is not a no-op on a box without
+    # an NVIDIA card and the NVIDIA container runtime: Docker cannot satisfy the
+    # reservation and the backend REFUSES TO START with
+    #     could not select device driver "nvidia" with capabilities: [[gpu]]
+    # There is no interpolation trick that makes a `deploy:` block conditional,
+    # so the switch is these four lines.
+    #
+    # NVIDIA users: uncomment, and make sure the NVIDIA container runtime is
+    # installed (on Unraid that is ich777's "Nvidia Driver" plugin + a reboot).
+    # If you forget, nothing is silently degraded — detection logs
+    # "GPU UNAVAILABLE" and reports ready:false, because VIGILUME_REQUIRE_GPU
+    # defaults to 1.
+    #
+    # AMD / Intel / CPU-only users: LEAVE THIS COMMENTED. Your hardware is
+    # selected by environment variables instead — see the hardware guide at the
+    # top of .env.example, or docs/recordings.md#transcoding-hardware-nvenc-vaapi-libx264.
+    #
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/system/health', timeout=5)"]
       interval: 10s
