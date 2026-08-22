@@ -78,8 +78,25 @@ services:
       # Deliberately ${VAR:-default}, never ${VAR:?} — compose interpolates the
       # WHOLE file before filtering, so a :? here would break the stack for
       # everyone.
+      #
+      # VAAPI render node — OPTIONAL, for AMD/Intel iGPU transcoding.
+      #
+      # HEVC cameras need an HEVC->H.264 transcode for browser playback, and
+      # without a GPU that runs on libx264 (CPU). An AMD (Radeon/VCN) or Intel
+      # (Quick Sync) iGPU does the same job in fixed-function silicon at a
+      # fraction of the cost — but only if its DRI render node is visible in
+      # here. To enable, put this in the box's .env:
+      #     VAAPI_DEVICE=/dev/dri/renderD128
+      # (`ls /dev/dri` on the host; renderD128 is the first GPU.) NVIDIA boxes
+      # do NOT need this — they use NVENC via the nvidia runtime below.
+      #
+      # Default is /dev/zero, not /dev/null, ONLY because compose rejects two
+      # device entries sharing a container path and the Coral line above already
+      # claims /dev/null. Both are inert no-ops; the point is just that they
+      # differ. See app/native/transcode.py (find_vaapi_device / select_encoder).
     devices:
       - ${CORAL_DEVICE:-/dev/null}:${CORAL_DEVICE:-/dev/null}
+      - ${VAAPI_DEVICE:-/dev/zero}:${VAAPI_DEVICE:-/dev/zero}
     # USB Coral passthrough — needed for the SECOND Edge TPU.
     #
     # WHY NOT A `devices:` ENTRY LIKE THE PCIe ONE: a USB Coral enumerates as

@@ -62,16 +62,19 @@ os.environ["GO2RTC_CONFIG_DIR"] = str(TMP / "go2rtc-config")
 
 from app.config import Config  # noqa: E402
 from app.db import Database  # noqa: E402
-from app.native.recorder import Recorder  # noqa: E402
+from app.native.recorder import CLIP_CONCURRENCY, Recorder  # noqa: E402
 from app.native.transcode import (  # noqa: E402
     LIBX264,
     NVENC,
+    VAAPI,
     ClipPlan,
     ProbeResult,
     Transcoder,
     build_encoders_probe_args,
     build_probe_args,
     build_transcode_args,
+    find_nvidia_device,
+    find_vaapi_device,
     is_browser_playable,
     needs_transcode,
     parse_probe_output,
@@ -125,8 +128,17 @@ def make_seg(cam_dir: Path, dt: datetime, body: bytes = b"\x47" * 188) -> Path:
 
 def make_transcoder(tag: str, **over) -> Transcoder:
     """A transcoder with injected fake binaries (so .enabled is True) and a
-    dedicated cache dir. Callers monkeypatch ._run."""
-    kwargs = dict(cache_dir=TMP / tag / "cache", ffmpeg="/fake/ffmpeg", ffprobe="/fake/ffprobe")
+    dedicated cache dir. Callers monkeypatch ._run.
+
+    Both device probes are pinned so the suite behaves identically on a box that
+    has a GPU and one that does not — otherwise encoder selection would depend
+    on the host running the tests. ``nvidia_present=True`` keeps the NVENC cases
+    (which supply an nvenc listing) exercising the GPU branch; VAAPI cases pass
+    a ``vaapi_device`` in explicitly."""
+    kwargs = dict(
+        cache_dir=TMP / tag / "cache", ffmpeg="/fake/ffmpeg", ffprobe="/fake/ffprobe",
+        vaapi_device=None, nvidia_present=True,
+    )
     kwargs.update(over)
     return Transcoder(**kwargs)
 
@@ -181,10 +193,62 @@ def arg_builder_checks() -> None:
 
     check(build_encoders_probe_args("/u/ffmpeg") == ["/u/ffmpeg", "-hide_banner", "-encoders"],
           "encoders-listing argv")
-    check(select_encoder("... V..... h264_nvenc  NVIDIA NVENC H.264 ...") == NVENC,
-          "select_encoder picks h264_nvenc when listed")
-    check(select_encoder("... V..... libx264  libx264 H.264 ...") == LIBX264,
+    nvenc_listing = "... V..... h264_nvenc  NVIDIA NVENC H.264 ..."
+    check(select_encoder(nvenc_listing, None, True) == NVENC,
+          "select_encoder picks h264_nvenc when listed and an NVIDIA node exists")
+    check(select_encoder("... V..... libx264  libx264 H.264 ...", None, True) == LIBX264,
           "select_encoder falls back to libx264 when nvenc absent")
+
+    # -- VAAPI (AMD/Intel iGPU) sits between NVENC and libx264 --
+    vaapi_listing = "... V..... h264_vaapi  H.264/AVC (VAAPI) ...\n V..... libx264 ..."
+    both_listing = vaapi_listing + "\n V..... h264_nvenc  NVIDIA NVENC"
+    check(select_encoder(vaapi_listing, "/dev/dri/renderD128") == VAAPI,
+          "select_encoder picks h264_vaapi when listed AND a render node exists")
+    check(select_encoder(vaapi_listing, None) == LIBX264,
+          "select_encoder skips VAAPI with no render node (would fail every run)")
+    check(select_encoder(vaapi_listing) == LIBX264,
+          "select_encoder defaults to no devices (back-compat single-arg call)")
+    check(select_encoder(both_listing, "/dev/dri/renderD128", True) == NVENC,
+          "select_encoder prefers NVENC over VAAPI when a real dGPU is present")
+    check(select_encoder("... V..... libx264 ...", "/dev/dri/renderD128") == LIBX264,
+          "select_encoder ignores a render node when ffmpeg has no h264_vaapi")
+
+    # THE AMD-BOX CASE. Distro ffmpeg lists h264_nvenc whether or not an NVIDIA
+    # card exists, so selecting on the listing alone sends an AMD mini PC to
+    # NVENC -> fail -> libx264, with the iGPU never touched. The device gate is
+    # the whole reason VAAPI is reachable in practice.
+    check(select_encoder(both_listing, "/dev/dri/renderD128", False) == VAAPI,
+          "select_encoder: nvenc LISTED but no NVIDIA node + a render node -> VAAPI")
+    check(select_encoder(both_listing, None, False) == LIBX264,
+          "select_encoder: encoders listed but NO devices at all -> libx264")
+
+    # -- exclude: a runtime failure walks to the next real candidate --
+    check(select_encoder(both_listing, "/dev/dri/renderD128", True,
+                         frozenset({NVENC})) == VAAPI,
+          "select_encoder: excluding a failed NVENC falls through to VAAPI, not CPU")
+    check(select_encoder(both_listing, "/dev/dri/renderD128", True,
+                         frozenset({NVENC, VAAPI})) == LIBX264,
+          "select_encoder: both hardware encoders excluded -> libx264")
+
+    # -- NVIDIA node discovery --
+    check(find_nvidia_device(exists=lambda p: p == "/dev/nvidiactl") is True,
+          "find_nvidia_device: nvidiactl (injected by the nvidia runtime) counts")
+    check(find_nvidia_device(exists=lambda p: False) is False,
+          "find_nvidia_device: no node -> False (an AMD/Intel-only box)")
+
+    # -- render-node discovery: env override, then the standard nodes --
+    check(find_vaapi_device(env="", exists=lambda p: p == "/dev/dri/renderD128")
+          == "/dev/dri/renderD128", "find_vaapi_device: probes renderD128 first")
+    check(find_vaapi_device(env="", exists=lambda p: p == "/dev/dri/renderD129")
+          == "/dev/dri/renderD129", "find_vaapi_device: falls through to renderD129")
+    check(find_vaapi_device(env="", exists=lambda p: False) is None,
+          "find_vaapi_device: no node -> None (VAAPI simply not a candidate)")
+    check(find_vaapi_device(env="/dev/dri/card9", exists=lambda p: True) == "/dev/dri/card9",
+          "find_vaapi_device: env override wins when it exists")
+    check(find_vaapi_device(env="/dev/dri/nope",
+                            exists=lambda p: p == "/dev/dri/renderD128")
+          == "/dev/dri/renderD128",
+          "find_vaapi_device: a missing override warns and falls back, never crashes")
 
     # -- segment (mpegts) --
     nv_seg = build_transcode_args(
@@ -199,6 +263,29 @@ def arg_builder_checks() -> None:
         "-c:a", "copy",
         "-f", "mpegts", "/c/out.ts",
     ], "NVENC segment: full-GPU decode+encode, mpegts out, audio copy (aac source)")
+
+    va_seg = build_transcode_args(
+        "ffmpeg", VAAPI, container="mpegts", output="/c/out.ts",
+        input_path="/r/in.ts", audio_codec="aac", vaapi_device="/dev/dri/renderD128",
+    )
+    check(va_seg == [
+        "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin",
+        "-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128",
+        "-hwaccel_output_format", "vaapi",
+        "-i", "/r/in.ts",
+        "-vf", "format=nv12|vaapi,hwupload",
+        "-c:v", "h264_vaapi", "-rc_mode", "CQP", "-qp", "23",
+        "-c:a", "copy",
+        "-f", "mpegts", "/c/out.ts",
+    ], "VAAPI segment: iGPU decode+encode on the render node, mpegts out")
+
+    va_nodev = build_transcode_args(
+        "ffmpeg", VAAPI, container="mpegts", output="/c/out.ts", input_path="/r/in.ts",
+    )
+    check("-hwaccel_device" not in va_nodev
+          and va_nodev[:7] == ["ffmpeg", "-hide_banner", "-loglevel", "warning",
+                               "-nostdin", "-hwaccel", "vaapi"],
+          "VAAPI without an explicit device omits -hwaccel_device (ffmpeg picks the default node)")
 
     x_seg = build_transcode_args(
         "ffmpeg", LIBX264, container="mpegts", output="/c/out.ts",
@@ -227,6 +314,29 @@ def arg_builder_checks() -> None:
         "-movflags", "+faststart",
         "-f", "mp4", "/c/7.part.mp4",
     ], "NVENC clip: concat + precise cut + faststart mp4")
+
+    va_clip = build_transcode_args(
+        "ffmpeg", VAAPI, container="mp4", output="/c/7.part.mp4",
+        concat_list="/c/7.txt", seek_s=5.0, duration_s=25.0, audio_codec="aac",
+        vaapi_device="/dev/dri/renderD128",
+    )
+    check(va_clip == [
+        "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin",
+        "-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128",
+        "-hwaccel_output_format", "vaapi",
+        "-f", "concat", "-safe", "0", "-i", "/c/7.txt",
+        "-ss", "5.000", "-t", "25.000",
+        "-vf", "format=nv12|vaapi,hwupload",
+        "-c:v", "h264_vaapi", "-rc_mode", "CQP", "-qp", "23",
+        "-c:a", "copy",
+        "-movflags", "+faststart",
+        "-f", "mp4", "/c/7.part.mp4",
+    ], "VAAPI clip: concat + precise cut + faststart mp4 on the iGPU")
+
+    # The hwupload filter must come AFTER the cut, or ffmpeg uploads frames it
+    # is about to discard (and -ss/-t would apply to the wrong filter graph).
+    check(va_clip.index("-t") < va_clip.index("-vf") < va_clip.index("-c:v"),
+          "VAAPI: filter sits between the output-side cut and the encoder")
 
     x_clip = build_transcode_args(
         "ffmpeg", LIBX264, container="mp4", output="/c/7.part.mp4",
@@ -279,6 +389,29 @@ async def _encoder_cases() -> None:
     check(await t3.encoder() == LIBX264, "mark_nvenc_failed() -> libx264 thereafter")
     t3.mark_nvenc_failed()  # idempotent, no crash
     check(await t3.encoder() == LIBX264, "mark_nvenc_failed() is idempotent")
+
+    # -- VAAPI: selected only with a render node, and downgrades the same way --
+    async def run_vaapi(args, timeout=None):
+        return 0, b"V..... h264_vaapi  H.264/AVC (VAAPI)\nV..... libx264 ...", b""
+
+    t5 = make_transcoder("enc-vaapi", vaapi_device="/dev/dri/renderD128")
+    t5._run = run_vaapi
+    check(await t5.encoder() == VAAPI, "encoder() -> VAAPI on a box with an iGPU render node")
+    check(t5.vaapi_device == "/dev/dri/renderD128",
+          "vaapi_device is exposed for the recorder's own clip argv")
+
+    t6 = make_transcoder("enc-vaapi-nodev")  # vaapi_device pinned None
+    t6._run = run_vaapi
+    check(await t6.encoder() == LIBX264,
+          "encoder() -> libx264 when ffmpeg has h264_vaapi but no node is passed through")
+    check(t6.vaapi_device is None, "no render node -> vaapi_device is None")
+
+    t7 = make_transcoder("enc-vaapi-downgrade", vaapi_device="/dev/dri/renderD128")
+    t7._run = run_vaapi
+    check(await t7.encoder() == VAAPI, "encoder() starts on VAAPI")
+    t7.mark_hw_failed(VAAPI)
+    check(await t7.encoder() == LIBX264,
+          "mark_hw_failed(VAAPI) -> libx264 thereafter (driver/permission failure)")
 
     # disabled transcoder (no binaries) -> libx264 default, never probes.
     # ("" forces-disabled even on a host that has ffmpeg on PATH; None means
@@ -510,7 +643,43 @@ async def _clip_branch_cases() -> None:
     out3 = await rec.extract_clip("front", "native.retry", start_time, end_time)
     check(out3 == rec.clip_path(eid3) and seen == [NVENC, LIBX264],
           "nvenc clip failure -> automatic libx264 retry -> clip lands")
-    check(tc._nvenc_failed is True, "runtime nvenc failure is recorded (downgrade sticks)")
+    check(NVENC in tc._failed_encoders,
+          "runtime nvenc failure is recorded (excluded for the rest of the process)")
+
+    # -- the same retry path for VAAPI (AMD/Intel iGPU), and the render node
+    #    must reach the clip argv or ffmpeg would use the wrong/no GPU --
+    tcv = make_transcoder("clipbranch-vaapi", vaapi_device="/dev/dri/renderD128")
+    rec._transcode = tcv
+    tcv.probe = probe_hevc
+
+    async def enc_vaapi():
+        return VAAPI
+
+    tcv.encoder = enc_vaapi
+    seen_v: list[str] = []
+    saw_node: list[bool] = []
+
+    async def run_vaapi_then_ok(args):
+        vcodec = args[args.index("-c:v") + 1]
+        seen_v.append(vcodec)
+        if vcodec == VAAPI:
+            saw_node.append("/dev/dri/renderD128" in args)
+            return 1  # simulate a VAAPI init failure (no driver / busy engine)
+        out = Path(args[-1])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"MP4" * 8)
+        return 0
+
+    rec._run_ffmpeg = run_vaapi_then_ok
+    eid_v = await db.insert_event(
+        "native.vaapi", "front", "cat", 1, 0.7, start_time, end_time=end_time
+    )
+    out_v = await rec.extract_clip("front", "native.vaapi", start_time, end_time)
+    check(out_v == rec.clip_path(eid_v) and seen_v == [VAAPI, LIBX264],
+          "vaapi clip failure -> automatic libx264 retry -> clip lands")
+    check(saw_node == [True], "the recorder passes the render node into the clip argv")
+    check(VAAPI in tcv._failed_encoders,
+          "runtime vaapi failure is recorded (excluded for the rest of the process)")
 
     # -- both encoders fail -> stream-copy fallback so a clip still lands --
     tc2 = make_transcoder("clipbranch-fallback")
@@ -542,6 +711,58 @@ async def _clip_branch_cases() -> None:
 def clip_branch_checks() -> None:
     print("5. clip_plan + recorder.extract_clip transcode/copy branch")
     asyncio.run(_clip_branch_cases())
+
+
+# =====================================================================
+# 5b. clip extraction concurrency cap
+# =====================================================================
+
+
+async def _clip_concurrency_cases() -> None:
+    """schedule_clip must never run more than CLIP_CONCURRENCY extractions at
+    once. Without the cap, N simultaneous events fan out to N ffmpeg re-encodes,
+    which on a CPU-transcoding box starve detect ingest and push each other past
+    the clip timeout — and a timed-out transcode lands an unplayable HEVC clip."""
+    cfg = make_config("clipsem")
+    db = Database(cfg.data_dir / "sem.db")
+    await db.connect()
+
+    rec = Recorder(cfg, db, FakeSettings())
+    rec._running = True
+    rec.clip_delay_s = 0.0  # the post-event wait is not what we are measuring
+
+    live = 0
+    peak = 0
+    done = asyncio.Event()
+    finished = 0
+    total = CLIP_CONCURRENCY + 3
+
+    async def slow_extract(camera, frigate_id, start_time, end_time):
+        nonlocal live, peak, finished
+        live += 1
+        peak = max(peak, live)
+        await asyncio.sleep(0.05)  # hold the slot so overlap is observable
+        live -= 1
+        finished += 1
+        if finished == total:
+            done.set()
+
+    rec.extract_clip = slow_extract
+    for i in range(total):
+        await rec.schedule_clip("front", f"native.sem{i}", 100.0, 110.0)
+    await asyncio.wait_for(done.wait(), timeout=10.0)
+
+    check(peak <= CLIP_CONCURRENCY,
+          f"schedule_clip caps concurrent extractions at {CLIP_CONCURRENCY} (peak was {peak})")
+    check(peak > 1, "the cap still allows real parallelism (not accidentally serialized)")
+    check(finished == total, "every queued clip still runs — the cap delays, never drops")
+
+    await db.close()
+
+
+def clip_concurrency_checks() -> None:
+    print("5b. clip extraction concurrency cap")
+    asyncio.run(_clip_concurrency_cases())
 
 
 # =====================================================================
@@ -670,6 +891,7 @@ def main() -> None:
     encoder_checks()
     segment_cache_checks()
     clip_branch_checks()
+    clip_concurrency_checks()
     failure_checks()
     real_ffmpeg_checks()
     print(f"\nALL {PASS} CHECKS PASSED (HEVC->H.264 transcode: probe/encoder/cache/clip)")

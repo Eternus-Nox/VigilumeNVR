@@ -127,30 +127,65 @@ it serves H.264 to the browser**, transcoding on the fly.
 - **Event clips** are transcoded **once**, at extraction time, so
   `GET /api/events/{id}/clip.mp4` serves a browser-playable faststart H.264 MP4.
   H.264 cameras keep the fast concat + stream-copy path.
-- **GPU-accelerated with a CPU fallback.** Transcoding uses the NVIDIA GPU
-  (`h264_nvenc`, the same GPU that runs detection) when available, falling back
-  to CPU (`libx264`) otherwise. The container already exposes NVENC via
-  `NVIDIA_DRIVER_CAPABILITIES=…,video` (set in `docker-compose.yml`).
+- **Hardware-accelerated with a CPU fallback.** Transcoding runs on whatever
+  video silicon the box actually has — see
+  [Transcoding hardware](#transcoding-hardware-nvenc-vaapi-libx264) below.
+- **Bounded concurrency.** At most two clip extractions run at once
+  (`CLIP_CONCURRENCY`). Events on different cameras routinely end together, and
+  without the cap those re-encodes pile up, starve detection of CPU, and can push
+  each other past the clip timeout. Queued clips are delayed, never dropped.
 - **Never fails hard.** If a transcode fails, Vigilume serves the original
-  segment/clip and logs a `WARNING` (no 500). If NVENC init fails at runtime it
-  falls back to libx264 and logs once.
+  segment/clip and logs a `WARNING` (no 500). If a hardware encoder fails at
+  runtime it is excluded for the rest of the process and the next option is used.
 
-You don't have to configure anything — H.264 and H.265 main streams both work
-(see [cameras-amcrest.md](cameras-amcrest.md#3-stream-settings-both-turrets)). To
-confirm on a GPU box which encoder is in use, watch the recorder logs:
+You don't have to configure anything for the codec itself — H.264 and H.265 main
+streams both work (see
+[cameras-amcrest.md](cameras-amcrest.md#3-stream-settings-both-turrets)).
+
+### Transcoding hardware: NVENC, VAAPI, libx264
+
+Vigilume picks the best H.264 encoder available, in this order:
+
+| Encoder | Hardware | Needs |
+|---|---|---|
+| `h264_nvenc` | NVIDIA GPU | the NVIDIA container runtime (already wired up in `docker-compose.yml`) |
+| `h264_vaapi` | AMD (Radeon/VCN) or Intel (Quick Sync) iGPU | `VAAPI_DEVICE` set to the DRI render node |
+| `libx264` | CPU | nothing — always works, always the slowest |
+
+**Selection requires the device, not just the encoder.** Distro ffmpeg builds
+list `h264_nvenc` and `h264_vaapi` whether or not the matching hardware exists
+(the encoders load their drivers at runtime). Vigilume therefore checks for the
+device node — `/dev/nvidiactl` for NVENC, the render node for VAAPI — before
+choosing one. Without that check an AMD box would select NVENC, fail, and drop
+to the CPU with a perfectly good iGPU sitting idle.
+
+**Enabling VAAPI (AMD/Intel iGPU).** The render node has to be passed into the
+backend container. Find it and set it in `.env`:
+
+```bash
+ls /dev/dri          # renderD128 is the first GPU
+# in .env:
+VAAPI_DEVICE=/dev/dri/renderD128
+```
+
+then `docker compose up -d backend`. The image already ships the Mesa VA driver
+(`mesa-va-drivers`), so nothing else is needed. On a box with two GPUs,
+`VIGILUME_VAAPI_DEVICE` overrides which node is used.
+
+**Confirming which encoder is live:**
 
 ```bash
 docker compose logs -f backend | grep 'transcode:'
 ```
 
-- `transcode: selected H.264 encoder h264_nvenc (GPU NVENC)` — the GPU path is active
-- `transcode: h264_nvenc segment camera=… (hevc->h264)` / `transcode: h264_nvenc clip event=… (hevc->h264)` — a transcode ran on the GPU
-- `transcode: selected H.264 encoder libx264 (CPU libx264)` or a
-  `h264_nvenc failed at runtime — falling back to CPU libx264` line — CPU fallback
+- `transcode: selected H.264 encoder h264_nvenc (GPU NVENC)` — NVIDIA path active
+- `transcode: selected H.264 encoder h264_vaapi (GPU VAAPI on /dev/dri/renderD128)` — iGPU path active
+- `transcode: selected H.264 encoder libx264 (CPU libx264)` — CPU path (no GPU found, or none passed through)
+- `transcode: h264_vaapi failed at runtime — using libx264 …` — the GPU was found but could not encode (missing driver, or no permission on the node)
 
-To double-check NVENC is really doing the work, run `nvidia-smi dmon` (or
-`nvidia-smi -q -d UTILIZATION`) while scrubbing an HEVC camera's timeline — the
-**enc** column should tick up.
+To double-check the hardware is really doing the work while you scrub an HEVC
+camera's timeline: `nvidia-smi dmon` on NVIDIA (the **enc** column ticks up), or
+`radeontop` / `intel_gpu_top` on an iGPU.
 
 ### Clip lifecycle — why a fresh event briefly shows "processing"
 

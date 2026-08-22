@@ -65,7 +65,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional, Sequence
 
-from .transcode import LIBX264, NVENC, Transcoder, build_transcode_args
+from .transcode import HW_ENCODERS, LIBX264, Transcoder, build_transcode_args
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..config import Config
@@ -90,6 +90,17 @@ _BOOT_SEGMENT_CHECK_S = 30.0  # warn if a record_enabled cam has no segment by n
 _ACTIVE_GRACE_S = 120.0      # never delete files/dirs written this recently
 _TERMINATE_WAIT_S = 5.0
 _CLIP_FFMPEG_TIMEOUT_S = 120.0
+
+# Cap on CONCURRENT clip extractions. Events on different cameras routinely end
+# together (one person walks past three of them), and each clip on an HEVC
+# camera is a full re-encode — on a box that falls back to libx264 those pile up,
+# starve the detect-ingest ffmpeg children of CPU, and can push each other past
+# _CLIP_FFMPEG_TIMEOUT_S. A timed-out transcode falls back to a stream-copy,
+# which lands an HEVC clip the browser cannot play, so the pile-up degrades the
+# ONE artifact the event exists to produce. Queueing costs a few seconds of clip
+# latency and is invisible (clips are already delayed CLIP_DELAY_S). Mirrors the
+# export path's semaphore; 2 keeps a hardware encoder busy without thrashing CPU.
+CLIP_CONCURRENCY = 2
 
 # Timeline range export (the recordings router's export.mp4). The window is
 # capped by the router (EXPORT_MAX_SECONDS); finished exports live in a bounded
@@ -365,6 +376,10 @@ class Recorder:
         self._purging = False
         # Instance-level so tests can shrink the post-end wait.
         self.clip_delay_s = CLIP_DELAY_S
+        # Bounds concurrent clip extractions (see CLIP_CONCURRENCY). Held only
+        # around the ffmpeg run, never across the post-event delay, so queued
+        # clips keep their own timing.
+        self._clip_sem = asyncio.Semaphore(CLIP_CONCURRENCY)
         # HEVC->H.264 transcoding for browser playback (segments served by the
         # recordings router via .transcoder; clips transcoded in extract_clip).
         # Recordings on disk stay HEVC; this only affects what the browser gets.
@@ -863,7 +878,10 @@ class Recorder:
     ) -> None:
         try:
             await asyncio.sleep(self.clip_delay_s)
-            await self.extract_clip(camera, frigate_id, start_time, end_time)
+            # Acquire AFTER the delay: the wait is per-event pacing, not work,
+            # and holding a slot through it would serialize unrelated events.
+            async with self._clip_sem:
+                await self.extract_clip(camera, frigate_id, start_time, end_time)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — clip failure must never propagate
@@ -963,7 +981,7 @@ class Recorder:
 
         Reuses the event-clip machinery end-to-end: the same segment selection
         (``select_segments``), concat list, cut math and ``_extract_to_part``
-        (stream-copy for H.264 sources, else NVENC→libx264→copy transcode). The
+        (stream-copy for H.264 sources, else hardware→libx264→copy transcode). The
         window is expected to be pre-validated/-capped by the caller (the router
         enforces ``EXPORT_MAX_SECONDS``).
 
@@ -1105,9 +1123,10 @@ class Recorder:
 
         H.264 source → the fast stream-copy path (``build_clip_args``, unchanged).
         HEVC (or any non-browser codec) → transcode to a faststart H.264 mp4 so
-        ``clip.mp4`` is browser-playable, with an NVENC→libx264 runtime fallback
-        and, as a last resort, a stream-copy so a clip still lands (logged; that
-        clip stays HEVC and may not play). Recordings on disk are untouched."""
+        ``clip.mp4`` is browser-playable, with a hardware→libx264 runtime
+        fallback and, as a last resort, a stream-copy so a clip still lands
+        (logged; that clip stays HEVC and may not play). Recordings on disk are
+        untouched."""
         plan = await self._transcode.clip_plan(camera, sample_segment)
         if not plan.transcode:
             args = build_clip_args(concat_path, seek_s, duration_s, part_path)
@@ -1118,6 +1137,7 @@ class Recorder:
                 "ffmpeg", enc, container="mp4", output=part_path,
                 concat_list=concat_path, seek_s=seek_s, duration_s=duration_s,
                 audio_codec=plan.audio_codec,
+                vaapi_device=self._transcode.vaapi_device,
             )
 
         encoder = plan.encoder or LIBX264
@@ -1126,11 +1146,16 @@ class Recorder:
             encoder, frigate_id, camera, plan.video_codec or "?",
         )
         returncode = await self._run_ffmpeg(transcode_args(encoder))
-        if returncode != 0 and encoder == NVENC:
-            # Runtime NVENC failure → downgrade globally and retry on CPU.
-            self._transcode.mark_nvenc_failed()
-            log.info("transcode: libx264 clip event=%s cam=%s (nvenc retry)", frigate_id, camera)
-            returncode = await self._run_ffmpeg(transcode_args(LIBX264))
+        if returncode != 0 and encoder in HW_ENCODERS:
+            # Runtime hardware-encoder failure → exclude it globally and retry on
+            # whatever the transcoder re-selects (the next GPU encoder if there
+            # is one, otherwise libx264).
+            retry = self._transcode.mark_hw_failed(encoder)
+            log.info(
+                "transcode: %s clip event=%s cam=%s (%s retry)",
+                retry, frigate_id, camera, encoder,
+            )
+            returncode = await self._run_ffmpeg(transcode_args(retry))
         if returncode != 0:
             # Both encoders failed → fall back to a stream-copy so a clip still
             # exists (today's behavior). It stays HEVC and may not play, but the

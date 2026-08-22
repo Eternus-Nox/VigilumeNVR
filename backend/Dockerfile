@@ -21,8 +21,13 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# mesa-va-drivers + libva-drm2 supply the VAAPI backend for AMD/Intel iGPU
+# transcoding; see the gpu target below for the full rationale. Present in both
+# targets so a Coral box (which has no reason to run the CUDA image) still gets
+# hardware HEVC->H.264 instead of falling back to libx264.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends libglib2.0-0 libgl1 ffmpeg \
+        mesa-va-drivers libva-drm2 \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /srv
@@ -126,10 +131,18 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     DEBIAN_FRONTEND=noninteractive
 
+# mesa-va-drivers + libva-drm2: the VAAPI userspace for an AMD (VCN) or Intel
+# (Quick Sync) iGPU. Ubuntu's ffmpeg is already built with VAAPI, but without
+# the Mesa driver it finds no VA backend and h264_vaapi cannot initialize, so
+# HEVC->H.264 falls back to CPU libx264. Only useful when a render node is also
+# passed through (VAAPI_DEVICE in docker-compose.yml); inert otherwise, and it
+# costs ~30 MB against a ~5 GB CUDA base. NVIDIA boxes are unaffected — NVENC
+# is selected ahead of VAAPI (app/native/transcode.py select_encoder).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         python3.12 python3.12-venv \
         ffmpeg libglib2.0-0 libgl1 \
+        mesa-va-drivers libva-drm2 \
  && rm -rf /var/lib/apt/lists/*
 
 ENV VIRTUAL_ENV=/opt/venv

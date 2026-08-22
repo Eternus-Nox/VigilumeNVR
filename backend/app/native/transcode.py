@@ -47,11 +47,31 @@ from typing import Awaitable, Callable, Optional
 
 log = logging.getLogger(__name__)
 
-# H.264 encoders, best-first. NVENC is the GPU path (requires an NVIDIA GPU +
+# H.264 encoders, best-first. NVENC is the NVIDIA path (requires an NVIDIA GPU +
 # NVIDIA_DRIVER_CAPABILITIES including "video" in the container — set in
-# docker-compose.yml); libx264 is the universal CPU fallback.
+# docker-compose.yml); VAAPI is the AMD/Intel iGPU path (requires a DRI render
+# node passed into the container + the Mesa VA driver in the image); libx264 is
+# the universal CPU fallback.
 NVENC = "h264_nvenc"
+VAAPI = "h264_vaapi"
 LIBX264 = "libx264"
+
+# Encoders that run on fixed-function video silicon. These share one property
+# the fallback logic cares about: they can be present in the ffmpeg build and
+# still fail at RUNTIME (no driver, no permission on the node, a busy or
+# unsupported engine), so a failure re-selects (next GPU encoder, else libx264)
+# instead of erroring the transcode.
+HW_ENCODERS = frozenset({NVENC, VAAPI})
+
+# Where a VAAPI-capable GPU exposes itself. renderD128 is the first render node
+# on any Linux box; a second GPU lands on renderD129. Probed in order, and
+# overridable for a box that enumerates differently.
+VAAPI_DEVICE_ENV = "VIGILUME_VAAPI_DEVICE"
+VAAPI_DEVICE_CANDIDATES = ("/dev/dri/renderD128", "/dev/dri/renderD129")
+
+# Nodes the NVIDIA container runtime injects when it hands a GPU to a container.
+# nvidiactl is the control device and exists whenever ANY card was passed in.
+NVIDIA_DEVICE_CANDIDATES = ("/dev/nvidiactl", "/dev/nvidia0")
 
 # Video codecs a browser can already play through our HLS/MP4 pipeline, so we
 # stream-copy them untouched (no transcode).
@@ -60,10 +80,25 @@ _BROWSER_VIDEO_CODECS = frozenset({"h264", "avc", "avc1"})
 _AAC_AUDIO = frozenset({"aac"})
 
 # Encoder tuning. NVENC: constant-quality VBR (-cq drives quality, -b:v 0 lets
-# it float). libx264: -crf constant quality at a fast preset. 23 is a sane
+# it float). VAAPI: constant-QP, the only rate-control every Mesa/VA driver
+# implements the same way (the quality knob is -qp, matching -cq/-crf at 23).
+# libx264: -crf constant quality at a fast preset. 23 is a sane
 # "visually lossless-ish" default for review footage.
 _NVENC_VIDEO_OPTS = ("-preset", "p4", "-rc", "vbr", "-cq", "23", "-b:v", "0")
+_VAAPI_VIDEO_OPTS = ("-rc_mode", "CQP", "-qp", "23")
 _LIBX264_VIDEO_OPTS = ("-preset", "veryfast", "-crf", "23")
+_VIDEO_OPTS = {
+    NVENC: _NVENC_VIDEO_OPTS,
+    VAAPI: _VAAPI_VIDEO_OPTS,
+    LIBX264: _LIBX264_VIDEO_OPTS,
+}
+
+# Human-readable encoder names for the one-line selection log.
+_ENCODER_LABEL = {
+    NVENC: "GPU NVENC",
+    VAAPI: "GPU VAAPI",
+    LIBX264: "CPU libx264",
+}
 
 # Bounded on-disk LRU for transcoded timeline segments (re-seek/re-buffer hits).
 DEFAULT_CACHE_BYTES = 512 * 1024**2  # 512 MB
@@ -147,13 +182,82 @@ def parse_probe_output(text: str) -> ProbeResult:
 
 
 def build_encoders_probe_args(ffmpeg: str) -> list[str]:
-    """ffmpeg argv listing compiled-in encoders (grepped for ``h264_nvenc``)."""
+    """ffmpeg argv listing compiled-in encoders (grepped for the hw encoders)."""
     return [ffmpeg, "-hide_banner", "-encoders"]
 
 
-def select_encoder(encoders_listing: str) -> str:
-    """Pick ``h264_nvenc`` when ffmpeg exposes it, else ``libx264``."""
-    return NVENC if "h264_nvenc" in encoders_listing else LIBX264
+def find_vaapi_device(
+    *,
+    env: Optional[str] = None,
+    exists: Optional[Callable[[str], bool]] = None,
+) -> Optional[str]:
+    """The DRI render node to hand VAAPI, or ``None`` when there isn't one.
+
+    ``VIGILUME_VAAPI_DEVICE`` wins when set (and present); otherwise the
+    standard render nodes are probed in order. ``None`` — the case on a box with
+    no iGPU, or one where ``/dev/dri`` was never passed into the container — is
+    normal and simply means VAAPI is not a candidate.
+
+    ``env``/``exists`` are injectable so the selection logic stays testable
+    without a real render node.
+    """
+    check = exists if exists is not None else os.path.exists
+    override = env if env is not None else os.environ.get(VAAPI_DEVICE_ENV, "")
+    override = (override or "").strip()
+    if override:
+        # An explicit override that is not there is an operator mistake worth
+        # surfacing, not a silent downgrade to CPU.
+        if check(override):
+            return override
+        log.warning(
+            "transcode: %s=%s does not exist — ignoring and probing the "
+            "standard render nodes", VAAPI_DEVICE_ENV, override,
+        )
+    for node in VAAPI_DEVICE_CANDIDATES:
+        if check(node):
+            return node
+    return None
+
+
+def find_nvidia_device(exists: Optional[Callable[[str], bool]] = None) -> bool:
+    """Whether an NVIDIA GPU was actually passed into this container.
+
+    Needed because ``ffmpeg -encoders`` is NOT evidence of hardware: distro
+    ffmpeg builds (Debian's and Ubuntu's both) list ``h264_nvenc`` and
+    ``h264_vaapi`` unconditionally, since the encoders load their drivers at
+    runtime. Selecting on the listing alone therefore picks NVENC on an AMD box,
+    fails at init, and — because a hardware failure downgrades to CPU — lands on
+    libx264 while a perfectly good iGPU sits idle. Checking for the device node
+    is what makes the choice reflect the actual box.
+    """
+    check = exists if exists is not None else os.path.exists
+    return any(check(node) for node in NVIDIA_DEVICE_CANDIDATES)
+
+
+def select_encoder(
+    encoders_listing: str,
+    vaapi_device: Optional[str] = None,
+    nvidia_present: bool = False,
+    exclude: frozenset[str] = frozenset(),
+) -> str:
+    """Pick the best available H.264 encoder from an ``ffmpeg -encoders`` dump.
+
+    Order is NVENC → VAAPI → libx264. NVENC first because a box with a discrete
+    NVIDIA card is the one configuration where the dGPU beats an iGPU outright;
+    VAAPI next because fixed-function AMD/Intel encoding still costs a fraction
+    of libx264; libx264 last because it always works.
+
+    Each hardware encoder needs BOTH a listing entry and its device — see
+    ``find_nvidia_device`` for why the listing alone is not enough. ``exclude``
+    drops encoders that already failed at runtime, so a box whose device probe
+    was wrong still walks down to the next real option instead of giving up on
+    hardware entirely.
+    """
+    if NVENC not in exclude and nvidia_present and "h264_nvenc" in encoders_listing:
+        return NVENC
+    if VAAPI not in exclude and vaapi_device and "h264_vaapi" in encoders_listing:
+        return VAAPI
+    return LIBX264
 
 
 def build_transcode_args(
@@ -167,12 +271,16 @@ def build_transcode_args(
     seek_s: Optional[float] = None,                   # output-side -ss (clip cut)
     duration_s: Optional[float] = None,               # -t (clip cut)
     audio_codec: Optional[str] = None,                # source audio -> copy if aac else aac
+    vaapi_device: Optional[str] = None,               # DRI render node (VAAPI only)
 ) -> list[str]:
     """ffmpeg argv to transcode a source to H.264 in ``container``.
 
     - ``encoder`` NVENC → full-GPU pipeline ``-hwaccel cuda
       -hwaccel_output_format cuda`` (NVDEC decodes HEVC, frames stay in GPU
       memory, ``h264_nvenc`` encodes) — the robust, fastest HEVC→H.264 path.
+      VAAPI → the AMD/Intel equivalent, ``-hwaccel vaapi -hwaccel_device <node>
+      -hwaccel_output_format vaapi`` (the iGPU's decode block reads HEVC, the
+      surfaces never leave GPU memory, ``h264_vaapi`` encodes).
       LIBX264 → plain CPU decode + encode.
     - Segment case: ``input_path`` + ``container="mpegts"`` → an independent
       H.264 MPEG-TS segment (each source .ts is keyframe-started, so a
@@ -188,6 +296,14 @@ def build_transcode_args(
         # Decode on the GPU and keep frames there for the NVENC encoder — must
         # precede the input it applies to.
         args += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+    elif encoder == VAAPI:
+        # Same idea on AMD/Intel: the render node names WHICH GPU, and
+        # -hwaccel_output_format vaapi keeps decoded frames as VA surfaces so
+        # h264_vaapi encodes them in place (no GPU->CPU->GPU round trip).
+        args += ["-hwaccel", "vaapi"]
+        if vaapi_device:
+            args += ["-hwaccel_device", str(vaapi_device)]
+        args += ["-hwaccel_output_format", "vaapi"]
     if concat_list is not None:
         args += ["-f", "concat", "-safe", "0", "-i", str(concat_list)]
     else:
@@ -197,8 +313,16 @@ def build_transcode_args(
         args += ["-ss", f"{max(0.0, seek_s):.3f}"]
     if duration_s is not None:
         args += ["-t", f"{max(0.0, duration_s):.3f}"]
+    if encoder == VAAPI:
+        # Guard against a decoder that handed back SOFTWARE frames (a codec the
+        # iGPU can't decode, so ffmpeg silently used the CPU decoder). h264_vaapi
+        # only accepts VA surfaces, and without this it would abort. The filter
+        # is a no-op when frames are already on the GPU, and uploads them when
+        # they are not — so an HEVC main transcodes fully on-GPU while an exotic
+        # source still encodes on the GPU instead of failing outright.
+        args += ["-vf", "format=nv12|vaapi,hwupload"]
     args += ["-c:v", encoder]
-    args += list(_NVENC_VIDEO_OPTS if encoder == NVENC else _LIBX264_VIDEO_OPTS)
+    args += list(_VIDEO_OPTS.get(encoder, _LIBX264_VIDEO_OPTS))
     if (audio_codec or "").lower() in _AAC_AUDIO:
         args += ["-c:a", "copy"]
     else:
@@ -226,12 +350,13 @@ def _unlink(path: Path) -> None:
 
 class Transcoder:
     """Codec probe (cached per camera), H.264 encoder selection (cached, with a
-    one-time NVENC→libx264 runtime downgrade), a bounded on-disk LRU of
+    one-time hardware→libx264 runtime downgrade), a bounded on-disk LRU of
     transcoded timeline segments with in-flight de-duplication, and the clip
     transcode plan the recorder consumes.
 
-    ``ffmpeg``/``ffprobe`` default to ``shutil.which`` lookups; tests inject
-    explicit paths and monkeypatch ``_run`` to avoid a real ffmpeg.
+    ``ffmpeg``/``ffprobe`` default to ``shutil.which`` lookups and
+    ``vaapi_device`` to a render-node probe; tests inject explicit values and
+    monkeypatch ``_run`` to avoid a real ffmpeg.
     """
 
     def __init__(
@@ -243,6 +368,8 @@ class Transcoder:
         cache_max_bytes: int = DEFAULT_CACHE_BYTES,
         codec_ttl_s: float = CODEC_TTL_S,
         segment_timeout_s: float = SEGMENT_TRANSCODE_TIMEOUT_S,
+        vaapi_device: Optional[str] = None,
+        nvidia_present: Optional[bool] = None,
     ) -> None:
         self._cache_dir = Path(cache_dir)
         self._ffmpeg = ffmpeg if ffmpeg is not None else shutil.which("ffmpeg")
@@ -250,10 +377,21 @@ class Transcoder:
         self._cache_max_bytes = cache_max_bytes
         self._codec_ttl_s = codec_ttl_s
         self._segment_timeout_s = segment_timeout_s
+        # Resolved ONCE at construction: a render node does not appear or vanish
+        # over a container's lifetime, and probing per transcode would stat the
+        # filesystem on every timeline seek.
+        self._vaapi_device = vaapi_device if vaapi_device is not None else find_vaapi_device()
+        self._nvidia_present = (
+            nvidia_present if nvidia_present is not None else find_nvidia_device()
+        )
         self._codec_cache: dict[str, tuple[ProbeResult, float]] = {}
         self._encoder: Optional[str] = None
         self._encoder_lock = asyncio.Lock()
-        self._nvenc_failed = False
+        # The ``ffmpeg -encoders`` dump, kept so a runtime failure can re-select
+        # the NEXT candidate without re-probing.
+        self._encoders_listing: Optional[str] = None
+        # Hardware encoders that failed at runtime; never retried this process.
+        self._failed_encoders: set[str] = set()
         self._inflight: dict[str, asyncio.Future] = {}
         self._codec_inflight: dict[str, asyncio.Future] = {}
 
@@ -266,6 +404,13 @@ class Transcoder:
     @property
     def ffmpeg(self) -> Optional[str]:
         return self._ffmpeg
+
+    @property
+    def vaapi_device(self) -> Optional[str]:
+        """The DRI render node VAAPI transcodes run against (``None`` when
+        there is no iGPU passed into the container). The recorder passes this
+        into ``build_transcode_args`` for its own clip transcodes."""
+        return self._vaapi_device
 
     def invalidate(self, camera: str) -> None:
         """Drop a cached codec probe (e.g. after a camera's encode config changed)."""
@@ -336,13 +481,10 @@ class Transcoder:
         self._codec_cache[camera] = (result, now)
         return result
 
-    # ---- encoder selection (cached; one-time NVENC->libx264 downgrade) ----
+    # ---- encoder selection (cached; one-time hardware->libx264 downgrade) ----
 
     async def encoder(self) -> str:
-        """The H.264 encoder to use, detected once and cached. Returns libx264
-        immediately once NVENC has failed at runtime."""
-        if self._nvenc_failed:
-            return LIBX264
+        """The H.264 encoder to use, detected once and cached."""
         if self._encoder is not None:
             return self._encoder
         async with self._encoder_lock:
@@ -353,25 +495,62 @@ class Transcoder:
     async def _detect_encoder(self) -> str:
         if not self._ffmpeg:
             return LIBX264
-        rc, out, _ = await self._run(
-            build_encoders_probe_args(self._ffmpeg), timeout=_PROBE_TIMEOUT_S
+        if self._encoders_listing is None:
+            rc, out, _ = await self._run(
+                build_encoders_probe_args(self._ffmpeg), timeout=_PROBE_TIMEOUT_S
+            )
+            self._encoders_listing = out.decode("utf-8", "replace") if out else ""
+        enc = select_encoder(
+            self._encoders_listing,
+            self._vaapi_device,
+            self._nvidia_present,
+            frozenset(self._failed_encoders),
         )
-        enc = select_encoder(out.decode("utf-8", "replace")) if out else LIBX264
-        log.info(
-            "transcode: selected H.264 encoder %s (%s)",
-            enc, "GPU NVENC" if enc == NVENC else "CPU libx264",
-        )
+        if enc == VAAPI:
+            log.info(
+                "transcode: selected H.264 encoder %s (%s on %s)",
+                enc, _ENCODER_LABEL[enc], self._vaapi_device,
+            )
+        else:
+            log.info(
+                "transcode: selected H.264 encoder %s (%s)",
+                enc, _ENCODER_LABEL.get(enc, enc),
+            )
         return enc
 
-    def mark_nvenc_failed(self) -> None:
-        """Runtime NVENC init/encode failure → downgrade to libx264 (log once)."""
-        if not self._nvenc_failed:
-            self._nvenc_failed = True
-            self._encoder = LIBX264
+    def mark_hw_failed(self, encoder: str = NVENC) -> str:
+        """Runtime hardware-encoder init/encode failure → never use ``encoder``
+        again this process. Returns the encoder to use INSTEAD, so the caller
+        can retry the same job without re-deriving it.
+
+        Permanent rather than retried: the causes (no driver in the image, no
+        device passed through, a GPU that does not implement the encode profile)
+        do not heal while the container runs, and retrying the hardware path on
+        every clip would double the latency of each one.
+
+        Re-selecting rather than jumping straight to libx264 matters on a box
+        with two GPUs, or one where the device probe guessed wrong — the next
+        hardware encoder still gets its chance before we concede to the CPU.
+        """
+        first_time = encoder not in self._failed_encoders
+        self._failed_encoders.add(encoder)
+        nxt = select_encoder(
+            self._encoders_listing or "",
+            self._vaapi_device,
+            self._nvidia_present,
+            frozenset(self._failed_encoders),
+        )
+        self._encoder = nxt
+        if first_time:
             log.warning(
-                "transcode: h264_nvenc failed at runtime — falling back to CPU "
-                "libx264 for all further transcodes (logged once)"
+                "transcode: %s failed at runtime — using %s for all further "
+                "transcodes (logged once per encoder)", encoder, nxt,
             )
+        return nxt
+
+    def mark_nvenc_failed(self) -> str:
+        """Back-compat alias for ``mark_hw_failed(NVENC)``."""
+        return self.mark_hw_failed(NVENC)
 
     # ---- timeline segment path (probe -> cache -> transcode, deduped) ----
 
@@ -442,6 +621,7 @@ class Transcoder:
             lambda enc: build_transcode_args(
                 self._ffmpeg, enc, container="mpegts",
                 output=tmp, input_path=source_path, audio_codec=probe.audio_codec,
+                vaapi_device=self._vaapi_device,
             ),
             timeout=self._segment_timeout_s,
         )
@@ -468,7 +648,7 @@ class Transcoder:
         *,
         timeout: Optional[float],
     ) -> bool:
-        """Run a transcode with the NVENC→libx264 runtime fallback. Returns
+        """Run a transcode with the hardware→libx264 runtime fallback. Returns
         whether an ffmpeg exited 0. (Segment path only — the recorder runs clip
         transcodes through its own ``_run_ffmpeg``.)"""
         log.info(
@@ -478,10 +658,16 @@ class Transcoder:
         rc, _, err = await self._run(args_for(encoder), timeout=timeout)
         if rc == 0:
             return True
-        if encoder == NVENC:
-            self.mark_nvenc_failed()
-            log.info("transcode: libx264 %s camera=%s (nvenc retry)", what, camera)
-            rc, _, err = await self._run(args_for(LIBX264), timeout=timeout)
+        if encoder in HW_ENCODERS:
+            # Retry on whatever selection survives the failure — the next
+            # hardware encoder on a two-GPU box, otherwise libx264. One retry
+            # per call keeps a failing segment bounded; a second bad encoder is
+            # excluded by the time the next segment is served.
+            retry = self.mark_hw_failed(encoder)
+            log.info(
+                "transcode: %s %s camera=%s (%s retry)", retry, what, camera, encoder,
+            )
+            rc, _, err = await self._run(args_for(retry), timeout=timeout)
             if rc == 0:
                 return True
         if err:

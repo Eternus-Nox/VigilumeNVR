@@ -67,8 +67,15 @@ services:
     # Optional PCIe Coral. `/dev/null:/dev/null` is a deliberate no-op — a hard
     # /dev/apex_0 mapping makes the backend REFUSE TO START on a box with no
     # Coral fitted. Set CORAL_DEVICE=/dev/apex_0 only if you actually have one.
+    # Optional AMD/Intel iGPU render node for HEVC->H.264 transcoding. Without
+    # it, HEVC cameras transcode on the CPU (libx264). Set
+    # VAAPI_DEVICE=/dev/dri/renderD128 (check `ls /dev/dri` on the host) to use
+    # the iGPU instead. NVIDIA boxes use NVENC and need nothing here. The
+    # /dev/zero default is inert — it differs from the Coral line's /dev/null
+    # only because compose rejects two devices sharing a container path.
     devices:
       - ${CORAL_DEVICE:-/dev/null}:${CORAL_DEVICE:-/dev/null}
+      - ${VAAPI_DEVICE:-/dev/zero}:${VAAPI_DEVICE:-/dev/zero}
     # USB Coral survives its post-firmware re-enumeration only if the whole USB
     # bus is mounted; a pinned device node points at something that no longer
     # exists. This grants the backend access to every USB device on the box —

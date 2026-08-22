@@ -83,12 +83,20 @@ both under **Setup → Camera → Video → Encode** (or **Settings → Camera �
 - Compression: **H.264 or H.265 — both work.** H.265/HEVC roughly **halves disk usage**
   but browsers can't decode HEVC directly, so Vigilume **automatically transcodes HEVC to
   H.264 for browser playback** (timeline segments on the fly + cached; event clips once at
-  extraction) using the GPU (NVENC) with a CPU fallback — the recordings stay HEVC on disk,
-  keeping the storage saving. See
+  extraction) on the GPU — NVIDIA NVENC or an AMD/Intel iGPU via VAAPI — with a CPU
+  fallback. The recordings stay HEVC on disk, keeping the storage saving. See
   [recordings.md → automatic H.264 transcoding](recordings.md#browser-playback-automatic-h264-transcoding-for-hevc-cameras).
   Pick **H.265** if you're storage-constrained (it costs a little GPU/CPU at review time);
   pick **H.264** if you'd rather the browser play segments untouched with zero transcode
   overhead. Either is a valid choice.
+  - On a box with **no GPU at all**, every HEVC transcode falls to `libx264` on the
+    CPU. That is fine for 5 MP cameras, but on 4 K/8 M it is slow enough to be worth
+    either passing an iGPU through (`VAAPI_DEVICE`, see
+    [Transcoding hardware](recordings.md#transcoding-hardware-nvenc-vaapi-libx264))
+    or leaving that camera's main stream on H.264.
+  - **Detection is unaffected either way.** The detector consumes decoded frames
+    from the SUB stream, so the main stream's codec is invisible to it — H.265
+    costs AI detection (server-side or Coral) exactly nothing.
 - Resolution/FPS: native is fine — 2592×1944 @ 15–20 fps (IP5M), 3840×2160 @ 15 fps (IP8M).
 - Bitrate: VBR, ~4096 kbps (IP5M) / ~6144–8192 kbps (IP8M). This directly drives disk
   usage — see the [storage math](faq.md#how-much-storage-do-i-need).
