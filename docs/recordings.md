@@ -166,19 +166,23 @@ backend container. Find it first:
 ls -l /dev/dri       # renderD128 is the first GPU; renderD129 a second
 ```
 
-Then name it, where your deployment keeps its variables:
+Then put it in `.env` and rebuild:
 
-- **CLI compose** — put `VAAPI_DEVICE=/dev/dri/renderD128` in `.env`, then
-  `docker compose up -d backend`.
-- **Portainer / Unraid** — add `VAAPI_DEVICE` = `/dev/dri/renderD128` under the
-  stack's **Environment variables** and redeploy. See
-  [deploy-unraid.md](deploy-unraid.md#6b-hevc-cameras-igpu-transcoding-on-an-amdintel-box).
+```bash
+# .env
+VAAPI_DEVICE=/dev/dri/renderD128
+```
+```bash
+docker compose up -d --build backend
+```
 
-The backend image ships the Mesa VA driver (`mesa-va-drivers`), so nothing else
-is needed — but a **prebuilt image published before VAAPI support was added does
-not have it**, and will log `h264_vaapi failed at runtime` and use the CPU until
-you re-pull a newer one. On a box with two GPUs, `VIGILUME_VAAPI_DEVICE`
-overrides which node is used.
+The `--build` matters the first time: the Mesa VA driver (`mesa-va-drivers`)
+lives *inside* the backend image, so an image built before VAAPI support was
+added logs `h264_vaapi failed at runtime` and uses the CPU no matter how the
+node is passed through. On a box with two GPUs, `VIGILUME_VAAPI_DEVICE`
+overrides which node is used. Unraid specifics — finding the node, the BIOS
+iGPU setting — are in
+[deploy-unraid.md](deploy-unraid.md#6b-hevc-cameras-igpu-transcoding-on-an-amdintel-box).
 
 **Confirming which encoder is live:**
 

@@ -109,11 +109,9 @@ docker compose up -d --build
 #    Camera prep (static IPs, RTSP users): docs/cameras-amcrest.md
 ```
 
-Prefer a GUI? [docs/portainer.md](docs/portainer.md) covers the same stack as a
-Portainer stack — use
-[docker-compose.portainer.yml](docker-compose.portainer.yml), not the file above:
-Portainer resolves relative bind paths against its own directory, which puts the
-database somewhere you did not intend.
+Running on Unraid? [docs/deploy-unraid.md](docs/deploy-unraid.md) covers the
+array/cache share layout, Docker image sizing, and how to switch the stack
+between NVIDIA, an AMD/Intel iGPU, and CPU-only.
 
 First boot: the backend downloads the detection model (~40 MB, SHA-256 verified), runs
 the GPU self-test, writes the go2rtc config, and starts recording as soon as cameras
@@ -202,7 +200,7 @@ run location without touching `.env` or runtime data, and
 | [docs/native-mode-design.md](docs/native-mode-design.md) | Engine design record: model pins + hashes, decode math, tracker settings, ffmpeg/go2rtc patterns |
 | [docs/recordings.md](docs/recordings.md) | Timeline scrubbing, event clips, the `processing` clip state, recorder logs, file layout + retention |
 | [docs/cameras-amcrest.md](docs/cameras-amcrest.md) | Per-model camera onboarding: IPs, RTSP users, stream settings, AD410 specifics |
-| [docs/portainer.md](docs/portainer.md) | Deploying as a Portainer stack: prebuilt images, the required absolute bind paths, and the two traps that silently lose data |
+| [docs/deploy-unraid.md](docs/deploy-unraid.md) | Deploying on Unraid: array vs. cache shares, Docker image sizing, and switching between NVIDIA / AMD-Intel iGPU / CPU |
 | [docs/mobile-pwa.md](docs/mobile-pwa.md) | Installing the PWA on iOS/Android, enabling notifications |
 | [docs/remote-access.md](docs/remote-access.md) | HTTPS + remote access via Tailscale, LAN-only TLS alternative, WebRTC over the tailnet |
 | [docs/live-latency.md](docs/live-latency.md) | Why live view is fast or slow: the WebRTC/MSE/HLS protocol map, zero-config WebRTC candidates + the `VIGILUME_WEBRTC_HOST` override, and the camera I-frame-interval fix |

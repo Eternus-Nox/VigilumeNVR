@@ -157,14 +157,15 @@ make sure the integrated GPU stays enabled even with a discrete card fitted).
 ich777's **Radeon TOP** (AMD) / **Intel GPU TOP** (Intel) plugins from Community
 Applications are the usual way to confirm and monitor it.
 
-**2. Point Vigilume at it.** Add a stack environment variable — in Portainer
-that is **Stacks → vigilume → Environment variables**, not a `.env` file:
+**2. Point Vigilume at it.** Add the render node to `.env` next to the project:
 
-| Name | Value |
-|---|---|
-| `VAAPI_DEVICE` | `/dev/dri/renderD128` |
+```bash
+# .env
+VAAPI_DEVICE=/dev/dri/renderD128
+```
 
-Redeploy the stack. Leave it unset and nothing changes (the mapping is inert).
+Then `docker compose up -d backend`. Leave it unset and nothing changes (the
+mapping is inert).
 
 Unlike the Jellyfin/Plex guides you may have followed on Unraid, **no
 `group_add: video` is needed** — the backend container runs as root, so it can
@@ -178,16 +179,23 @@ docker logs vigilume-backend 2>&1 | grep 'transcode:'
 ```
 
 `selected H.264 encoder libx264 (CPU libx264)` means the node never arrived —
-recheck step 1 and that the variable is on the **stack**, not one container.
-A `h264_vaapi failed at runtime — using libx264` line means the node arrived but
-the driver could not encode; that needs the image from step 4.
+recheck step 1 and that `VAAPI_DEVICE` is in the `.env` compose actually reads
+(the one beside `docker-compose.yml`). A `h264_vaapi failed at runtime — using
+libx264` line means the opposite: the node arrived, but the image has no VA
+driver — see step 4.
 
 **4. The image must include the Mesa VA driver.** VAAPI needs
-`mesa-va-drivers` inside the backend image. If you deploy the prebuilt GHCR
-image (the Portainer path), pull a build that has it — an image published before
-VAAPI support was added will log the runtime-failure line above no matter how
-the node is passed through. `docker compose pull backend` (or Portainer's
-**Re-pull image and redeploy**) after a new image is published.
+`mesa-va-drivers` inside the backend image. This stack **builds** the backend
+from `backend/Dockerfile`, which installs it, so a rebuild is all it takes:
+
+```bash
+docker compose up -d --build backend
+```
+
+An image built before VAAPI support was added logs the runtime-failure line
+above no matter how the node is passed through. If you ever switch to a
+prebuilt GHCR image instead of building, the same applies — pull one new
+enough to contain the driver.
 
 ## 6c. Switching between CPU, NVIDIA and AMD
 
@@ -224,8 +232,8 @@ The block to uncomment (backend service, both compose files):
 
 Uncommenting it **without** the Nvidia Driver plugin installed fails the whole
 stack with *could not select device driver "nvidia" with capabilities:
-[[gpu]]* — in Portainer that is a red banner on the stack, not one sick
-container. Installing the plugin but forgetting to uncomment is the quieter
+[[gpu]]* — `docker compose up` aborts before any container starts, so nothing
+is left half-running. Installing the plugin but forgetting to uncomment is the quieter
 failure: the stack comes up and detection logs `GPU UNAVAILABLE` with
 `ready:false` (because `VIGILUME_REQUIRE_GPU` defaults to `1`), which is the
 intended loud-rather-than-slow behavior.

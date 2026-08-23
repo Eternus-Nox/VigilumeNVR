@@ -3,8 +3,14 @@
 # WHY: without published images, deploying Vigilume means cloning the repo and
 # building a ~5 GB CUDA image on your own box — which needs 10–15 GB of free
 # Docker storage at the build peak and is the single most common way a first
-# install fails. Pulling a prebuilt image removes that entirely and is what
-# makes the Portainer web-editor stack (docker-compose.portainer.yml) work.
+# install fails. Pulling a prebuilt image removes that entirely.
+#
+# NOTE: docker-compose.yml BUILDS the backend rather than pulling it, so the
+# supported path does not depend on these images — they exist for anyone who
+# would rather pull than build (swap the backend's `build:` for
+# `image: ghcr.io/eternus-nox/vigilume-backend:latest`). This was previously
+# load-bearing for a Portainer web-editor stack, which no longer exists; if
+# nobody is pulling these, the file can go.
 #
 # THIS PUBLISHES PUBLICLY. Images pushed here are visible to anyone once the
 # package is made public in the repo's Packages settings. That is fine for this
