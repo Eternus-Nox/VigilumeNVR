@@ -273,6 +273,14 @@ def _segment_start(day: date, hour_name: str, seg_name: str) -> Optional[float]:
         return None
 
 
+def _hour_start(day: date, hour_name: str) -> Optional[float]:
+    """Local-epoch start of an ``{HH}`` hour dir, or None when it isn't one."""
+    try:
+        return datetime(day.year, day.month, day.day, int(hour_name)).timestamp()
+    except (ValueError, OverflowError):
+        return None
+
+
 def select_segments(
     camera_dir: Path, window_start: float, window_end: float
 ) -> list[tuple[float, Path]]:
@@ -309,6 +317,24 @@ def select_segments(
             with hour_scan:
                 for hour_e in hour_scan:
                     if not hour_e.is_dir():
+                        continue
+                    # PRUNE BY HOUR, not just by day. A clip window is tens of
+                    # seconds, but a day holds 24 hour dirs of ~360 segments, so
+                    # scanning the whole day cost ~8.6k directory entries to find
+                    # the three or four that intersect — per event, forever.
+                    #
+                    # hour_start is DST-correct (datetime().timestamp() resolves
+                    # the real offset). The two tests are deliberately asymmetric:
+                    # forward is exact, since an hour starting at/after the window
+                    # end cannot hold anything inside it; backward allows TWO
+                    # hours, because a segment may start up to an hour after its
+                    # dir does and a DST fall-back can stretch that hour to two in
+                    # epoch terms. Over-scanning one extra dir is free; pruning a
+                    # real one loses footage.
+                    hour_start = _hour_start(day, hour_e.name)
+                    if hour_start is None:
+                        continue  # not an hour dir; its segments could not parse
+                    if hour_start >= window_end or hour_start + 2 * 3600 <= lo:
                         continue
                     try:
                         seg_scan = os.scandir(hour_e.path)
