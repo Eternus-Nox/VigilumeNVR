@@ -141,6 +141,30 @@ def main() -> None:
                 check(".." not in host_side,
                       f"{label}: {name} bind source {host_side!r} has no ../ escape")
 
+    # ── 1b. Every host path can be relocated OFF the project directory ────
+    #
+    # Unraid's Docker Compose Manager keeps projects in
+    # /boot/config/plugins/compose.manager/projects/<name>/ — and /boot is the
+    # USB FLASH BOOT DEVICE. A relative bind there puts nvr.db on vfat (no real
+    # file locking, so it corrupts) and, with MEDIA_PATH unset, points 24/7
+    # recording at the boot stick. Setting VIGILUME_APPDATA + MEDIA_PATH must
+    # therefore move EVERY persistent host path onto the array; a single bind
+    # left relative silently keeps writing to flash.
+    relocated, _ = interpolate(body, {
+        "ADMIN_PASSWORD": "pw",
+        "VIGILUME_APPDATA": "/mnt/user/appdata/vigilume",
+        "MEDIA_PATH": "/mnt/user/vigilume/media",
+    })
+    for name, svc in yaml.safe_load(relocated)["services"].items():
+        for src in bind_sources(svc):
+            host_side = src.split(":")[0]
+            if not host_side.startswith(("/", "$")) and "/" not in host_side:
+                continue  # a named volume (caddy-data), not a host path
+            check(host_side.startswith("/"),
+                  f"{name} bind source {host_side!r} is absolute once "
+                  f"VIGILUME_APPDATA/MEDIA_PATH are set — a leftover relative "
+                  f"path writes to the Compose Manager project dir on /boot")
+
     resolved, _ = interpolate(body, {"ADMIN_PASSWORD": "pw"})
     doc = yaml.safe_load(resolved)
     services = doc["services"]

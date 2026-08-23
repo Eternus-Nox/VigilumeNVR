@@ -119,12 +119,23 @@ services:
       - "c 189:* rmw"
     volumes:
       - /dev/bus/usb:/dev/bus/usb
-      - ./data:/data
+      # nvr.db, the JWT secret, snapshots and downloaded models.
+      #
+      # VIGILUME_APPDATA defaults to "." so a plain `docker compose` run keeps
+      # using ./data beside this file — but it MUST be set to an absolute path
+      # under Unraid's Docker Compose Manager plugin. That plugin's project
+      # directory lives on /boot (the USB FLASH BOOT DEVICE), so a relative bind
+      # puts the SQLite database and every snapshot on the flash drive: vfat has
+      # no real file locking, so the DB corrupts, and the write volume kills the
+      # stick. Set VIGILUME_APPDATA=/mnt/user/appdata/vigilume there.
+      - ${VIGILUME_APPDATA:-.}/data:/data
       # 24/7 recordings + event clips (big disk! ~135 GB/day for the
-      # three-camera default — see the Recording tab / docs).
+      # three-camera default — see the Recording tab / docs). Same warning as
+      # above, and far more urgent: continuous recording onto /boot fills the
+      # boot flash and takes the array down with it.
       - ${MEDIA_PATH:-./media}:/media
       # Backend writes go2rtc.yaml here; the go2rtc container reads it.
-      - ./go2rtc/config:/go2rtc-config
+      - ${VIGILUME_APPDATA:-.}/go2rtc/config:/go2rtc-config
     # ── NVIDIA GPU — UNCOMMENT THIS BLOCK IF (AND ONLY IF) YOU HAVE ONE ──────
     #
     # This reserves an NVIDIA card for the backend. It is what gives the
@@ -168,7 +179,9 @@ services:
     container_name: vigilume-go2rtc
     restart: unless-stopped
     volumes:
-      - ./go2rtc/config:/config
+      # MUST match the backend's /go2rtc-config bind exactly (compose_smoke
+      # enforces it): the backend writes go2rtc.yaml, this reads it.
+      - ${VIGILUME_APPDATA:-.}/go2rtc/config:/config
     ports:
       # RTSP restream (VLC etc. on the LAN)
       - "8554:8554"
@@ -246,7 +259,7 @@ services:
       # world-readable is a needless downgrade when chown is available.) A
       # 0600 key owned by root is the failure you'll actually hit: the mount
       # succeeds and the relay dies on startup unable to read it.
-      - ./secrets:/keys:ro
+      - ${VIGILUME_APPDATA:-.}/secrets:/keys:ro
     # No persistence, by contract. The relay keeps only in-memory rate-limit
     # counters; restarts are free.
     read_only: true
@@ -300,7 +313,7 @@ services:
       # DIRECTORY, not the Caddyfile itself: on Unraid /mnt/user is shfs (FUSE)
       # and a single-FILE bind mount fails in runc. Caddy reads
       # /etc/caddy/Caddyfile by default, so the path is unchanged.
-      - ./caddy:/etc/caddy:ro
+      - ${VIGILUME_APPDATA:-.}/caddy:/etc/caddy:ro
       - caddy-data:/data
       - caddy-config:/config
     depends_on:

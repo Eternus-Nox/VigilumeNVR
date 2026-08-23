@@ -34,6 +34,28 @@ first and treat the NVIDIA steps as optional. The big picture is in the
    *dcflachs*), or just run `docker compose` from the Unraid terminal
    (available on current Unraid).
 
+> ### ⚠ Compose Manager users: set `VIGILUME_APPDATA` before first start
+>
+> Compose Manager keeps projects in
+> `/boot/config/plugins/compose.manager/projects/<name>/`, and **`/boot` is the
+> USB flash boot device.** Compose resolves relative bind paths against that
+> project directory, so left at their defaults `./data` and `./media` land on
+> the flash drive. Two separate failures follow:
+>
+> - `nvr.db` on **vfat**, which has no real file locking — SQLite corrupts.
+> - 24/7 recording onto the **boot flash**, which fills it and wears it out.
+>
+> Neither is obvious until something breaks badly, so set both in the project's
+> `.env` (Compose Manager's *Edit Stack → .env* tab) before the first start:
+>
+> ```bash
+> VIGILUME_APPDATA=/mnt/user/appdata/vigilume
+> MEDIA_PATH=/mnt/user/vigilume/media
+> ```
+>
+> Running `docker compose` from a checkout on the array instead? The defaults
+> are already correct — the paths resolve beside `docker-compose.yml`.
+
 ### Give Docker enough image storage
 
 The slim GPU image (minimal `nvidia/cuda:*-base` + pip CUDA 12 / cuDNN 9 libs +
@@ -69,9 +91,15 @@ causes this. Re-enable Docker afterward.
 ## 2. Put the project on the array
 
 Copy the whole `Security` folder to a share, e.g. `/mnt/user/appdata/vigilume/`
-(SMB from the Mac, or `git clone` in the terminal). The `./data` and
-`./go2rtc/config` bind mounts live here — small (DB, snapshots, the ~100 MB
+(SMB from the Mac, or `git clone` in the terminal). The `data` and
+`go2rtc/config` bind mounts live here — small (DB, snapshots, the ~100 MB
 model, go2rtc config), fine on appdata/cache.
+
+Those two default to `./data` and `./go2rtc/config`, resolved against whatever
+directory compose runs in — correct for a checkout on the array. Under Compose
+Manager that directory is on the boot flash instead, so set
+`VIGILUME_APPDATA=/mnt/user/appdata/vigilume` (see the warning in step 1) to
+pin them here regardless.
 
 ## 3. Create the recordings share (array, not cache)
 
