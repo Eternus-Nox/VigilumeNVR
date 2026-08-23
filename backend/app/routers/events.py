@@ -54,6 +54,27 @@ def _attachment_headers(filename: str) -> dict[str, str]:
     sanitized) filename. Omitted entirely for the default inline responses."""
     return {"Content-Disposition": f'attachment; filename="{filename}"'}
 
+
+# An event's saved snapshot and its clip are written ONCE and never rewritten:
+# the id is in the filename, and editing an event does not touch its media (a
+# delete removes the files outright — see _purge_event_media — and the id is
+# never reused). So the bytes behind a given URL cannot change, which is exactly
+# what `immutable` promises.
+#
+# Worth stating because the absence of this header was not free. Without it a
+# client must revalidate before every display: FileResponse does send ETag and
+# Last-Modified, so each of those is a cheap 304 rather than a re-download, but
+# it is still a round trip PER THUMBNAIL, on every scroll of the events list, on
+# both the web app and the phone.
+#
+# `private`, not `public`: these URLs are behind media auth, and a shared cache
+# has no business holding one household's footage.
+_IMMUTABLE_MEDIA = {"Cache-Control": "private, max-age=31536000, immutable"}
+# The engine's clean best frame, served only while the annotated copy has not
+# been written yet. Same URL, DIFFERENT bytes shortly afterwards — so this one
+# must never be cached, or the un-annotated frame sticks for a year.
+_TRANSIENT_MEDIA = {"Cache-Control": "no-store"}
+
 # Backend-generated events: doorbell button presses, legacy audio rows, and
 # camera_ai_only object events created straight from the camera's AI. None of
 # them has an ENGINE snapshot (no tracked object, no best frame), so their image
@@ -209,15 +230,22 @@ async def event_snapshot(
     # Default is inline (no Content-Disposition — the browser shows it); with
     # ?download=1 the same bytes are served as an attachment with a friendly,
     # sanitized filename.
-    headers = _attachment_headers(_download_filename(event, "jpg")) if download else None
+    headers = _attachment_headers(_download_filename(event, "jpg")) if download else {}
     path = request.app.state.config.snapshots_dir / f"{event_id}.jpg"
     if path.is_file():
-        return FileResponse(path, media_type="image/jpeg", headers=headers)
+        return FileResponse(
+            path, media_type="image/jpeg", headers={**headers, **_IMMUTABLE_MEDIA}
+        )
     # Annotated copy not saved (yet) — serve the engine's clean best frame.
+    # Explicitly uncacheable: the annotated copy lands at this same URL within
+    # seconds, and a cached un-annotated frame would hide it indefinitely.
     if not _is_synthetic(event):
         jpeg = await request.app.state.media.event_snapshot(event["frigate_id"], retries=1)
         if jpeg:
-            return Response(content=jpeg, media_type="image/jpeg", headers=headers)
+            return Response(
+                content=jpeg, media_type="image/jpeg",
+                headers={**headers, **_TRANSIENT_MEDIA},
+            )
     raise HTTPException(status_code=404, detail="Snapshot not available")
 
 
@@ -246,8 +274,10 @@ async def event_clip(
     # Inline by default (Range/seek works either way — Starlette's FileResponse
     # honours Range regardless of Content-Disposition); ?download=1 adds the
     # attachment header + sanitized filename so the browser saves the file.
-    headers = _attachment_headers(_download_filename(event, "mp4")) if download else None
-    return FileResponse(path, media_type="video/mp4", headers=headers)
+    headers = _attachment_headers(_download_filename(event, "mp4")) if download else {}
+    return FileResponse(
+        path, media_type="video/mp4", headers={**headers, **_IMMUTABLE_MEDIA}
+    )
 
 
 def _purge_event_media(request: Request, event: dict[str, Any]) -> None:
