@@ -18,11 +18,11 @@ from typing import Any, Literal, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from ..auth import require_admin
 from ..config import DEFAULT_CAMERA_TIMEZONE
-from ..native.recorder import MAX_CLIP_POST_S
+from ..native.recorder import SEGMENT_SECONDS, max_clip_post_s
 from ..native.streams import webrtc_status
 from .detection import activate_model
 
@@ -167,12 +167,34 @@ class RecordingSettings(BaseModel):
     # for why pre-roll usually wants to be the larger of the two).
     clip_pre_s: int = Field(default=5, ge=0, le=120)
     # Post-roll is capped where pre-roll is not, and the cap is a fact about the
-    # recorder rather than a matter of taste: extraction runs CLIP_DELAY_S after
+    # recorder rather than a matter of taste: extraction runs clip_delay_s after
     # the event ends, and a segment is only on disk once its SEGMENT_SECONDS are
     # up, so footage past that horizon has not been written yet. Asking for more
     # would not fail loudly — ffmpeg would just stop at the end of what exists
-    # and hand back a clip quietly shorter than requested.
-    clip_post_s: int = Field(default=5, ge=0, le=MAX_CLIP_POST_S)
+    # and hand back a clip quietly shorter than requested. The real bound is
+    # therefore clip_delay_s-dependent and enforced in _check_clip_window below;
+    # this `le` is only the absolute ceiling at the largest allowed delay.
+    clip_post_s: int = Field(default=5, ge=0, le=290)
+    # Waiting longer before cutting the clip is what buys post-roll past the
+    # default. Floor of SEGMENT_SECONDS: below one segment length nothing has
+    # been flushed and every clip would lose its tail entirely.
+    clip_delay_s: int = Field(default=20, ge=SEGMENT_SECONDS, le=300)
+
+    @model_validator(mode="after")
+    def _check_clip_window(self) -> "RecordingSettings":
+        """Reject post-roll the delay cannot deliver, instead of silently
+        truncating it — a clip shorter than configured, with nothing logged, is
+        the kind of thing an operator only discovers when they need the footage.
+        """
+        reachable = max_clip_post_s(self.clip_delay_s)
+        if self.clip_post_s > reachable:
+            raise ValueError(
+                f"clip_post_s={self.clip_post_s}s needs clip_delay_s of at least "
+                f"{self.clip_post_s + SEGMENT_SECONDS}s (a segment is only on disk "
+                f"{SEGMENT_SECONDS}s after it opens); at clip_delay_s="
+                f"{self.clip_delay_s}s the most that can be captured is {reachable}s"
+            )
+        return self
 
 
 class DetectionSettings(BaseModel):
@@ -209,6 +231,11 @@ class DetectionSettings(BaseModel):
         "ssd_mobilenet_v2", "ssdlite_mobiledet", "efficientdet_lite0",
         "efficientdet_lite1", "efficientdet_lite2", "efficientdet_lite3",
     ] = "ssdlite_mobiledet"
+    # How long a label may go unseen before its event ends. Floor of 1 s so a
+    # single dropped frame cannot end an event; ceiling of 300 s because the
+    # clip is not cut until the event ends, and an event that never closes is
+    # an event whose footage never arrives.
+    absence_timeout_s: int = Field(default=5, ge=1, le=300)
 
 
 class AutoRestartSettings(BaseModel):

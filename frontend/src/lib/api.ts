@@ -578,6 +578,13 @@ export interface AppSettings {
      */
     clip_pre_s: number;
     clip_post_s: number;
+    /**
+     * Seconds after an event ends before its clip is cut. Raising it is the only
+     * way to buy post-roll past the default ceiling, since a segment is not on
+     * disk until it closes: reachable post-roll is `clip_delay_s - 10`. The
+     * backend rejects a `clip_post_s` larger than that.
+     */
+    clip_delay_s: number;
   };
   detection: {
     model: DetectionModel;
@@ -605,6 +612,13 @@ export interface AppSettings {
      * back to `"always"` and only sends it when the backend round-trips it.
      */
     default_mode?: DetectMode;
+    /**
+     * Seconds a label may go unseen before its event is ended. Does not extend
+     * the event — `end_time` is the last frame the label was actually seen —
+     * but it decides whether a subject that pauses or is briefly hidden counts
+     * as one event or several, and the clip is only cut once the event ends.
+     */
+    absence_timeout_s: number;
   };
   system: {
     public_url: string;

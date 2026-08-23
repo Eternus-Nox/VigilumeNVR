@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Clip window padding — settings.recording.clip_pre_s / clip_post_s.
+"""Event clip timing settings.
 
-Covers Recorder._clip_pads (the settings -> (pre, post) resolution, including
-the bound that keeps post-roll inside what is actually on disk) and the window
-arithmetic in extract_clip that turns those pads into an ffmpeg seek+duration.
+Covers the four knobs that decide what a clip contains and when it appears:
+``recording.clip_pre_s`` / ``clip_post_s`` (Recorder._clip_pads, including the
+bound that keeps post-roll inside what is actually on disk), ``clip_delay_s``
+(Recorder._clip_delay, which MOVES that bound), and ``detection.
+absence_timeout_s`` (DetectionEngine._absence_timeout, which decides when the
+event — and so the clip's tail — ends). Plus the window arithmetic in
+extract_clip that turns the pads into an ffmpeg seek+duration.
 
 SEPARATE from native_smoke, which owns the rest of extract_clip, for one
 practical reason: native_smoke reaches the network during import and cannot run
@@ -16,16 +20,19 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import DEFAULT_SETTINGS  # noqa: E402
+from app.native.engine import ABSENCE_TIMEOUT_S, DetectionEngine  # noqa: E402
 from app.native.recorder import (  # noqa: E402
     CLIP_DELAY_S,
     CLIP_PAD_S,
     MAX_CLIP_POST_S,
     SEGMENT_SECONDS,
     Recorder,
+    max_clip_post_s,
 )
 
 _failures: list[str] = []
@@ -43,25 +50,42 @@ def check(cond: bool, label: str) -> None:
 
 
 class _FakeSettings:
-    """Only the surface Recorder._clip_pads touches."""
+    """Only the surface the two resolvers under test touch."""
 
-    def __init__(self, recording: dict) -> None:
+    def __init__(self, recording: dict, detection: Optional[dict] = None) -> None:
         self.recording = recording
+        self.detection = detection if detection is not None else {}
 
 
-def _pads(recording: dict) -> tuple[float, float]:
-    """_clip_pads on a Recorder built without touching __init__.
+def _recorder(recording: dict, override: Optional[float] = None) -> Recorder:
+    """A Recorder built without touching __init__.
 
     __new__ deliberately: the real constructor spins up a Transcoder and wants a
     Config and a Database, none of which this arithmetic reads.
     """
     rec = Recorder.__new__(Recorder)
     rec._settings = _FakeSettings(recording)  # type: ignore[attr-defined]
-    return rec._clip_pads()
+    rec.clip_delay_s = override
+    return rec
+
+
+def _pads(recording: dict, override: Optional[float] = None) -> tuple[float, float]:
+    return _recorder(recording, override)._clip_pads()
+
+
+def _delay(recording: dict, override: Optional[float] = None) -> float:
+    return _recorder(recording, override)._clip_delay()
+
+
+def _absence(detection: dict) -> float:
+    """DetectionEngine._absence_timeout, built the same way as _recorder."""
+    eng = DetectionEngine.__new__(DetectionEngine)
+    eng._settings = _FakeSettings({}, detection)  # type: ignore[attr-defined]
+    return eng._absence_timeout()
 
 
 def main() -> int:
-    print("clip window padding")
+    print("event clip timing settings")
 
     # --- defaults ---------------------------------------------------------
     pre, post = _pads(DEFAULT_SETTINGS["recording"])
@@ -91,13 +115,13 @@ def main() -> int:
     check((pre, post) == (12.0, CLIP_PAD_S), "one key set, the other defaulted")
 
     # --- post-roll bound ---------------------------------------------------
-    # Not a taste bound: extraction runs CLIP_DELAY_S after the event and a
+    # Not a taste bound: extraction runs clip_delay_s after the event and a
     # segment lands SEGMENT_SECONDS after it opens, so footage past the
     # difference has not been written when the clip is cut.
     check(
         MAX_CLIP_POST_S == int(CLIP_DELAY_S - SEGMENT_SECONDS),
-        f"MAX_CLIP_POST_S ({MAX_CLIP_POST_S}s) is derived from the extraction "
-        f"delay ({CLIP_DELAY_S:g}s) minus a segment ({SEGMENT_SECONDS}s)",
+        f"MAX_CLIP_POST_S ({MAX_CLIP_POST_S}s) is the ceiling at the default "
+        f"delay ({CLIP_DELAY_S:g}s minus a {SEGMENT_SECONDS}s segment)",
     )
     _, post = _pads({"clip_post_s": 600})
     check(
@@ -107,6 +131,50 @@ def main() -> int:
     )
     pre, _ = _pads({"clip_pre_s": 600})
     check(pre == 600.0, "pre-roll is NOT clamped — past footage is already on disk")
+
+    # --- the horizon MOVES with the configured delay -----------------------
+    # The whole reason clip_delay_s is adjustable: waiting longer is how an
+    # operator buys post-roll the default cannot reach.
+    check(
+        max_clip_post_s(60) == 50 and max_clip_post_s(20) == 10,
+        "max_clip_post_s tracks the delay (60s delay -> 50s reachable)",
+    )
+    check(
+        max_clip_post_s(SEGMENT_SECONDS) == 0 and max_clip_post_s(0) == 0,
+        "a delay at or below one segment reaches no post-roll at all, and never "
+        "goes negative",
+    )
+    _, post = _pads({"clip_post_s": 45, "clip_delay_s": 60})
+    check(post == 45.0, "a raised delay lets a larger post-roll through unclamped")
+    _, post = _pads({"clip_post_s": 45, "clip_delay_s": 20})
+    check(post == 10.0, "the same post-roll clamps back down when the delay is not raised")
+
+    # --- the delay itself --------------------------------------------------
+    check(_delay({}) == CLIP_DELAY_S, "absent clip_delay_s falls back to the default")
+    check(_delay({"clip_delay_s": 45}) == 45.0, "configured clip_delay_s is used")
+    check(
+        _delay({"clip_delay_s": 45}, override=0.2) == 0.2,
+        "an explicit instance override (tests) wins over settings",
+    )
+    # The override is what native_smoke uses to keep its scheduled-clip case
+    # fast; if settings started winning there, that test would wait 20 s.
+    _, post = _pads({"clip_post_s": 5}, override=0.2)
+    check(
+        post == 0.0,
+        "a shrunk delay drags the post-roll clamp down with it (no post-roll is "
+        "retrievable 0.2s after the event)",
+    )
+
+    # --- absence timeout (engine side of the same knob set) ---------------
+    # Lives here rather than in a suite of its own because it decides when an
+    # event ENDS, which is the other half of what a clip's tail contains.
+    check(_absence({}) == ABSENCE_TIMEOUT_S, "absent absence_timeout_s falls back to 5s")
+    check(_absence({"absence_timeout_s": 30}) == 30.0, "configured absence timeout is used")
+    check(
+        _absence({"absence_timeout_s": 0}) == 0.5,
+        "a 0 timeout floors at 0.5s — at 0 a single dropped frame would end "
+        "every event",
+    )
 
     # --- hand-edited nonsense ---------------------------------------------
     pre, post = _pads({"clip_pre_s": -30, "clip_post_s": -1})
@@ -140,7 +208,7 @@ def main() -> int:
         for f in _failures:
             print(f"  - {f}")
         return 1
-    print(f"ALL {_checks} CHECKS PASSED (clip window padding)")
+    print(f"ALL {_checks} CHECKS PASSED (event clip timing settings)")
     return 0
 
 

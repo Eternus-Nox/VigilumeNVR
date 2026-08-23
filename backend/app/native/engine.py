@@ -64,7 +64,8 @@ if TYPE_CHECKING:  # pragma: no cover
 log = logging.getLogger(__name__)
 
 MIN_HITS = 3                 # frames carrying a tracker_id before a track confirms
-ABSENCE_TIMEOUT_S = 5.0      # label unseen this long => event end
+ABSENCE_TIMEOUT_S = 5.0      # DEFAULT label-unseen timeout before an event ends;
+                             # overridden by settings.detection.absence_timeout_s
 UPDATE_SCORE_DELTA = 0.02    # best-score improvement that forces an "update"
 UPDATE_HEARTBEAT_S = 10.0    # max seconds between "update" emits while open
 ENDED_FRAME_KEEP_S = 60.0    # keep an ended event's best frame for late enrichment
@@ -604,10 +605,11 @@ class DetectionEngine:
             await self._observe_label(cam, label, group, frame_time, frame_bgr, confirmed)
 
         # --- absence: end open events whose label went quiet ---
+        absence_timeout = self._absence_timeout()
         for key, st in list(self._events.items()):
             if key[0] != camera or st.label in by_label:
                 continue
-            if frame_time - st.last_seen >= ABSENCE_TIMEOUT_S:
+            if frame_time - st.last_seen >= absence_timeout:
                 await self._end_event(key)
 
     async def _observe_label(
@@ -742,16 +744,29 @@ class DetectionEngine:
 
     # ---------- housekeeping ----------
 
+    def _absence_timeout(self) -> float:
+        """How long a label may go unseen before its event ends.
+
+        Read per sweep rather than cached: a settings change takes effect on the
+        next frame, matching every other detection setting. Both callers resolve
+        it ONCE per pass — the frame loop must not re-read it per open event, or
+        a mid-loop settings write could end one event and spare the next on the
+        same frame.
+        """
+        configured = self._settings.detection.get("absence_timeout_s")
+        return ABSENCE_TIMEOUT_S if configured is None else max(0.5, float(configured))
+
     async def _housekeeping(self) -> None:
         while True:
             await asyncio.sleep(_HOUSEKEEPING_S)
             try:
                 now = time.time()
+                absence_timeout = self._absence_timeout()
                 for key, st in list(self._events.items()):
                     camera_gone = key[0] not in self._cameras or not bool(
                         self._cameras[key[0]].row.get("detect_enabled", True)
                     )
-                    if camera_gone or now - st.last_seen >= ABSENCE_TIMEOUT_S:
+                    if camera_gone or now - st.last_seen >= absence_timeout:
                         await self._end_event(key)
                 mono = time.monotonic()
                 for fid, (expires, _) in list(self._ended_frames.items()):

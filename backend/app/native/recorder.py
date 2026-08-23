@@ -94,12 +94,26 @@ log = logging.getLogger(__name__)
 SEGMENT_SECONDS = 10
 CLIP_PAD_S = 5.0          # DEFAULT clip padding; overridden per-install by
                           # settings.recording.clip_pre_s / clip_post_s
-CLIP_DELAY_S = 20.0       # schedule_clip waits this long after event end
-# Ceiling on post-roll, forced by the two constants above it rather than chosen:
-# extraction starts CLIP_DELAY_S after the event ends, and the segment covering
-# any given instant is only closed and on disk SEGMENT_SECONDS after it starts.
-# Past this horizon the footage simply does not exist yet at extraction time.
-MAX_CLIP_POST_S = int(CLIP_DELAY_S - SEGMENT_SECONDS)
+CLIP_DELAY_S = 20.0       # DEFAULT post-event wait before extraction, overridden
+                          # per-install by settings.recording.clip_delay_s
+
+
+def max_clip_post_s(clip_delay_s: float) -> int:
+    """Ceiling on post-roll for a given extraction delay.
+
+    Forced by the recorder rather than chosen: extraction starts ``clip_delay_s``
+    after the event ends, and the segment covering any instant is only closed and
+    on disk ``SEGMENT_SECONDS`` after it opens. Footage past that horizon has not
+    been written when the clip is cut — ffmpeg would stop at the end of what
+    exists and return a clip quietly shorter than configured.
+
+    A function, not a constant, because the delay is now a setting: raising it
+    is exactly how an operator buys more post-roll than the default allows.
+    """
+    return max(0, int(clip_delay_s - SEGMENT_SECONDS))
+
+
+MAX_CLIP_POST_S = max_clip_post_s(CLIP_DELAY_S)  # the ceiling at the default delay
 SEGMENT_STALL_S = 30.0    # watchdog: no new segment file => respawn
 LOW_DISK_BYTES = 5 * 1024**3   # default free-space floor (settings.min_free_gb)
 
@@ -461,8 +475,10 @@ class Recorder:
         # True only while a purge holds/awaits _purge_lock — lets a concurrent
         # purge 409 without false-positiving on a normal reload().
         self._purging = False
-        # Instance-level so tests can shrink the post-end wait.
-        self.clip_delay_s = CLIP_DELAY_S
+        # OVERRIDE, not the value: None means "use settings.recording.
+        # clip_delay_s" (see _clip_delay). Tests set a number here to shrink the
+        # post-end wait, and that still wins over whatever is configured.
+        self.clip_delay_s: Optional[float] = None
         # Bounds concurrent clip extractions (see CLIP_CONCURRENCY). Held only
         # around the ffmpeg run, never across the post-event delay, so queued
         # clips keep their own timing.
@@ -941,12 +957,23 @@ class Recorder:
                       or (LOW_DISK_BYTES // 1024**3))
         return cap_gb * 1024**3, free_gb * 1024**3
 
+    def _clip_delay(self) -> float:
+        """Seconds to wait after an event ends before cutting its clip.
+
+        ``self.clip_delay_s`` is an override (tests); otherwise settings decide.
+        """
+        if self.clip_delay_s is not None:
+            return max(0.0, float(self.clip_delay_s))
+        configured = self._settings.recording.get("clip_delay_s")
+        return CLIP_DELAY_S if configured is None else max(0.0, float(configured))
+
     def _clip_pads(self) -> tuple[float, float]:
         """(pre_s, post_s) padding for the event clip window, from settings.
 
-        Post-roll is clamped to MAX_CLIP_POST_S here as well as in the settings
-        schema: the schema guards the UI and the API, this guards a settings
-        document written before that bound existed (or by hand).
+        Post-roll is clamped against the EFFECTIVE delay here as well as in the
+        settings schema: the schema guards the UI and the API, this guards a
+        settings document written before the bound existed (or by hand), and a
+        test that shrinks the delay without touching the pads.
         """
         recording = self._settings.recording
         pre = recording.get("clip_pre_s")
@@ -956,7 +983,7 @@ class Recorder:
         # key is absent) is the only case that falls back to the default.
         pre_s = CLIP_PAD_S if pre is None else max(0.0, float(pre))
         post_s = CLIP_PAD_S if post is None else max(0.0, float(post))
-        return pre_s, min(post_s, float(MAX_CLIP_POST_S))
+        return pre_s, min(post_s, float(max_clip_post_s(self._clip_delay())))
 
     @staticmethod
     def _headroom(limit_bytes: int) -> int:
@@ -1074,7 +1101,7 @@ class Recorder:
         self, camera: str, frigate_id: str, start_time: float, end_time: float
     ) -> None:
         try:
-            await asyncio.sleep(self.clip_delay_s)
+            await asyncio.sleep(self._clip_delay())
             # Acquire AFTER the delay: the wait is per-event pacing, not work,
             # and holding a slot through it would serialize unrelated events.
             async with self._clip_sem:

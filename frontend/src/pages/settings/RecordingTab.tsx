@@ -33,6 +33,11 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
   const [coralModel, setCoralModel] = useState<CoralModel>(
     pending.detection?.coral_model ?? settings.detection.coral_model ?? 'ssdlite_mobiledet',
   );
+  // How long a label may go unseen before its event ends. Absent on a backend
+  // that predates the setting -> the 5 s that was hardcoded there.
+  const [absenceTimeout, setAbsenceTimeout] = useState<number>(
+    pending.detection?.absence_timeout_s ?? settings.detection.absence_timeout_s ?? 5,
+  );
   // No `modelKey` mirror here any more. It existed solely so this form's PUT
   // could re-send the current model instead of clobbering a fresh activation
   // from <DetectionModels>. The patch names only `confidence` and
@@ -45,6 +50,7 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
   useAdoptSaved(settings.detection.default_mode ?? 'always', setDefaultMode);
   useAdoptSaved(settings.detection.backend ?? 'auto', setBackend);
   useAdoptSaved(settings.detection.coral_model ?? 'ssdlite_mobiledet', setCoralModel);
+  useAdoptSaved(settings.detection.absence_timeout_s ?? 5, setAbsenceTimeout);
 
   // Report this tab's slice up on every edit; the shell's single Save button
   // persists it together with every other tab's pending changes.
@@ -53,9 +59,10 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
       recording,
       detection: {
         confidence, default_mode: defaultMode, backend, coral_model: coralModel,
+        absence_timeout_s: absenceTimeout,
       },
     });
-  }, [recording, confidence, defaultMode, backend, coralModel, onDraftChange]);
+  }, [recording, confidence, defaultMode, backend, coralModel, absenceTimeout, onDraftChange]);
 
   const dayInput = (
     label: string,
@@ -84,7 +91,7 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
   // is cut. `max` is optional so only the fields with a ceiling declare one.
   const numInput = (
     label: string,
-    key: 'max_storage_gb' | 'min_free_gb' | 'clip_pre_s' | 'clip_post_s',
+    key: 'max_storage_gb' | 'min_free_gb' | 'clip_pre_s' | 'clip_post_s' | 'clip_delay_s',
     min: number,
     hint: string,
     max?: number,
@@ -99,12 +106,29 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
         value={recording[key] ?? min}
         onChange={(e) => {
           const n = Math.max(min, Math.floor(Number(e.target.value) || 0));
-          setRecording({ ...recording, [key]: max === undefined ? n : Math.min(max, n) });
+          const next = { ...recording, [key]: max === undefined ? n : Math.min(max, n) };
+          // Lowering the cut delay lowers what post-roll can reach, so pull the
+          // run-on down with it. Without this the pair goes out of range and the
+          // save 422s on a field the operator did not touch — the error would
+          // name clip_post_s while the mistake was made in clip_delay_s.
+          if (key === 'clip_delay_s') {
+            next.clip_post_s = Math.min(next.clip_post_s ?? 0, Math.max(0, n - 10));
+          }
+          setRecording(next);
         }}
       />
       <span className="control-hint">{hint}</span>
     </label>
   );
+
+  // Reachable post-roll, mirroring the backend's max_clip_post_s: a segment is
+  // SEGMENT_SECONDS long and is only on disk once closed, so footage past
+  // (delay - 10) has not been written when the clip is cut. Derived rather than
+  // hardcoded so raising the delay visibly raises the post-roll ceiling; the
+  // backend rejects the pair anyway, but a field that silently refuses to go
+  // past 10 with no explanation is a worse way to learn that.
+  const clipDelay = recording.clip_delay_s ?? 20;
+  const maxPostRoll = Math.max(0, clipDelay - 10);
 
   return (
     <div className="settings-section">
@@ -171,9 +195,17 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
             'Run-on after event (seconds)',
             'clip_post_s',
             0,
-            'Capped at 10: clips are cut 20 s after the event ends, and later footage ' +
-              'has not been written to disk yet.',
+            `Limited to ${maxPostRoll} s by the cut delay below — later footage is not on ` +
+              'disk yet when the clip is assembled. Raise the delay to raise this.',
+            maxPostRoll,
+          )}
+          {numInput(
+            'Cut the clip this long after the event (seconds)',
+            'clip_delay_s',
             10,
+            'Only the clip waits — the event, its snapshot and its notification arrive ' +
+              'immediately. Raise it only to allow more run-on above.',
+            300,
           )}
         </div>
       </section>
@@ -371,6 +403,38 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
             />
             <span className="control-hint">
               Lower catches more (and more false positives); higher only keeps sure detections.
+            </span>
+          </label>
+        </div>
+      </section>
+
+      <section className="card">
+        <h2>Event grouping</h2>
+        <p className="muted small">
+          How long an object may go unseen before its event is closed. This does not add
+          footage — an event still ends at the last frame the object was actually seen —
+          but it decides whether a subject that pauses, turns away, or slips behind cover
+          becomes <em>one</em> event or several in a row. Raise it for scenes with
+          obstructions; lower it if separate visits are being merged into one long event.
+        </p>
+        <div className="form-stack">
+          <label>
+            End the event after (seconds unseen)
+            <input
+              type="number"
+              min={1}
+              max={300}
+              step={1}
+              value={absenceTimeout}
+              onChange={(e) =>
+                setAbsenceTimeout(
+                  Math.min(300, Math.max(1, Math.floor(Number(e.target.value) || 1))),
+                )
+              }
+            />
+            <span className="control-hint">
+              Clips are only cut once the event ends, so this also delays when a clip
+              appears.
             </span>
           </label>
         </div>

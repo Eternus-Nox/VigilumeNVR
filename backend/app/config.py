@@ -333,6 +333,13 @@ DEFAULT_SETTINGS: dict = {
         # already on disk, so wider padding costs clip bytes and nothing else.
         "clip_pre_s": 5,
         "clip_post_s": 5,
+        # How long after an event ends before its clip is cut. Raising this is
+        # the ONLY way to buy post-roll past the default 10 s ceiling — a
+        # segment is not on disk until its SEGMENT_SECONDS are up, so the
+        # reachable post-roll is (clip_delay_s - SEGMENT_SECONDS). The cost is
+        # that clips appear later in the UI; the event, its snapshot and its
+        # notification are unaffected, since only clip extraction waits.
+        "clip_delay_s": 20,
     },
     # Automatic time provisioning for Dahua/Amcrest cameras. When auto_sync is
     # on, each reachable camera has its clock set to the current local time in
@@ -359,6 +366,14 @@ DEFAULT_SETTINGS: dict = {
         # lists share no entries, so one field would make an invalid pair
         # reachable the moment you flip backend. Ignored while backend="gpu".
         "coral_model": "ssdlite_mobiledet",
+        # Seconds a label may go unseen before its event is ended. This sets the
+        # tail of every event: end_time is the last frame the label WAS seen, so
+        # the timeout does not extend the event, but a short one splits a subject
+        # that pauses or is briefly occluded into several events, while a long
+        # one merges distinct visits and delays the clip (extraction only starts
+        # once the event ends). Raise it for scenes with cover — cars behind a
+        # hedge, someone stepping out of frame and back.
+        "absence_timeout_s": 5,
     },
     # auto_restart: optional nightly restart of the BACKEND process at a local
     # wall-clock time. Off by default — a restart costs a short recording gap,
