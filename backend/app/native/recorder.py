@@ -354,34 +354,116 @@ def select_segments(
 # ---------- retention (pure-ish, blocking; run via asyncio.to_thread) ----------
 
 
-def iter_hour_dirs(recordings_dir: Path) -> list[tuple[float, Path]]:
+def _newest_content_mtime(hour_dir: str) -> Optional[float]:
+    """Newest mtime among the entries directly inside ``hour_dir``, or None when
+    it is empty/unreadable. os.scandir, not iterdir: no Path object per entry."""
+    newest: Optional[float] = None
+    try:
+        with os.scandir(hour_dir) as it:
+            for entry in it:
+                with contextlib.suppress(OSError):
+                    mtime = entry.stat().st_mtime
+                    newest = mtime if newest is None else max(newest, mtime)
+    except OSError:
+        return None
+    return newest
+
+
+class HourDirMtimes:
+    """Cached ``hour dir -> newest content mtime``, keyed on the dir's OWN mtime.
+
+    ``iter_hour_dirs`` is the walk behind both retention and the per-minute space
+    pass, and computing "newest content mtime" honestly means one stat per
+    segment file: ~180k stats a minute for a week of three cameras, almost all
+    of it re-measuring hour dirs sealed days ago.
+
+    A directory's own mtime changes whenever an entry is added or removed, so it
+    is a sound cache key for "has anything appeared in here" — a sealed hour dir
+    costs ONE stat instead of ~360.
+
+    THE ONE INEXACTNESS, stated plainly: appending to an existing file does not
+    touch the directory's mtime, so a dir first measured while ffmpeg was still
+    writing its final segment keeps a newest-mtime up to one segment (10 s)
+    early, and no later entry arrives to invalidate it. Both callers compare
+    this against cutoffs measured in hours or days and use it to order oldest
+    first, where a 10 s bias cannot change an outcome. Do not reuse this cache
+    for anything needing second-accurate mtimes.
+    """
+
+    def __init__(self) -> None:
+        self._mtimes: dict[Path, tuple[float, float]] = {}
+
+    def resolve(self, hour_dir: Path, dir_mtime: float) -> float:
+        cached = self._mtimes.get(hour_dir)
+        if cached is not None and cached[0] == dir_mtime:
+            return cached[1]
+        newest = _newest_content_mtime(str(hour_dir))
+        if newest is None:
+            newest = dir_mtime  # empty or unreadable: the dir speaks for itself
+        self._mtimes[hour_dir] = (dir_mtime, newest)
+        return newest
+
+    def keep_only(self, hour_dirs: set[Path]) -> None:
+        """Drop entries for dirs that no longer exist, so this cannot grow
+        without bound as hour dirs are rotated away."""
+        if len(self._mtimes) != len(hour_dirs):
+            self._mtimes = {k: v for k, v in self._mtimes.items() if k in hour_dirs}
+
+
+def iter_hour_dirs(
+    recordings_dir: Path, mtimes: Optional[HourDirMtimes] = None
+) -> list[tuple[float, Path]]:
     """All ``{camera}/{day}/{hour}`` dirs as (newest content mtime, path),
-    oldest first. Empty hour dirs use their own mtime."""
+    oldest first. Empty hour dirs use their own mtime.
+
+    Pass ``mtimes`` to reuse measurements across calls — see HourDirMtimes for
+    what that trades away. Without it the walk is exact and expensive, which is
+    the right default for a caller that runs once an hour.
+    """
     out: list[tuple[float, Path]] = []
     if not recordings_dir.is_dir():
         return out
-    for cam_dir in recordings_dir.iterdir():
-        if not cam_dir.is_dir():
-            continue
-        for day_dir in cam_dir.iterdir():
-            if not day_dir.is_dir():
-                continue
-            for hd in day_dir.iterdir():
-                if not hd.is_dir():
-                    continue
-                newest: Optional[float] = None
-                try:
-                    for entry in hd.iterdir():
-                        with contextlib.suppress(OSError):
-                            mtime = entry.stat().st_mtime
-                            newest = mtime if newest is None else max(newest, mtime)
+    seen: set[Path] = set()
+    # os.scandir throughout: is_dir() reuses the readdir dtype instead of
+    # costing a stat() per entry, and no Path is allocated for entries that
+    # turn out not to be directories.
+    for cam_e in _scandir_dirs(recordings_dir):
+        for day_e in _scandir_dirs(Path(cam_e.path)):
+            for hour_e in _scandir_dirs(Path(day_e.path)):
+                hd = Path(hour_e.path)
+                if mtimes is None:
+                    newest = _newest_content_mtime(hour_e.path)
                     if newest is None:
-                        newest = hd.stat().st_mtime
-                except OSError:
-                    continue
+                        try:
+                            newest = hour_e.stat().st_mtime
+                        except OSError:
+                            continue
+                else:
+                    try:
+                        dir_mtime = hour_e.stat().st_mtime
+                    except OSError:
+                        continue
+                    newest = mtimes.resolve(hd, dir_mtime)
+                seen.add(hd)
                 out.append((newest, hd))
+    if mtimes is not None:
+        mtimes.keep_only(seen)
     out.sort(key=lambda item: (item[0], str(item[1])))
     return out
+
+
+def _scandir_dirs(path: Path) -> list[os.DirEntry]:
+    """Subdirectory entries of ``path``; empty when it is missing/unreadable.
+
+    Materialized rather than generated so the OS handle is closed before the
+    caller descends — a lazy walk holds one open dir handle per nesting level
+    across the whole traversal.
+    """
+    try:
+        with os.scandir(path) as it:
+            return [e for e in it if e.is_dir()]
+    except OSError:
+        return []
 
 
 def hour_dir_size(hour_dir: Path) -> int:
@@ -511,6 +593,10 @@ class Recorder:
         self._clip_sem = asyncio.Semaphore(CLIP_CONCURRENCY)
         # Cached hour-dir sizes for the per-minute space pass (see HourDirSizes).
         self._hour_sizes = HourDirSizes()
+        # Newest-content mtimes for the same dirs. Separate from _hour_sizes
+        # because it is keyed on the dir's own mtime rather than on the value
+        # _hour_sizes keys on — this cache is what makes that value cheap.
+        self._hour_mtimes = HourDirMtimes()
         # HEVC->H.264 transcoding for browser playback (segments served by the
         # recordings router via .transcoder; clips transcoded in extract_clip).
         # Recordings on disk stay HEVC; this only affects what the browser gets.
@@ -1032,7 +1118,7 @@ class Recorder:
         """
         now = time.time() if now is None else now
         cap, min_free = self._space_limits()
-        entries = iter_hour_dirs(self._config.recordings_dir)
+        entries = iter_hour_dirs(self._config.recordings_dir, self._hour_mtimes)
         used = self._hour_sizes.total(entries)
         free = self._disk_free()
 

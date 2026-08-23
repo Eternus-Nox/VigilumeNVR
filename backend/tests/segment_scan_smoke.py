@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""select_segments — correctness of the window, and the cost of finding it.
+"""Recording-tree walks: the segments they return, and what they cost to find.
+
+Two walks, both on paths that run constantly — select_segments on every event
+clip, iter_hour_dirs every minute behind the space pass.
 
 A clip window is tens of seconds; a camera-day is 24 hour dirs of ~360 segments.
 Pruning only by day meant every clip extraction walked the whole day to find
@@ -114,8 +117,81 @@ def build_day(cam_dir: Path, day: str, hours: range, segs_per_hour: int) -> None
             (hd / f"{secs // 60:02d}.{secs % 60:02d}.ts").write_bytes(b"\x47")
 
 
+def _check_hour_dir_walk(tmp: Path) -> None:
+    """iter_hour_dirs with and without the mtime cache.
+
+    Same answer either way; the cached form must stop reading the contents of
+    hour dirs nothing has been written to. Cost is counted as directory entries
+    consumed, which is what the per-segment stat is attached to.
+    """
+    from app.native.recorder import HourDirMtimes, iter_hour_dirs
+
+    root = tmp / "recordings"
+    # 2 cameras x 2 days x 6 hours x 60 segments — the same shape as a real
+    # tree, small enough to build quickly.
+    for camname in ("front", "drive"):
+        for day in ("2026-03-14", "2026-03-15"):
+            build_day(root / camname, day, range(6), 60)
+    hour_dirs = 2 * 2 * 6
+    segments = hour_dirs * 60
+
+    uncached = iter_hour_dirs(root)
+    check(len(uncached) == hour_dirs, f"walk finds every hour dir ({hour_dirs})")
+    check(
+        uncached == sorted(uncached, key=lambda i: (i[0], str(i[1]))),
+        "returned oldest first",
+    )
+
+    cache = HourDirMtimes()
+    counter = _CountingScandir()
+    real_scandir = os.scandir
+    recorder.os.scandir = counter  # type: ignore[assignment]
+    try:
+        first = iter_hour_dirs(root, cache)
+        cold = counter.entries
+        counter.entries = 0
+        second = iter_hour_dirs(root, cache)
+        warm = counter.entries
+    finally:
+        recorder.os.scandir = real_scandir  # type: ignore[assignment]
+
+    check(first == uncached, "cached walk returns exactly what the uncached one does")
+    check(second == first, "a second cached walk is stable")
+    check(
+        cold > segments,
+        f"the cold walk still reads every segment ({cold} entries for {segments})",
+    )
+    check(
+        warm < hour_dirs * 3,
+        f"the warm walk reads {warm} entries, not the {cold} of a full re-stat "
+        f"— sealed hour dirs are not reopened",
+    )
+
+    # A new segment in one hour dir bumps that dir's mtime: only it re-measures,
+    # and the newer mtime must actually surface.
+    touched = root / "front" / "2026-03-15" / "05"
+    (touched / "59.50.ts").write_bytes(b"\x47")
+    third = iter_hour_dirs(root, cache)
+    before = dict((p, m) for m, p in first)
+    after = dict((p, m) for m, p in third)
+    check(after[touched] > before[touched], "a written-to hour dir picks up its new mtime")
+    check(
+        sum(1 for p in after if after[p] != before.get(p)) == 1,
+        "and it is the ONLY dir whose value changed",
+    )
+
+    # Deleting dirs must not leave the cache growing forever.
+    shutil.rmtree(root / "drive")
+    fourth = iter_hour_dirs(root, cache)
+    check(len(fourth) == hour_dirs // 2, "deleted dirs leave the walk")
+    check(
+        len(cache._mtimes) == hour_dirs // 2,
+        f"and leave the cache too (holds {len(cache._mtimes)}, not {hour_dirs})",
+    )
+
+
 def main() -> int:
-    print("select_segments: window correctness + scan cost")
+    print("recording-tree walks: results + scan cost")
     tmp = Path(tempfile.mkdtemp(prefix="vigilume-segscan-"))
     try:
         cam = tmp / "front"
@@ -215,13 +291,16 @@ def main() -> int:
             "a non-numeric dir beside the hour dirs is ignored",
         )
 
+        # --- iter_hour_dirs: the walk behind the per-minute space pass -------
+        _check_hour_dir_walk(tmp)
+
         print()
         if _failures:
             print(f"{len(_failures)} of {_checks} CHECKS FAILED")
             for f in _failures:
                 print(f"  - {f}")
             return 1
-        print(f"ALL {_checks} CHECKS PASSED (select_segments window + scan cost)")
+        print(f"ALL {_checks} CHECKS PASSED (recording-tree walk results + cost)")
         return 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
