@@ -77,27 +77,30 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
     </label>
   );
 
-  // Separate from dayInput: gigabytes need a much larger range than 0-365, and
-  // min_free_gb has a floor of 1 (a floor of 0 would mean "fill the disk").
-  const gbInput = (
+  // Separate from dayInput: these carry their own bounds rather than 0-365.
+  // Gigabytes need a far larger ceiling; min_free_gb has a floor of 1 (a floor
+  // of 0 would mean "fill the disk"); clip post-roll has a real upper bound
+  // (MAX_CLIP_POST_S) because footage past it is not yet written when the clip
+  // is cut. `max` is optional so only the fields with a ceiling declare one.
+  const numInput = (
     label: string,
-    key: 'max_storage_gb' | 'min_free_gb',
+    key: 'max_storage_gb' | 'min_free_gb' | 'clip_pre_s' | 'clip_post_s',
     min: number,
     hint: string,
+    max?: number,
   ) => (
     <label>
       {label}
       <input
         type="number"
         min={min}
+        max={max}
         step={1}
         value={recording[key] ?? min}
-        onChange={(e) =>
-          setRecording({
-            ...recording,
-            [key]: Math.max(min, Math.floor(Number(e.target.value) || 0)),
-          })
-        }
+        onChange={(e) => {
+          const n = Math.max(min, Math.floor(Number(e.target.value) || 0));
+          setRecording({ ...recording, [key]: max === undefined ? n : Math.min(max, n) });
+        }}
       />
       <span className="control-hint">{hint}</span>
     </label>
@@ -129,18 +132,48 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
           deleted for space</strong> — they expire only by their own retention.
         </p>
         <div className="form-stack">
-          {gbInput(
+          {numInput(
             'Maximum recording storage (GB)',
             'max_storage_gb',
             0,
             '0 = no cap. Set this when the disk is shared with other data, so recordings ' +
               'cannot consume the whole array.',
           )}
-          {gbInput(
+          {numInput(
             'Keep free space (GB)',
             'min_free_gb',
             1,
             'Always leave at least this much free on the recordings disk, whatever the cap.',
+          )}
+        </div>
+      </section>
+
+      <section className="card">
+        <h2>Clip padding</h2>
+        <p className="muted small">
+          Extra footage kept either side of an event in its clip. Both are measured from{' '}
+          <em>when the object was detected</em>, which is later than when it entered frame —
+          the tracker needs a few frames on something large enough to recognise, and a
+          subject approaching from a distance can be visible for seconds before that. If
+          clips tend to open with the subject already mid-frame, raise the lead-in. The
+          footage is copied from 24/7 recording that is already on disk, so wider padding
+          costs a little clip storage and no extra CPU.
+        </p>
+        <div className="form-stack">
+          {numInput(
+            'Lead-in before event (seconds)',
+            'clip_pre_s',
+            0,
+            'Try 15 if clips start too late. 0 starts the clip exactly at detection.',
+            120,
+          )}
+          {numInput(
+            'Run-on after event (seconds)',
+            'clip_post_s',
+            0,
+            'Capped at 10: clips are cut 20 s after the event ends, and later footage ' +
+              'has not been written to disk yet.',
+            10,
           )}
         </div>
       </section>

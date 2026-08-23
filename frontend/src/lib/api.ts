@@ -567,6 +567,17 @@ export interface AppSettings {
      */
     max_storage_gb: number;
     min_free_gb: number;
+    /**
+     * Seconds of footage kept either side of a detected event in its clip.
+     *
+     * Measured from DETECTION, not from the subject entering frame — the
+     * tracker needs a few frames on an object big enough to hit on, so pre-roll
+     * absorbs that lag before it buys any lead-in. Post-roll is capped by the
+     * backend (`MAX_CLIP_POST_S`) because later footage is not yet on disk when
+     * the clip is cut.
+     */
+    clip_pre_s: number;
+    clip_post_s: number;
   };
   detection: {
     model: DetectionModel;

@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from ..auth import require_admin
 from ..config import DEFAULT_CAMERA_TIMEZONE
+from ..native.recorder import MAX_CLIP_POST_S
 from ..native.streams import webrtc_status
 from .detection import activate_model
 
@@ -162,6 +163,16 @@ class RecordingSettings(BaseModel):
     # Never let the recordings filesystem fall below this much free space. The
     # backstop that keeps the box healthy even if something ELSE fills the disk.
     min_free_gb: int = Field(default=5, ge=1, le=10_000)
+    # Event clip padding either side of the detected event (see DEFAULT_SETTINGS
+    # for why pre-roll usually wants to be the larger of the two).
+    clip_pre_s: int = Field(default=5, ge=0, le=120)
+    # Post-roll is capped where pre-roll is not, and the cap is a fact about the
+    # recorder rather than a matter of taste: extraction runs CLIP_DELAY_S after
+    # the event ends, and a segment is only on disk once its SEGMENT_SECONDS are
+    # up, so footage past that horizon has not been written yet. Asking for more
+    # would not fail loudly — ffmpeg would just stop at the end of what exists
+    # and hand back a clip quietly shorter than requested.
+    clip_post_s: int = Field(default=5, ge=0, le=MAX_CLIP_POST_S)
 
 
 class DetectionSettings(BaseModel):

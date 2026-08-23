@@ -316,6 +316,23 @@ DEFAULT_SETTINGS: dict = {
         "snapshot_days": 14,
         "max_storage_gb": 0,
         "min_free_gb": 5,
+        # Event clip padding, in seconds either side of the DETECTED event.
+        #
+        # Read that word carefully, because it is the whole reason these are
+        # adjustable. An event starts at the frame where the tracker CONFIRMED
+        # the object (engine.MIN_HITS frames carrying one tracker_id), not when
+        # the object entered frame. The gap between the two is real and
+        # scene-dependent: a subject walking in far from the camera is present
+        # for seconds before it is big enough for the model to hit on. Pre-roll
+        # has to cover the detection lag AND the lead-in the viewer wants, so
+        # the useful value is larger than it first looks — a clip that opens
+        # with the subject already mid-frame means pre_s is short, not that
+        # detection is late.
+        #
+        # Cheap: the window is stream-copied out of continuous footage that is
+        # already on disk, so wider padding costs clip bytes and nothing else.
+        "clip_pre_s": 5,
+        "clip_post_s": 5,
     },
     # Automatic time provisioning for Dahua/Amcrest cameras. When auto_sync is
     # on, each reachable camera has its clock set to the current local time in

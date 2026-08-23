@@ -92,8 +92,14 @@ if TYPE_CHECKING:  # pragma: no cover
 log = logging.getLogger(__name__)
 
 SEGMENT_SECONDS = 10
-CLIP_PAD_S = 5.0          # clip window = [start - pad, end + pad]
+CLIP_PAD_S = 5.0          # DEFAULT clip padding; overridden per-install by
+                          # settings.recording.clip_pre_s / clip_post_s
 CLIP_DELAY_S = 20.0       # schedule_clip waits this long after event end
+# Ceiling on post-roll, forced by the two constants above it rather than chosen:
+# extraction starts CLIP_DELAY_S after the event ends, and the segment covering
+# any given instant is only closed and on disk SEGMENT_SECONDS after it starts.
+# Past this horizon the footage simply does not exist yet at extraction time.
+MAX_CLIP_POST_S = int(CLIP_DELAY_S - SEGMENT_SECONDS)
 SEGMENT_STALL_S = 30.0    # watchdog: no new segment file => respawn
 LOW_DISK_BYTES = 5 * 1024**3   # default free-space floor (settings.min_free_gb)
 
@@ -935,6 +941,23 @@ class Recorder:
                       or (LOW_DISK_BYTES // 1024**3))
         return cap_gb * 1024**3, free_gb * 1024**3
 
+    def _clip_pads(self) -> tuple[float, float]:
+        """(pre_s, post_s) padding for the event clip window, from settings.
+
+        Post-roll is clamped to MAX_CLIP_POST_S here as well as in the settings
+        schema: the schema guards the UI and the API, this guards a settings
+        document written before that bound existed (or by hand).
+        """
+        recording = self._settings.recording
+        pre = recording.get("clip_pre_s")
+        post = recording.get("clip_post_s")
+        # `or CLIP_PAD_S` would turn a deliberate 0 into 5 — a real choice for
+        # someone who wants clips to start exactly on detection, so None (the
+        # key is absent) is the only case that falls back to the default.
+        pre_s = CLIP_PAD_S if pre is None else max(0.0, float(pre))
+        post_s = CLIP_PAD_S if post is None else max(0.0, float(post))
+        return pre_s, min(post_s, float(MAX_CLIP_POST_S))
+
     @staticmethod
     def _headroom(limit_bytes: int) -> int:
         """How far PAST a limit to prune, so the next tick does not re-trip it."""
@@ -1082,8 +1105,9 @@ class Recorder:
             log.warning("recorder: clip FAILED event=%s — no matching event row", frigate_id)
             return None
         event_id = int(row["id"])
-        window_start = start_time - CLIP_PAD_S
-        window_end = end_time + CLIP_PAD_S
+        pre_s, post_s = self._clip_pads()
+        window_start = start_time - pre_s
+        window_end = end_time + post_s
         segments = await asyncio.to_thread(
             select_segments, self.camera_dir(camera), window_start, window_end
         )
