@@ -563,9 +563,22 @@ struct SettingsDocument: Decodable, Sendable {
         var continuousDays: Int
         var eventDays: Int
         var snapshotDays: Int
+        /// Space-based rotation: a cap on the recordings tree (0 = uncapped)
+        /// and a free-space floor. GiB, not days.
+        var maxStorageGb: Int
+        var minFreeGb: Int
+        /// Event clip padding, in seconds either side of the DETECTED event —
+        /// which is later than the object entering frame, so `clipPreS` buys
+        /// lead-in only after it has covered the detection lag.
+        var clipPreS: Int
+        var clipPostS: Int
+        /// Seconds after an event ends before its clip is cut. Raising it is
+        /// the only way to reach post-roll past `maxClipPostS(clipDelayS)`.
+        var clipDelayS: Int
 
         private enum CodingKeys: String, CodingKey {
             case continuousDays, eventDays, snapshotDays
+            case maxStorageGb, minFreeGb, clipPreS, clipPostS, clipDelayS
         }
 
         init(from decoder: Decoder) throws {
@@ -573,8 +586,20 @@ struct SettingsDocument: Decodable, Sendable {
             continuousDays = try c.decodeIfPresent(Int.self, forKey: .continuousDays) ?? 7
             eventDays = try c.decodeIfPresent(Int.self, forKey: .eventDays) ?? 14
             snapshotDays = try c.decodeIfPresent(Int.self, forKey: .snapshotDays) ?? 14
+            maxStorageGb = try c.decodeIfPresent(Int.self, forKey: .maxStorageGb) ?? 0
+            minFreeGb = try c.decodeIfPresent(Int.self, forKey: .minFreeGb) ?? 5
+            clipPreS = try c.decodeIfPresent(Int.self, forKey: .clipPreS) ?? 5
+            clipPostS = try c.decodeIfPresent(Int.self, forKey: .clipPostS) ?? 5
+            clipDelayS = try c.decodeIfPresent(Int.self, forKey: .clipDelayS) ?? 20
         }
     }
+
+    /// Reachable post-roll for a cut delay, mirroring the backend's
+    /// `max_clip_post_s`: a segment is 10 s long and is only on disk once
+    /// closed, so footage past `delay - 10` has not been written when the clip
+    /// is assembled. The backend rejects a larger `clipPostS`, so the editor
+    /// clamps to this rather than letting a save 422.
+    static func maxClipPostS(_ clipDelayS: Int) -> Int { max(0, clipDelayS - 10) }
 
     struct Detection: Decodable, Sendable {
         var model: String
@@ -586,9 +611,14 @@ struct SettingsDocument: Decodable, Sendable {
         /// the two lists are disjoint — one field would make an invalid
         /// model/backend pair reachable the instant the backend flips.
         var coralModel: String
+        /// Seconds a label may go unseen before its event ends. Does not extend
+        /// the event — `endTime` is still the last frame the label was seen —
+        /// but it decides whether a subject that pauses or is briefly hidden is
+        /// one event or several, and a clip is only cut once its event ends.
+        var absenceTimeoutS: Int
 
         private enum CodingKeys: String, CodingKey {
-            case model, confidence, defaultMode, backend, coralModel
+            case model, confidence, defaultMode, backend, coralModel, absenceTimeoutS
         }
 
         init(from decoder: Decoder) throws {
@@ -601,6 +631,7 @@ struct SettingsDocument: Decodable, Sendable {
             backend = try c.decodeIfPresent(DetectionBackend.self, forKey: .backend) ?? .gpu
             coralModel = try c.decodeIfPresent(String.self, forKey: .coralModel)
                 ?? CoralModelInfo.defaultKey
+            absenceTimeoutS = try c.decodeIfPresent(Int.self, forKey: .absenceTimeoutS) ?? 5
         }
     }
 
@@ -845,17 +876,33 @@ struct SettingsPatch: Encodable, Sendable {
         var continuousDays: Int
         var eventDays: Int
         var snapshotDays: Int
+        /// Optional for the same reason as `Detection` below — nil is omitted,
+        /// so a screen editing only the retention windows cannot reset the
+        /// storage cap or the clip padding. Never give these non-nil defaults.
+        var maxStorageGb: Int?
+        var minFreeGb: Int?
+        var clipPreS: Int?
+        var clipPostS: Int?
+        var clipDelayS: Int?
     }
 
     struct Detection: Encodable, Sendable {
-        var model: String
-        var confidence: Double
-        var defaultMode: DetectMode
-        /// OPTIONAL on purpose: JSONEncoder omits nil, and the backend
-        /// deep-merges, so a screen that does not touch the backend/model
-        /// choice cannot clobber it. Never give these non-nil defaults.
+        /// ALL optional: JSONEncoder omits nil and the backend deep-merges, so
+        /// a screen that does not touch a field cannot clobber it. Never give
+        /// these non-nil defaults.
+        ///
+        /// `model` in particular MUST stay omittable. The detector model is
+        /// activated out-of-band by the download manager, so any screen that
+        /// re-sends a stale `model` alongside an unrelated edit can undo a
+        /// fresh activation — the web form dropped its model mirror for
+        /// exactly this reason (RecordingTab.tsx).
+        var model: String?
+        var confidence: Double?
+        var defaultMode: DetectMode?
         var backend: DetectionBackend?
         var coralModel: String?
+        /// Seconds a label may go unseen before its event ends.
+        var absenceTimeoutS: Int?
     }
 
     struct System: Encodable, Sendable {
