@@ -77,6 +77,32 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
     </label>
   );
 
+  // Separate from dayInput: gigabytes need a much larger range than 0-365, and
+  // min_free_gb has a floor of 1 (a floor of 0 would mean "fill the disk").
+  const gbInput = (
+    label: string,
+    key: 'max_storage_gb' | 'min_free_gb',
+    min: number,
+    hint: string,
+  ) => (
+    <label>
+      {label}
+      <input
+        type="number"
+        min={min}
+        step={1}
+        value={recording[key] ?? min}
+        onChange={(e) =>
+          setRecording({
+            ...recording,
+            [key]: Math.max(min, Math.floor(Number(e.target.value) || 0)),
+          })
+        }
+      />
+      <span className="control-hint">{hint}</span>
+    </label>
+  );
+
   return (
     <div className="settings-section">
       <section className="card">
@@ -90,6 +116,32 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
           {dayInput('Continuous recording (days)', 'continuous_days', '24/7 footage kept on disk')}
           {dayInput('Event clips (days)', 'event_days', 'per-event recordings')}
           {dayInput('Snapshots (days)', 'snapshot_days', 'event snapshot images')}
+        </div>
+      </section>
+
+      <section className="card">
+        <h2>Storage limits</h2>
+        <p className="muted small">
+          When space runs out, the oldest 24/7 footage is deleted to make room for the
+          newest — a rolling window, checked every minute. This applies <em>on top of</em>{' '}
+          the day limits above: whichever frees a recording first wins, so footage may be
+          removed sooner than the retention days suggest. <strong>Event clips are never
+          deleted for space</strong> — they expire only by their own retention.
+        </p>
+        <div className="form-stack">
+          {gbInput(
+            'Maximum recording storage (GB)',
+            'max_storage_gb',
+            0,
+            '0 = no cap. Set this when the disk is shared with other data, so recordings ' +
+              'cannot consume the whole array.',
+          )}
+          {gbInput(
+            'Keep free space (GB)',
+            'min_free_gb',
+            1,
+            'Always leave at least this much free on the recordings disk, whatever the cap.',
+          )}
         </div>
       </section>
 

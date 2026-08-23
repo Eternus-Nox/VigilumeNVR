@@ -307,7 +307,16 @@ DEFAULT_SETTINGS: dict = {
             "attach_snapshot": True,
         },
     },
-    "recording": {"continuous_days": 7, "event_days": 14, "snapshot_days": 14},
+    # max_storage_gb 0 = no cap (rotate only against min_free_gb, the historical
+    # behavior). min_free_gb is the free-space floor the recorder keeps on the
+    # media filesystem by deleting the oldest continuous footage.
+    "recording": {
+        "continuous_days": 7,
+        "event_days": 14,
+        "snapshot_days": 14,
+        "max_storage_gb": 0,
+        "min_free_gb": 5,
+    },
     # Automatic time provisioning for Dahua/Amcrest cameras. When auto_sync is
     # on, each reachable camera has its clock set to the current local time in
     # `timezone` (an IANA name) and its on-device NTP client disabled — on

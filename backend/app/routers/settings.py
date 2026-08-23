@@ -149,6 +149,19 @@ class RecordingSettings(BaseModel):
     continuous_days: int = Field(default=7, ge=0, le=365)
     event_days: int = Field(default=14, ge=0, le=365)
     snapshot_days: int = Field(default=14, ge=0, le=365)
+    # Space-based rotation ("overwrite the oldest with the newest"), applied on
+    # top of the day-based cutoffs above — whichever frees a recording first
+    # wins. Only 24/7 continuous footage rotates; event clips are never deleted
+    # for space, only by event_days.
+    #
+    # 0 disables the cap: recordings grow until min_free_gb stops them.
+    # The cap is what you want when the recordings disk is shared with other
+    # data (an Unraid array), since the free-space floor alone lets Vigilume
+    # consume everything else's headroom before it reacts.
+    max_storage_gb: int = Field(default=0, ge=0, le=1_000_000)
+    # Never let the recordings filesystem fall below this much free space. The
+    # backstop that keeps the box healthy even if something ELSE fills the disk.
+    min_free_gb: int = Field(default=5, ge=1, le=10_000)
 
 
 class DetectionSettings(BaseModel):

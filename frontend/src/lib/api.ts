@@ -557,6 +557,16 @@ export interface AppSettings {
     continuous_days: number;
     event_days: number;
     snapshot_days: number;
+    /**
+     * Space-based rotation, applied on top of the day cutoffs above —
+     * whichever frees a recording first wins. Only 24/7 footage rotates;
+     * event clips expire by `event_days` alone and are never deleted for space.
+     *
+     * `max_storage_gb` 0 = uncapped. `min_free_gb` is the free-space floor kept
+     * on the recordings filesystem.
+     */
+    max_storage_gb: number;
+    min_free_gb: number;
   };
   detection: {
     model: DetectionModel;

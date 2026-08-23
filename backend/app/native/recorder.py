@@ -26,9 +26,26 @@ Retention (hourly task, blocking work in a thread)
 - delete ``clips/*.mp4`` older than ``settings.recording.event_days``
   (the event-row pruner in main.py also unlinks a clip when it drops rows;
   stale ``.{id}.part.mp4`` leftovers are swept by the same pass);
-- low-disk guard: <5 GB free on the media filesystem => prune the oldest
-  recording hours regardless of retention, loudly. Hour dirs written to in
-  the last two minutes are never deleted (ffmpeg is inside them).
+Space-based rotation (every 60 s, blocking work in a thread)
+------------------------------------------------------------
+"Overwrite the oldest with the newest", applied ON TOP of the day-based
+cutoffs above — whichever frees a recording first wins. ``space_pass()``
+deletes the oldest recording hour dirs until BOTH limits hold:
+
+- ``settings.recording.max_storage_gb`` — a cap on the recordings tree
+  (0 = uncapped). What you want when the disk is shared with other data.
+- ``settings.recording.min_free_gb`` — a free-space floor on the media
+  filesystem (default 5 GB), the backstop if something else fills the disk.
+
+It runs on its OWN minute timer, not the hourly retention one: three cameras
+write ~5.6 GB/hour, more than the whole default floor, so an hourly guard can
+let the disk go genuinely full — and a full disk does not rotate, it makes
+ffmpeg fail its writes. Deletion overshoots each limit slightly (hysteresis)
+so a disk sitting at the threshold does not re-prune every tick. Hour dirs
+written to in the last two minutes are never deleted (ffmpeg is inside them),
+and EVENT CLIPS ARE NEVER DELETED FOR SPACE — they expire only by
+``event_days``. Still short after rotating everything prunable => a loud
+ERROR, not an escalation.
 
 Clips
 -----
@@ -78,7 +95,23 @@ SEGMENT_SECONDS = 10
 CLIP_PAD_S = 5.0          # clip window = [start - pad, end + pad]
 CLIP_DELAY_S = 20.0       # schedule_clip waits this long after event end
 SEGMENT_STALL_S = 30.0    # watchdog: no new segment file => respawn
-LOW_DISK_BYTES = 5 * 1024**3
+LOW_DISK_BYTES = 5 * 1024**3   # default free-space floor (settings.min_free_gb)
+
+# Space-based rotation ("overwrite oldest with newest") runs on THIS cadence,
+# not the hourly retention one.
+#
+# The hourly sweep is far too slow to be the only guard: three cameras write
+# ~135 GB/day, i.e. ~5.6 GB/hour — MORE than the whole 5 GB default floor. The
+# disk can therefore cross the floor and go genuinely full between two hourly
+# passes, and a full disk does not rotate, it makes ffmpeg fail its writes. One
+# minute bounds the overshoot to ~100 MB at that rate.
+SPACE_CHECK_INTERVAL_S = 60.0
+
+# Rotation deletes PAST the limit by this much, so the next minute's writes do
+# not immediately trip it again — without hysteresis a disk sitting exactly at
+# the threshold re-prunes every tick, one hour dir at a time, forever.
+SPACE_HEADROOM_FRACTION = 0.02   # free 2% beyond the cap
+SPACE_HEADROOM_MIN_BYTES = 1024**3   # ...but at least 1 GB
 
 _BACKOFF_MIN_S = 2.0
 _BACKOFF_MAX_S = 60.0
@@ -305,6 +338,54 @@ def iter_hour_dirs(recordings_dir: Path) -> list[tuple[float, Path]]:
     return out
 
 
+def hour_dir_size(hour_dir: Path) -> int:
+    """Total bytes of the segment files directly inside one hour dir."""
+    total = 0
+    try:
+        with os.scandir(hour_dir) as it:
+            for entry in it:
+                with contextlib.suppress(OSError):
+                    if entry.is_file():
+                        total += entry.stat().st_size
+    except OSError:
+        return 0
+    return total
+
+
+class HourDirSizes:
+    """Cached ``hour dir -> bytes``, keyed on the dir's newest-content mtime.
+
+    Space-based rotation has to know how much the recordings tree occupies, and
+    it has to know it EVERY MINUTE (see SPACE_CHECK_INTERVAL_S). A naive
+    recursive scan re-stats every segment file each time — for a week of three
+    cameras that is ~180k files a minute, all of it to re-measure hour dirs that
+    were sealed days ago and cannot have changed.
+
+    A finished hour dir is immutable, so its size is cached against the mtime
+    ``iter_hour_dirs`` already computes; only the two or three hour dirs ffmpeg
+    is actively writing get re-measured. Entries for deleted dirs are dropped on
+    each pass, so the cache cannot grow without bound.
+    """
+
+    def __init__(self) -> None:
+        self._sizes: dict[Path, tuple[float, int]] = {}
+
+    def total(self, entries: list[tuple[float, Path]]) -> int:
+        """Total bytes across ``entries`` (as returned by ``iter_hour_dirs``)."""
+        fresh: dict[Path, tuple[float, int]] = {}
+        total = 0
+        for mtime, hd in entries:
+            cached = self._sizes.get(hd)
+            size = cached[1] if cached is not None and cached[0] == mtime else hour_dir_size(hd)
+            fresh[hd] = (mtime, size)
+            total += size
+        self._sizes = fresh          # drops entries for pruned dirs
+        return total
+
+    def forget(self, hour_dir: Path) -> None:
+        self._sizes.pop(hour_dir, None)
+
+
 def _remove_empty_day_dirs(recordings_dir: Path) -> None:
     if not recordings_dir.is_dir():
         return
@@ -380,6 +461,8 @@ class Recorder:
         # around the ffmpeg run, never across the post-event delay, so queued
         # clips keep their own timing.
         self._clip_sem = asyncio.Semaphore(CLIP_CONCURRENCY)
+        # Cached hour-dir sizes for the per-minute space pass (see HourDirSizes).
+        self._hour_sizes = HourDirSizes()
         # HEVC->H.264 transcoding for browser playback (segments served by the
         # recordings router via .transcoder; clips transcoded in extract_clip).
         # Recordings on disk stay HEVC; this only affects what the browser gets.
@@ -461,6 +544,7 @@ class Recorder:
         await self.reload()
         self._tasks.append(asyncio.create_task(self._rollover_loop(), name="recorder-rollover"))
         self._tasks.append(asyncio.create_task(self._retention_loop(), name="recorder-retention"))
+        self._tasks.append(asyncio.create_task(self._space_loop(), name="recorder-space"))
         self._tasks.append(asyncio.create_task(self._boot_check_loop(), name="recorder-boot-check"))
 
     async def stop(self) -> None:
@@ -796,6 +880,24 @@ class Recorder:
                 log.exception("recorder retention pass failed")
             await asyncio.sleep(_RETENTION_INTERVAL_S)
 
+    async def _space_loop(self) -> None:
+        """Space-based rotation, every SPACE_CHECK_INTERVAL_S.
+
+        Separate from the hourly retention loop on purpose: running out of disk
+        is the failure that stops recording outright, and at real camera
+        bitrates the hourly sweep cannot react before the disk is genuinely
+        full. Blocking work (scandir + rmtree) runs in a thread so the event
+        loop keeps serving.
+        """
+        while True:
+            await asyncio.sleep(SPACE_CHECK_INTERVAL_S)
+            try:
+                await asyncio.to_thread(self.space_pass, time.time())
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                log.exception("recorder space pass failed")
+
     def retention_pass(self, now: Optional[float] = None) -> dict[str, list[Path]]:
         """One blocking retention sweep (called hourly via to_thread; tests
         call it directly). The cutoffs never reach into the active-write
@@ -825,33 +927,105 @@ class Recorder:
                 continue
         return None
 
-    def _low_disk_prune(self, now: float) -> list[Path]:
-        """<5 GB free => delete oldest recording hours regardless of
-        retention (skipping actively-written dirs), loudly."""
+    def _space_limits(self) -> tuple[int, int]:
+        """(max_storage_bytes, min_free_bytes) from settings. max 0 = no cap."""
+        recording = self._settings.recording
+        cap_gb = max(0, int(recording.get("max_storage_gb", 0) or 0))
+        free_gb = max(1, int(recording.get("min_free_gb", 0) or 0)
+                      or (LOW_DISK_BYTES // 1024**3))
+        return cap_gb * 1024**3, free_gb * 1024**3
+
+    @staticmethod
+    def _headroom(limit_bytes: int) -> int:
+        """How far PAST a limit to prune, so the next tick does not re-trip it."""
+        return max(SPACE_HEADROOM_MIN_BYTES, int(limit_bytes * SPACE_HEADROOM_FRACTION))
+
+    def space_pass(self, now: Optional[float] = None) -> list[Path]:
+        """Space-based rotation: delete the OLDEST continuous footage until the
+        recordings tree is under ``max_storage_gb`` and the filesystem has at
+        least ``min_free_gb`` free. Returns the hour dirs removed.
+
+        This is the "overwrite oldest with newest" behavior. It is deliberately
+        SEPARATE from (and much more frequent than) the day-based retention
+        sweep, and applies on top of it: whichever frees a recording first wins.
+
+        Event clips are never deleted here. They are the evidence the system
+        exists to produce and are tiny next to continuous footage, so they
+        expire only by ``event_days``. If every prunable hour dir is gone and
+        space is STILL short, that is logged loudly rather than escalating.
+        """
+        now = time.time() if now is None else now
+        cap, min_free = self._space_limits()
+        entries = iter_hour_dirs(self._config.recordings_dir)
+        used = self._hour_sizes.total(entries)
         free = self._disk_free()
-        if free is None or free >= LOW_DISK_BYTES:
+
+        over_cap = cap > 0 and used > cap
+        under_free = free is not None and free < min_free
+        if not over_cap and not under_free:
             return []
-        removed: list[Path] = []
-        for newest, hd in iter_hour_dirs(self._config.recordings_dir):
-            if now - newest < _ACTIVE_GRACE_S:
-                continue  # ffmpeg is writing here — never delete
-            log.error(
-                "LOW DISK: %.2f GB free < 5 GB — deleting oldest recordings %s",
-                free / 1024**3, hd,
+
+        # Targets include headroom so rotation is not re-triggered every tick.
+        want_used = (cap - self._headroom(cap)) if over_cap else None
+        want_free = (min_free + self._headroom(min_free)) if under_free else None
+        if over_cap:
+            log.warning(
+                "storage: recordings use %.1f GB > cap %.1f GB — rotating oldest footage",
+                used / 1024**3, cap / 1024**3,
             )
+        if under_free:
+            log.warning(
+                "storage: %.2f GB free < floor %.2f GB — rotating oldest footage",
+                (free or 0) / 1024**3, min_free / 1024**3,
+            )
+
+        removed: list[Path] = []
+        for newest, hd in entries:            # iter_hour_dirs is oldest-first
+            if now - newest < _ACTIVE_GRACE_S:
+                continue                      # ffmpeg is writing here — never delete
+            size = hour_dir_size(hd)
             shutil.rmtree(hd, ignore_errors=True)
+            self._hour_sizes.forget(hd)
             removed.append(hd)
-            free = self._disk_free()
-            if free is None or free >= LOW_DISK_BYTES:
+            used -= size
+            if free is not None:
+                free += size
+            if (want_used is None or used <= want_used) and \
+               (want_free is None or free is None or free >= want_free):
                 break
+
         if removed:
             _remove_empty_day_dirs(self._config.recordings_dir)
-        if free is not None and free < LOW_DISK_BYTES:
+            log.warning(
+                "storage: rotated %d oldest recording hour dir(s) — now %.1f GB used, "
+                "%.2f GB free", len(removed), used / 1024**3, (free or 0) / 1024**3,
+            )
+        # Nothing left that MAY be deleted: every remaining hour dir is inside
+        # the active-write grace window, or the space is held by something that
+        # is not continuous footage (clips, or other data sharing the disk).
+        # Report only the limit actually still breached — naming a disabled cap
+        # as "cap 0.0 GB" sends whoever reads this log after the wrong thing.
+        unmet: list[str] = []
+        if cap > 0 and used > cap:
+            unmet.append(f"{used / 1024**3:.1f} GB used vs cap {cap / 1024**3:.1f} GB")
+        if free is not None and free < min_free:
+            unmet.append(
+                f"{free / 1024**3:.2f} GB free vs floor {min_free / 1024**3:.2f} GB"
+            )
+        if unmet:
             log.error(
-                "LOW DISK: still %.2f GB free after pruning every prunable recording hour",
-                free / 1024**3,
+                "storage: STILL over limits after rotating every prunable recording "
+                "hour (%s). Event clips are never auto-deleted for space — raise the "
+                "limit, lower event_days, or add disk.",
+                "; ".join(unmet),
             )
         return removed
+
+    def _low_disk_prune(self, now: float) -> list[Path]:
+        """Back-compat wrapper: the hourly retention sweep still triggers a
+        space pass, so a box that never hits the minute timer (tests, a short
+        run) behaves as before."""
+        return self.space_pass(now)
 
     # ---------- clips ----------
 
