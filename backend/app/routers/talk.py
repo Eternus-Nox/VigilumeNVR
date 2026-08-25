@@ -42,7 +42,11 @@ from typing import Any, AsyncIterator, Optional
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
-from ..amcrest.backchannel import talk_gain_for, talk_stream_backchannel
+from ..amcrest.backchannel import (
+    BackchannelUnsupported,
+    talk_gain_for,
+    talk_stream_backchannel,
+)
 from ..auth import ws_token
 from ..amcrest.client import AmcrestError
 from .. import privacy
@@ -155,15 +159,39 @@ async def _run_session(websocket: WebSocket, cam: dict[str, Any]) -> None:
     # the speaker actually play. Every other speaker camera keeps the CGI
     # postAudio path unchanged. Both consume the SAME pcm_frames() iterator and
     # raise AmcrestError on failure, so the session fencing below is identical.
-    if _caps_of(cam).get("backchannel"):
-        sender = asyncio.create_task(
-            talk_stream_backchannel(
-                cam["ip"], cam["username"], cam["password"], pcm_frames(),
+    frames = pcm_frames()
+
+    async def deliver() -> None:
+        """Stream the mic to the camera by whichever transport it accepts.
+
+        The `backchannel` capability is a CLAIM, not a measurement: features.py
+        clones entries between models believed identical, so a camera can be
+        marked backchannel-capable and not actually speak ONVIF backchannel —
+        which failed talk outright with a bare "camera rejected audio".
+
+        So a NEGOTIATION failure falls back to CGI postAudio. Only negotiation:
+        it happens before any PCM is read, so `frames` is still untouched and
+        the fallback loses nothing. A mid-stream failure propagates, because
+        those frames are already gone and retrying would talk over itself.
+        """
+        if not _caps_of(cam).get("backchannel"):
+            await client.talk_stream(frames)
+            return
+        try:
+            await talk_stream_backchannel(
+                cam["ip"], cam["username"], cam["password"], frames,
                 gain=talk_gain_for(cam.get("model")),
             )
-        )
-    else:
-        sender = asyncio.create_task(client.talk_stream(pcm_frames()))
+        except BackchannelUnsupported as exc:
+            log.warning(
+                "talk: camera %s (%s) is marked backchannel-capable but would "
+                "not negotiate one (%s) — falling back to CGI postAudio. If "
+                "this camera works over CGI, its features.py entry is wrong.",
+                cam["name"], cam.get("model") or "?", exc,
+            )
+            await client.talk_stream(frames)
+
+    sender = asyncio.create_task(deliver())
     close_code, close_reason = 1000, ""
     disconnected = False
     frames_in = 0

@@ -378,6 +378,22 @@ class _RTSPBackchannel:
         self._writer = None
 
 
+class BackchannelUnsupported(AmcrestError):
+    """The RTSP audio backchannel could not be NEGOTIATED on this camera.
+
+    Distinct from a mid-stream failure, and the distinction is what makes a
+    fallback safe: negotiation happens before a single PCM frame is read, so the
+    caller still holds an untouched mic iterator and can hand it to the CGI
+    postAudio path instead. Once streaming has begun those frames are gone, and
+    retrying would drop however much audio had already been sent.
+
+    This exists because a camera's `backchannel` capability can be WRONG. The
+    static map clones entries between models believed identical (see
+    amcrest/features.py), so a model that does not really speak ONVIF
+    backchannel would otherwise fail talk outright with nothing to fall back on.
+    """
+
+
 async def talk_stream_backchannel(
     ip: str, username: str, password: str, pcm_chunks: AsyncIterator[bytes],
     gain: float = TALK_GAIN,
@@ -393,7 +409,16 @@ async def talk_stream_backchannel(
     """
     session = _RTSPBackchannel(ip, username, password, gain=gain)
     try:
-        await session.open()
+        try:
+            await session.open()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — classified, then re-raised
+            # Negotiation failed: no PCM has been consumed, so the caller can
+            # still try the other transport. See BackchannelUnsupported.
+            raise BackchannelUnsupported(
+                f"RTSP audio backchannel not available: {exc}"
+            ) from exc
         await session.stream(pcm_chunks)
     finally:
         await session.close()
