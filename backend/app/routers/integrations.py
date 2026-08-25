@@ -279,7 +279,15 @@ async def rclone_oauth_start(body: OAuthStart) -> dict[str, Any]:
     except (ConfigError, OAuthError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _PENDING.add(flow)
-    log.info("rclone oauth: started %s flow for remote %r", body.type, name)
+    # Log the PKCE fact explicitly. Dropbox refuses a plain-HTTP LAN redirect
+    # without a code challenge, and its error names redirect_uri rather than
+    # PKCE — so when someone reports "invalid redirect_uri", the first question
+    # is whether the running build sends a challenge at all. This answers it
+    # from `docker logs` without guessing at which image is deployed.
+    log.info(
+        "rclone oauth: started %s flow for remote %r, redirect_uri=%s, pkce=S256",
+        body.type, name, flow.redirect_uri,
+    )
     return {
         "auth_url": rclone_oauth.build_auth_url(flow),
         "redirect_uri": flow.redirect_uri,
