@@ -26,7 +26,14 @@ struct SingleCameraView: View {
     let fallbackURL: URL?
 
     @StateObject private var model = LiveController(keepsScreenAwake: true)
+    /// Two-way talk, so an answered doorbell call can actually be answered here
+    /// rather than only on the controls screen. Same pipeline CameraDetailView
+    /// drives — mic -> 8 kHz Int16 PCM -> the camera's talk WebSocket.
+    @StateObject private var talk = TalkController()
     @ObservedObject private var network = NetworkQuality.shared
+    /// The user's mute state before talk forced the receive audio on, so it can
+    /// be put back afterwards. nil == talk is not currently holding it.
+    @State private var muteBeforeTalk: Bool?
 
     var body: some View {
         ZStack {
@@ -72,9 +79,7 @@ struct SingleCameraView: View {
             VStack {
                 topBar
                 Spacer()
-                if camera.capabilities.mic, !camera.isPrivate {
-                    muteButton
-                }
+                bottomBar
             }
         }
         .preferredColorScheme(.dark)
@@ -97,6 +102,9 @@ struct SingleCameraView: View {
             applyOrientationLock(rotateTo: .portrait)
             // Restore normal auto-lock when leaving fullscreen.
             UIApplication.shared.isIdleTimerDisabled = false
+            // Before model.stop(): releases the mic and the talk WS rather than
+            // leaving a live uplink behind a dismissed screen.
+            talk.stop()
             model.stop()
         }
         // Media base flipped (LAN ⇄ primary): the parent recomputes these URLs;
@@ -109,11 +117,28 @@ struct SingleCameraView: View {
             switch phase {
             case .background:
                 model.suspend()
+                talk.stop()   // release mic + WS cleanly, don't let iOS kill it
             case .active:
                 model.resume()
             default:
                 break
             }
+        }
+        // Talk is only a conversation if the far end is audible: force the live
+        // receive audio on while talking, and restore the prior state after.
+        .onChange(of: talk.state) { _, talkState in
+            handleTalkAudio(talkState)
+        }
+        .alert(
+            "Talk",
+            isPresented: Binding(
+                get: { talk.alertMessage != nil },
+                set: { if !$0 { talk.alertMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(talk.alertMessage ?? "")
         }
     }
 
@@ -210,6 +235,89 @@ struct SingleCameraView: View {
         )
     }
 
+    /// Mute pill and — on a camera with a speaker — the hold-to-talk mic.
+    ///
+    /// Both are capability-gated, and on DIFFERENT capabilities: `mic` is the
+    /// camera's microphone (whether there is anything to hear), `speaker` is
+    /// whether the camera can play what you say. A doorbell has both; plenty of
+    /// cameras have one and not the other, and gating talk on `mic` would offer
+    /// a button that could only ever fail.
+    ///
+    /// Talk is capability-gated ONLY — viewers may talk, matching the backend's
+    /// talk WS, which accepts a viewer session token (see CameraDetailView).
+    private var bottomBar: some View {
+        VStack(spacing: 14) {
+            if showsTalk {
+                VStack(spacing: 6) {
+                    PushToTalkButton(model: talk, state: \.state, diameter: 76) {
+                        guard let url = session.api?.talkWebSocketURL(camera: camera.name) else {
+                            talk.alertMessage = "Talk connection URL is unavailable."
+                            return
+                        }
+                        talk.start(url: url, protocols: session.api?.wsSubprotocols() ?? [])
+                    } onRelease: {
+                        talk.stop()
+                    }
+                    .disabled(!isOnline)
+                    .opacity(isOnline ? 1 : 0.55)
+                    .accessibilityLabel("Hold to talk")
+
+                    Text(talkStatusText)
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(talk.state == .live ? Theme.success : Color.white.opacity(0.75))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(Color.black.opacity(0.5)))
+                }
+            }
+            if camera.capabilities.mic, !camera.isPrivate {
+                muteButton
+            }
+        }
+        .padding(.bottom, 24)
+    }
+
+    /// Talk needs a speaker on the camera, and is pointless on a private one
+    /// (capture is off server-side, so there is nothing to talk into).
+    private var showsTalk: Bool {
+        camera.capabilities.speaker && !camera.isPrivate
+    }
+
+    private var talkStatusText: String {
+        if !isOnline { return "Camera offline" }
+        switch talk.state {
+        case .idle: return "Hold to talk"
+        case .connecting: return "Connecting…"
+        case .live: return "Talking — release to stop"
+        }
+    }
+
+    /// Force the live receive audio on while talking (a one-way shout is not a
+    /// conversation), remembering the prior mute state and restoring it after.
+    ///
+    /// Mirrors CameraDetailView.handleTalkAudio, and gates on the same
+    /// capability it does: with no camera mic there is no receive audio to
+    /// unmute, and toggling `isMuted` would reconfigure the audio session for
+    /// nothing mid-talk.
+    private func handleTalkAudio(_ talkState: TalkController.State) {
+        guard camera.capabilities.mic else { return }
+        switch talkState {
+        case .connecting, .live:
+            if muteBeforeTalk == nil {
+                muteBeforeTalk = model.isMuted
+            }
+            if model.isMuted {
+                model.isMuted = false
+            }
+        case .idle:
+            guard let previous = muteBeforeTalk else { return }
+            muteBeforeTalk = nil
+            if model.isMuted != previous {
+                model.isMuted = previous
+            }
+        }
+    }
+
     private var muteButton: some View {
         Button(action: toggleMute) {
             HStack(spacing: 7) {
@@ -224,7 +332,6 @@ struct SingleCameraView: View {
             .overlay(Capsule().stroke(Color.white.opacity(0.15), lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .padding(.bottom, 24)
     }
 
     // MARK: Sound

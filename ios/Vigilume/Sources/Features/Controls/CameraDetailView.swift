@@ -1033,9 +1033,22 @@ private struct HoldToConfirmButton: View {
 /// `TalkController.State`) so the affordance stays reusable; every speaker
 /// camera drives the one `TalkController` WS pipeline and the backend routes
 /// delivery (RTSP backchannel or CGI postAudio) per camera.
-private struct PushToTalkButton<Model: ObservableObject>: View {
+///
+/// INTERNAL, not private: `SingleCameraView` shows the same affordance over
+/// fullscreen live so an answered doorbell call can actually be answered. It
+/// stays in this file rather than moving to its own because the Xcode project
+/// lists sources explicitly — a new file is invisible to the build until
+/// project.pbxproj is hand-edited, which is not worth it for one struct.
+struct PushToTalkButton<Model: ObservableObject>: View {
     @ObservedObject var model: Model
     let state: KeyPath<Model, TalkController.State>
+    /// Diameter in points. Declared BEFORE the two closures on purpose: Swift
+    /// requires arguments in declaration order, so a `diameter:` after them
+    /// could not be passed alongside the onPress/onRelease trailing closures.
+    /// The controls screen uses the full size; the fullscreen live overlay sits
+    /// this beside the mute pill over video, where 112 would cover the visitor
+    /// being talked to.
+    var diameter: CGFloat = 112
     let onPress: () -> Void
     let onRelease: () -> Void
 
@@ -1043,19 +1056,26 @@ private struct PushToTalkButton<Model: ObservableObject>: View {
 
     private var talkState: TalkController.State { model[keyPath: state] }
 
+    /// Scale the contents with the frame, so the compact form reads as a small
+    /// button rather than a large one squeezed down.
+    private var glyphSize: CGFloat { diameter * 0.30 }
+    private var showsCaption: Bool { diameter >= 88 }
+
     var body: some View {
         ZStack {
             Circle()
                 .fill(fillColor.opacity(talkState == .live ? 0.30 : 0.15))
-                .frame(width: 112, height: 112)
+                .frame(width: diameter, height: diameter)
             Circle()
                 .stroke(fillColor, lineWidth: talkState == .live ? 3 : 1.5)
-                .frame(width: 112, height: 112)
+                .frame(width: diameter, height: diameter)
             VStack(spacing: 6) {
                 Image(systemName: talkState == .live ? "mic.fill" : "mic")
-                    .font(.system(size: 34, weight: .medium))
-                Text(buttonCaption)
-                    .font(.caption2.weight(.semibold))
+                    .font(.system(size: glyphSize, weight: .medium))
+                if showsCaption {
+                    Text(buttonCaption)
+                        .font(.caption2.weight(.semibold))
+                }
             }
             .foregroundStyle(fillColor)
         }
