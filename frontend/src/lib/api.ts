@@ -863,6 +863,45 @@ export interface ArchiveSettings {
   bwlimit: string;
 }
 
+/** One field on an rclone provider's setup form (the catalogue is server-driven). */
+export interface RcloneField {
+  key: string;
+  label: string;
+  /** text | secret | token | select — how the UI renders it. */
+  kind: string;
+  required: boolean;
+  help: string;
+  placeholder: string;
+  options: string[];
+  default: string;
+}
+
+/** A storage backend the server will configure. */
+export interface RcloneProvider {
+  /** rclone's own backend name, sent back verbatim on create. */
+  type: string;
+  label: string;
+  blurb: string;
+  /**
+   * True when the only way in is a browser sign-in. A headless NVR cannot
+   * complete that itself, so these show the `authorize_command` to run on the
+   * operator's own desktop plus a box to paste the resulting token.
+   */
+  oauth: boolean;
+  authorize_command: string;
+  fields: RcloneField[];
+}
+
+/** A configured destination. Secrets are redacted server-side and never sent. */
+export interface RcloneRemote {
+  name: string;
+  type: string;
+  label: string;
+  oauth: boolean;
+  /** Non-secret settings verbatim; secret ones as a fixed marker. */
+  details: Record<string, string>;
+}
+
 /** What the archive has actually done — GET /api/integrations/archive/status. */
 export interface ArchiveStatus {
   /** False on a backend that predates the feature. */
@@ -1557,6 +1596,44 @@ export const api = {
       // fall back to the SAVED settings, so the draft must be wrapped.
       body: JSON.stringify({ mqtt }),
     }),
+
+  /** The storage backends the server can configure, with their form fields. */
+  rcloneProviders: () =>
+    request<{ providers: RcloneProvider[] }>('/api/integrations/rclone/providers'),
+
+  /**
+   * Configured remotes. `available: false` means rclone itself could not run —
+   * usually a backend image built before the archive feature.
+   */
+  rcloneRemotes: () =>
+    request<{ available: boolean; remotes: RcloneRemote[]; detail: string }>(
+      '/api/integrations/rclone/remotes',
+    ),
+
+  /**
+   * Create (or replace) a remote, then immediately probe it. `ok` means the
+   * config was written; `reachable` means the credentials actually work — a
+   * remote can save fine and still be wrong, and the UI should say which.
+   */
+  createRcloneRemote: (name: string, type: string, values: Record<string, string>) =>
+    request<{ ok: boolean; reachable: boolean; detail: string; suggested_remote: string }>(
+      '/api/integrations/rclone/remotes',
+      { method: 'POST', body: JSON.stringify({ name, type, values }) },
+    ),
+
+  /** Forget a remote's credentials. Deletes NOTHING in the cloud. */
+  deleteRcloneRemote: (name: string) =>
+    request<{ ok: boolean; detail: string }>(
+      `/api/integrations/rclone/remotes/${encodeURIComponent(name)}`,
+      { method: 'DELETE' },
+    ),
+
+  /** List the remote's top level — the cheapest proof the credentials work. */
+  testRcloneRemote: (name: string) =>
+    request<{ ok: boolean; detail: string; folders: string[] }>(
+      `/api/integrations/rclone/remotes/${encodeURIComponent(name)}/test`,
+      { method: 'POST' },
+    ),
 
   /** What the nightly cloud archive has done. */
   archiveStatus: () => request<ArchiveStatus>('/api/integrations/archive/status'),

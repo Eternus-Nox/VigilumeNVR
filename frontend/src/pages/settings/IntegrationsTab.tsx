@@ -20,6 +20,8 @@ import {
   type ArchiveStatus,
   type MqttSettings,
   type MqttTestStatus,
+  type RcloneProvider,
+  type RcloneRemote,
 } from '../../lib/api';
 import { useAdoptSaved, type TabProps } from '../Settings';
 import SettingsDisclosure from '../../components/SettingsDisclosure';
@@ -74,6 +76,16 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
   const [archiveStatus, setArchiveStatus] = useState<ArchiveStatus | null>(null);
   const [archiveRunning, setArchiveRunning] = useState(false);
   const [archiveError, setArchiveError] = useState<string | null>(null);
+  // --- rclone remote setup (replaces `rclone config` over SSH) -------------
+  const [providers, setProviders] = useState<RcloneProvider[]>([]);
+  const [remotes, setRemotes] = useState<RcloneRemote[]>([]);
+  const [rcloneAvailable, setRcloneAvailable] = useState(true);
+  const [newType, setNewType] = useState('');
+  const [newName, setNewName] = useState('');
+  const [newValues, setNewValues] = useState<Record<string, string>>({});
+  const [creating, setCreating] = useState(false);
+  const [setupMsg, setSetupMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busyRemote, setBusyRemote] = useState<string | null>(null);
 
   // Re-sync from the server document (e.g. after a save echoes it back). A
   // backend without MQTT support omits the block — fall back to the defaults.
@@ -94,6 +106,108 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
   useEffect(() => {
     void loadArchiveStatus();
   }, [loadArchiveStatus]);
+
+  const loadRemotes = useCallback(async () => {
+    try {
+      const res = await api.rcloneRemotes();
+      setRcloneAvailable(res.available);
+      setRemotes(res.remotes);
+    } catch {
+      // A backend predating the feature 404s. Treated as "not available" so the
+      // card explains the rebuild instead of showing a bare error.
+      setRcloneAvailable(false);
+      setRemotes([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        setProviders((await api.rcloneProviders()).providers);
+      } catch {
+        setProviders([]);
+      }
+      await loadRemotes();
+    })();
+  }, [loadRemotes]);
+
+  const selectedProvider = providers.find((p) => p.type === newType) ?? null;
+
+  // Switching provider clears the form: field keys are per-provider, so keeping
+  // values would send another backend's keys and be refused.
+  const pickProvider = (type: string) => {
+    setNewType(type);
+    setNewValues({});
+    setSetupMsg(null);
+    if (!newName.trim()) setNewName(type);
+  };
+
+  const createRemote = async () => {
+    if (!selectedProvider) return;
+    setCreating(true);
+    setSetupMsg(null);
+    try {
+      const res = await api.createRcloneRemote(newName, selectedProvider.type, newValues);
+      if (!res.ok) {
+        setSetupMsg({ ok: false, text: res.detail || 'Could not save the remote.' });
+      } else if (!res.reachable) {
+        // Saved but unreachable is its OWN outcome, not a success and not a
+        // failure to write — say which, or the operator retypes a correct token.
+        setSetupMsg({
+          ok: false,
+          text: `Saved, but it did not answer: ${res.detail}. Check the token or keys.`,
+        });
+      } else {
+        setSetupMsg({ ok: true, text: `Connected. Use "${res.suggested_remote}" below.` });
+        setArchive((a) => (a.remote.trim() ? a : { ...a, remote: res.suggested_remote }));
+        setNewValues({});
+      }
+      await loadRemotes();
+    } catch (e) {
+      setSetupMsg({ ok: false, text: e instanceof Error ? e.message : 'Setup failed' });
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const testRemote = async (name: string) => {
+    setBusyRemote(name);
+    setSetupMsg(null);
+    try {
+      const res = await api.testRcloneRemote(name);
+      setSetupMsg({
+        ok: res.ok,
+        text: res.ok
+          ? `${name}: connected${res.folders.length ? ` — ${res.folders.slice(0, 5).join(', ')}` : ' (no folders yet)'}`
+          : `${name}: ${res.detail}`,
+      });
+    } catch (e) {
+      setSetupMsg({ ok: false, text: e instanceof Error ? e.message : 'Test failed' });
+    } finally {
+      setBusyRemote(null);
+    }
+  };
+
+  const removeRemote = async (name: string) => {
+    if (!window.confirm(`Forget "${name}"? Vigilume stops being able to upload to it. Nothing already in the cloud is deleted.`)) return;
+    setBusyRemote(name);
+    try {
+      await api.deleteRcloneRemote(name);
+      await loadRemotes();
+    } catch (e) {
+      setSetupMsg({ ok: false, text: e instanceof Error ? e.message : 'Remove failed' });
+    } finally {
+      setBusyRemote(null);
+    }
+  };
+
+  const canCreate =
+    !!selectedProvider &&
+    newName.trim().length > 0 &&
+    !creating &&
+    selectedProvider.fields
+      .filter((f) => f.required && !f.default)
+      .every((f) => (newValues[f.key] ?? '').trim().length > 0);
 
   // Any edit invalidates a previous test result (it was for the old values).
   const patch = (p: Partial<MqttSettings>) => {
@@ -273,6 +387,157 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
           )}
           {test.kind === 'error' && <span className="form-error">{test.message}</span>}
         </div>
+      </SettingsDisclosure>
+
+      <SettingsDisclosure
+        title="Cloud storage accounts"
+        badge={remotes.length ? `${remotes.length} connected` : 'None'}
+        tone={remotes.length ? 'on' : 'muted'}
+      >
+        <p className="muted small">
+          Connect the storage the nightly archive uploads to. Everything happens here —
+          no terminal on the server.
+        </p>
+
+        {!rcloneAvailable && (
+          <p className="form-error">
+            Cloud storage support is not in this backend build. Rebuild with{' '}
+            <code>docker compose up -d --build</code> and reload.
+          </p>
+        )}
+
+        {remotes.length > 0 && (
+          <div className="form-stack" style={{ marginBottom: '0.9rem' }}>
+            {remotes.map((r) => (
+              <div key={r.name} className="row-inline wrap" style={{ gap: '0.5rem' }}>
+                <strong>{r.name}</strong>
+                <span className="pill">{r.label}</span>
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={busyRemote === r.name}
+                  onClick={() => void testRemote(r.name)}
+                >
+                  {busyRemote === r.name ? 'Testing…' : 'Test'}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-danger"
+                  disabled={busyRemote === r.name}
+                  onClick={() => void removeRemote(r.name)}
+                >
+                  Forget
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="form-grid">
+          <label>
+            Add storage
+            <select value={newType} onChange={(e) => pickProvider(e.target.value)}>
+              <option value="">Choose a provider…</option>
+              {providers.map((p) => (
+                <option key={p.type} value={p.type}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+            {selectedProvider && (
+              <span className="control-hint">{selectedProvider.blurb}</span>
+            )}
+          </label>
+          {selectedProvider && (
+            <label>
+              Name it
+              <input
+                type="text"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                placeholder={selectedProvider.type}
+              />
+              <span className="control-hint">
+                A short label for this account, used as <code>name:folder</code> below.
+              </span>
+            </label>
+          )}
+        </div>
+
+        {selectedProvider?.oauth && (
+          <div className="muted small" style={{ margin: '0.7rem 0' }}>
+            <p>
+              {selectedProvider.label} needs a browser sign-in, and this server has no
+              browser. Run this <strong>on your own computer</strong> (it needs rclone
+              installed), approve the sign-in, and paste what it prints below:
+            </p>
+            <pre><code>{selectedProvider.authorize_command}</code></pre>
+          </div>
+        )}
+
+        {selectedProvider && (
+          <div className="form-grid">
+            {selectedProvider.fields.map((f) => (
+              <label key={f.key}>
+                {f.label}
+                {f.kind === 'select' ? (
+                  <select
+                    value={newValues[f.key] ?? f.default}
+                    onChange={(e) => setNewValues({ ...newValues, [f.key]: e.target.value })}
+                  >
+                    {f.options.map((o) => (
+                      <option key={o} value={o}>
+                        {o}
+                      </option>
+                    ))}
+                  </select>
+                ) : f.kind === 'token' ? (
+                  <textarea
+                    rows={3}
+                    value={newValues[f.key] ?? ''}
+                    placeholder={f.placeholder}
+                    onChange={(e) => setNewValues({ ...newValues, [f.key]: e.target.value })}
+                  />
+                ) : (
+                  <input
+                    type={f.kind === 'secret' ? 'password' : 'text'}
+                    autoComplete="off"
+                    value={newValues[f.key] ?? ''}
+                    placeholder={f.placeholder}
+                    onChange={(e) => setNewValues({ ...newValues, [f.key]: e.target.value })}
+                  />
+                )}
+                {(f.help || !f.required) && (
+                  <span className="control-hint">
+                    {f.help}
+                    {!f.required && (f.help ? ' (optional)' : 'Optional.')}
+                  </span>
+                )}
+              </label>
+            ))}
+          </div>
+        )}
+
+        {selectedProvider && (
+          <div className="row-inline wrap" style={{ marginTop: '0.8rem' }}>
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={!canCreate}
+              onClick={() => void createRemote()}
+            >
+              {creating ? 'Connecting…' : 'Connect'}
+            </button>
+            <span className="muted small">
+              Saves the account and immediately checks it works.
+            </span>
+          </div>
+        )}
+        {setupMsg && (
+          <div className={setupMsg.ok ? 'muted small' : 'form-error'} style={{ marginTop: '0.5rem' }}>
+            {setupMsg.text}
+          </div>
+        )}
       </SettingsDisclosure>
 
       <SettingsDisclosure

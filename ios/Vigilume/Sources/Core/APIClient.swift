@@ -616,6 +616,56 @@ struct APIClient: Sendable {
                       query: [URLQueryItem(name: "hours", value: String(hours))])
     }
 
+    /// ADMIN: GET /api/integrations/rclone/providers — the storage backends the
+    /// server can configure, with the fields each needs.
+    func rcloneProviders() async throws -> [RcloneProvider] {
+        struct Wrapper: Decodable { let providers: [RcloneProvider] }
+        let w: Wrapper = try await get("api/integrations/rclone/providers")
+        return w.providers
+    }
+
+    /// ADMIN: GET /api/integrations/rclone/remotes — configured destinations.
+    /// Secrets are redacted server-side and never reach this device.
+    func rcloneRemotes() async throws -> RcloneRemotesResponse {
+        try await get("api/integrations/rclone/remotes")
+    }
+
+    /// ADMIN: POST /api/integrations/rclone/remotes — create (or replace) one,
+    /// then probe it.
+    func createRcloneRemote(
+        name: String, type: String, values: [String: String]
+    ) async throws -> RcloneCreateResult {
+        struct Body: Encodable {
+            let name: String
+            let type: String
+            let values: [String: String]
+        }
+        // NOTE the explicit CodingKeys-free shape: `values` is a free-form map
+        // whose keys are rclone's own (access_key_id, secret_access_key…). The
+        // encoder's .convertToSnakeCase applies to PROPERTY names, not to
+        // dictionary keys, so these reach the server exactly as typed.
+        return try await sendJSON(
+            "POST", "api/integrations/rclone/remotes",
+            body: Body(name: name, type: type, values: values)
+        )
+    }
+
+    /// ADMIN: DELETE /api/integrations/rclone/remotes/{name} — forget the
+    /// credentials. Deletes NOTHING in the cloud.
+    func deleteRcloneRemote(name: String) async throws {
+        let escaped = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
+        try await send(try makeRequest("DELETE", "api/integrations/rclone/remotes/\(escaped)"))
+    }
+
+    /// ADMIN: POST /api/integrations/rclone/remotes/{name}/test.
+    func testRcloneRemote(name: String) async throws -> RcloneTestResult {
+        let escaped = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
+        let data = try await send(
+            try makeRequest("POST", "api/integrations/rclone/remotes/\(escaped)/test")
+        )
+        return try Self.decoder.decode(RcloneTestResult.self, from: data)
+    }
+
     /// ADMIN: GET /api/integrations/archive/status — what the nightly cloud
     /// archive has actually done.
     func archiveStatus() async throws -> ArchiveStatus {

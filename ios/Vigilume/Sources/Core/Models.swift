@@ -1309,3 +1309,144 @@ struct ArchiveRunResult: Decodable, Sendable {
         result = try c.decodeIfPresent(ArchiveStatus.RunResult.self, forKey: .result)
     }
 }
+
+// MARK: - rclone remotes (cloud storage accounts)
+
+/// One field on a provider's setup form. The catalogue is SERVER-DRIVEN: the
+/// field list for seven providers is exactly what drifts when it is duplicated
+/// in a Swift file and a React file, and a drifted key makes a remote that
+/// saves fine and never works.
+struct RcloneField: Decodable, Sendable, Identifiable {
+    /// text | secret | token | select — how the row renders.
+    var key: String
+    var label: String
+    var kind: String
+    var required: Bool
+    var help: String
+    var placeholder: String
+    var options: [String]
+    var `default`: String
+
+    var id: String { key }
+
+    private enum CodingKeys: String, CodingKey {
+        case key, label, kind, required, help, placeholder, options, `default`
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        key = try c.decode(String.self, forKey: .key)
+        label = try c.decodeIfPresent(String.self, forKey: .label) ?? key
+        kind = try c.decodeIfPresent(String.self, forKey: .kind) ?? "text"
+        required = try c.decodeIfPresent(Bool.self, forKey: .required) ?? true
+        help = try c.decodeIfPresent(String.self, forKey: .help) ?? ""
+        placeholder = try c.decodeIfPresent(String.self, forKey: .placeholder) ?? ""
+        options = try c.decodeIfPresent([String].self, forKey: .options) ?? []
+        `default` = try c.decodeIfPresent(String.self, forKey: .default) ?? ""
+    }
+}
+
+struct RcloneProvider: Decodable, Sendable, Identifiable {
+    /// rclone's own backend name; sent back verbatim on create.
+    var type: String
+    var label: String
+    var blurb: String
+    /// True when the only way in is a browser sign-in, which a headless NVR
+    /// cannot perform for itself — those show `authorizeCommand` to run on a
+    /// desktop, plus a box for the token it prints.
+    var oauth: Bool
+    var authorizeCommand: String
+    var fields: [RcloneField]
+
+    var id: String { type }
+
+    private enum CodingKeys: String, CodingKey {
+        case type, label, blurb, oauth, authorizeCommand, fields
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        type = try c.decode(String.self, forKey: .type)
+        label = try c.decodeIfPresent(String.self, forKey: .label) ?? type
+        blurb = try c.decodeIfPresent(String.self, forKey: .blurb) ?? ""
+        oauth = try c.decodeIfPresent(Bool.self, forKey: .oauth) ?? false
+        authorizeCommand = try c.decodeIfPresent(String.self, forKey: .authorizeCommand) ?? ""
+        fields = try c.decodeIfPresent([RcloneField].self, forKey: .fields) ?? []
+    }
+}
+
+/// A configured destination. Secrets are redacted server-side — `details` only
+/// ever says that a secret is SET, never what it is.
+struct RcloneRemote: Decodable, Sendable, Identifiable {
+    var name: String
+    var type: String
+    var label: String
+    var oauth: Bool
+    var details: [String: String]
+
+    var id: String { name }
+
+    private enum CodingKeys: String, CodingKey { case name, type, label, oauth, details }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        type = try c.decodeIfPresent(String.self, forKey: .type) ?? ""
+        label = try c.decodeIfPresent(String.self, forKey: .label) ?? type
+        oauth = try c.decodeIfPresent(Bool.self, forKey: .oauth) ?? false
+        details = try c.decodeIfPresent([String: String].self, forKey: .details) ?? [:]
+    }
+}
+
+struct RcloneRemotesResponse: Decodable, Sendable {
+    /// False when rclone itself could not run — usually a backend image built
+    /// before the archive feature.
+    var available: Bool
+    var remotes: [RcloneRemote]
+    var detail: String
+
+    private enum CodingKeys: String, CodingKey { case available, remotes, detail }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        available = try c.decodeIfPresent(Bool.self, forKey: .available) ?? false
+        remotes = try c.decodeIfPresent([RcloneRemote].self, forKey: .remotes) ?? []
+        detail = try c.decodeIfPresent(String.self, forKey: .detail) ?? ""
+    }
+}
+
+/// `ok` = the config was written. `reachable` = the credentials actually work.
+/// Two separate facts: a remote can save fine and still be wrong, and telling
+/// the operator which happened is the difference between fixing the token and
+/// retyping a correct one.
+struct RcloneCreateResult: Decodable, Sendable {
+    var ok: Bool
+    var reachable: Bool
+    var detail: String
+    var suggestedRemote: String
+
+    private enum CodingKeys: String, CodingKey { case ok, reachable, detail, suggestedRemote }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ok = try c.decodeIfPresent(Bool.self, forKey: .ok) ?? false
+        reachable = try c.decodeIfPresent(Bool.self, forKey: .reachable) ?? false
+        detail = try c.decodeIfPresent(String.self, forKey: .detail) ?? ""
+        suggestedRemote = try c.decodeIfPresent(String.self, forKey: .suggestedRemote) ?? ""
+    }
+}
+
+struct RcloneTestResult: Decodable, Sendable {
+    var ok: Bool
+    var detail: String
+    var folders: [String]
+
+    private enum CodingKeys: String, CodingKey { case ok, detail, folders }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ok = try c.decodeIfPresent(Bool.self, forKey: .ok) ?? false
+        detail = try c.decodeIfPresent(String.self, forKey: .detail) ?? ""
+        folders = try c.decodeIfPresent([String].self, forKey: .folders) ?? []
+    }
+}

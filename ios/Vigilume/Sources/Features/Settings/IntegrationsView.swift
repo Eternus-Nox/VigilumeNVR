@@ -1,8 +1,17 @@
 import SwiftUI
+import UIKit   // UIPasteboard, for copying the rclone authorize command
 
-/// Settings › Integrations: the iOS twin of the web's Settings → Integrations
-/// "Home Assistant (MQTT)" card. Publishes camera + detection state to an MQTT
-/// broker so Home Assistant can auto-discover this NVR's entities.
+/// Settings › Integrations: the iOS twin of the web's Integrations tab —
+/// Home Assistant over MQTT, the cloud storage accounts the nightly archive
+/// uploads to, and the archive's own schedule and status.
+///
+/// The storage section is deliberately a full replacement for `rclone config`:
+/// connecting Dropbox or S3 should not require an SSH session on the NVR. The
+/// provider catalogue and its form fields are SERVER-DRIVEN (GET
+/// /api/integrations/rclone/providers) rather than duplicated here — seven
+/// providers' field lists are exactly what drifts when the same list lives in a
+/// Swift file and a React file, and a drifted key makes a remote that saves
+/// cleanly and never works.
 ///
 /// **Every write here is PATCH /api/settings — NEVER PUT.** PUT is a
 /// full-document replace and every field carries a backend default, so any key
@@ -51,6 +60,18 @@ struct IntegrationsView: View {
     @State private var archiveRunning = false
     @State private var archiveError: String?
 
+    // Cloud storage accounts — the in-app replacement for `rclone config`.
+    @State private var providers: [RcloneProvider] = []
+    @State private var remotes: [RcloneRemote] = []
+    @State private var rcloneAvailable = true
+    @State private var newType = ""
+    @State private var newName = ""
+    @State private var newValues: [String: String] = [:]
+    @State private var creating = false
+    @State private var busyRemote: String?
+    @State private var setupMessage: String?
+    @State private var setupOK = false
+
     // Test-connection state (a draft probe, never a save).
     @State private var testing = false
     @State private var testResult: MqttTestResult?
@@ -89,10 +110,12 @@ struct IntegrationsView: View {
         .task {
             await load()
             await loadArchiveStatus()
+            await loadRcloneCatalogue()
         }
         .refreshable {
             await load()
             await loadArchiveStatus()
+            await loadRcloneCatalogue()
         }
     }
 
@@ -103,6 +126,8 @@ struct IntegrationsView: View {
             authSection
             topicsSection
             testSection
+            storageAccountsSection
+            addStorageSection
             archiveSection
             archiveStatusSection
             saveSection
@@ -348,6 +373,288 @@ struct IntegrationsView: View {
 
     private var canTest: Bool { !host.trimmed.isEmpty && !testing }
 
+
+
+    // MARK: - Cloud storage accounts
+
+    private var selectedProvider: RcloneProvider? {
+        providers.first { $0.type == newType }
+    }
+
+    /// Required fields the operator must actually supply. A required field with
+    /// a DEFAULT is already satisfied, so demanding it here would leave the
+    /// button dead for every S3 and WebDAV account.
+    private var canCreateRemote: Bool {
+        guard let p = selectedProvider, !newName.trimmed.isEmpty, !creating else { return false }
+        return p.fields
+            .filter { $0.required && $0.default.isEmpty }
+            .allSatisfy { !(newValues[$0.key] ?? "").trimmed.isEmpty }
+    }
+
+    private var storageAccountsSection: some View {
+        Section {
+            if !rcloneAvailable {
+                Text("Cloud storage support is not in this backend build. Rebuild the server and pull to refresh.")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.warning)
+            } else if remotes.isEmpty {
+                Text("No storage connected yet.")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+            ForEach(remotes) { remote in
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text(remote.name)
+                            .foregroundStyle(Theme.textPrimary)
+                        Spacer()
+                        Text(remote.label)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    HStack(spacing: 14) {
+                        Button(busyRemote == remote.name ? "Testing…" : "Test") {
+                            Task { await testRemote(remote.name) }
+                        }
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(Theme.accent)
+                        .disabled(busyRemote != nil)
+
+                        Button("Forget") {
+                            Task { await removeRemote(remote.name) }
+                        }
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(Theme.danger)
+                        .disabled(busyRemote != nil)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+        } header: {
+            Text("Cloud storage accounts")
+        } footer: {
+            Text("Where the nightly archive uploads. Forgetting an account only removes Vigilume's access — nothing already in the cloud is deleted.")
+        }
+        .listRowBackground(Theme.surface)
+    }
+
+    private var addStorageSection: some View {
+        Section {
+            Picker("Add storage", selection: $newType) {
+                Text("Choose…").tag("")
+                ForEach(providers) { p in
+                    Text(p.label).tag(p.type)
+                }
+            }
+            .tint(Theme.accent)
+            .onChange(of: newType) { _, type in
+                // Field keys are per-provider, so carrying values across a
+                // switch would submit another backend's keys and be refused.
+                newValues = [:]
+                setupMessage = nil
+                if newName.trimmed.isEmpty { newName = type }
+            }
+
+            if let p = selectedProvider {
+                if !p.blurb.isEmpty {
+                    Text(p.blurb)
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Name it").foregroundStyle(Theme.textPrimary)
+                    TextField(p.type, text: $newName)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .foregroundStyle(Theme.textPrimary)
+                }
+                .padding(.vertical, 2)
+
+                if p.oauth {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("\(p.label) needs a browser sign-in, and the server has no browser. Run this on a computer with rclone installed, approve the sign-in, then paste what it prints below.")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textSecondary)
+                        HStack {
+                            Text(p.authorizeCommand)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(Theme.textPrimary)
+                                .textSelection(.enabled)
+                            Spacer()
+                            Button {
+                                UIPasteboard.general.string = p.authorizeCommand
+                            } label: {
+                                Image(systemName: "doc.on.doc")
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Theme.accent)
+                            .accessibilityLabel("Copy command")
+                        }
+                        .padding(8)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.bg))
+                    }
+                    .padding(.vertical, 2)
+                }
+
+                ForEach(p.fields) { field in
+                    providerField(field)
+                }
+
+                Button {
+                    Task { await createRemote() }
+                } label: {
+                    HStack {
+                        Spacer()
+                        if creating {
+                            ProgressView().tint(Theme.accent)
+                        } else {
+                            Text("Connect")
+                                .foregroundStyle(canCreateRemote ? Theme.accent : Theme.textSecondary)
+                        }
+                        Spacer()
+                    }
+                }
+                .disabled(!canCreateRemote)
+            }
+
+            if let setupMessage {
+                Text(setupMessage)
+                    .font(.footnote)
+                    .foregroundStyle(setupOK ? Theme.success : Theme.danger)
+            }
+        } header: {
+            Text("Add storage")
+        } footer: {
+            Text("Saves the account and immediately checks that it works.")
+        }
+        .listRowBackground(Theme.surface)
+    }
+
+    @ViewBuilder
+    private func providerField(_ field: RcloneField) -> some View {
+        let binding = Binding<String>(
+            get: { newValues[field.key] ?? field.default },
+            set: { newValues[field.key] = $0 }
+        )
+        VStack(alignment: .leading, spacing: 4) {
+            if field.kind == "select" {
+                Picker(field.label, selection: binding) {
+                    ForEach(field.options, id: \.self) { Text($0).tag($0) }
+                }
+                .tint(Theme.accent)
+            } else {
+                Text(field.label + (field.required ? "" : " (optional)"))
+                    .foregroundStyle(Theme.textPrimary)
+                if field.kind == "secret" {
+                    SecureField(field.placeholder.isEmpty ? field.label : field.placeholder,
+                                text: binding)
+                        .foregroundStyle(Theme.textPrimary)
+                } else {
+                    // token fields are long JSON blobs; axis .vertical lets the
+                    // paste wrap instead of scrolling off one line.
+                    TextField(
+                        field.placeholder.isEmpty ? field.label : field.placeholder,
+                        text: binding,
+                        axis: field.kind == "token" ? .vertical : .horizontal
+                    )
+                    .lineLimit(field.kind == "token" ? 2...5 : 1...1)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .foregroundStyle(Theme.textPrimary)
+                }
+            }
+            if !field.help.isEmpty {
+                Text(field.help)
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func loadRcloneCatalogue() async {
+        guard let api = session.api else { return }
+        providers = (try? await api.rcloneProviders()) ?? []
+        if let res = try? await api.rcloneRemotes() {
+            rcloneAvailable = res.available
+            remotes = res.remotes
+        } else {
+            // A backend predating the feature 404s — reported as unavailable so
+            // the section explains the rebuild rather than showing a bare error.
+            rcloneAvailable = false
+            remotes = []
+        }
+    }
+
+    private func createRemote() async {
+        guard let api = session.api, let p = selectedProvider, !creating else { return }
+        creating = true
+        defer { creating = false }
+        setupMessage = nil
+        do {
+            let res = try await api.createRcloneRemote(
+                name: newName.trimmed, type: p.type, values: newValues
+            )
+            if !res.ok {
+                setupOK = false
+                setupMessage = res.detail.isEmpty ? "Could not save the account." : res.detail
+            } else if !res.reachable {
+                // Saved-but-unreachable is its OWN outcome. Calling it success
+                // hides a wrong token; calling it a save failure makes the
+                // operator re-enter something that stored fine.
+                setupOK = false
+                setupMessage = "Saved, but it did not answer: \(res.detail)"
+            } else {
+                setupOK = true
+                setupMessage = "Connected. Use \(res.suggestedRemote) below."
+                if archiveRemote.trimmed.isEmpty { archiveRemote = res.suggestedRemote }
+                newValues = [:]
+            }
+            await loadRcloneCatalogue()
+        } catch {
+            session.handleAPIError(error)
+            setupOK = false
+            setupMessage = (error as? ApiError)?.message ?? error.localizedDescription
+        }
+    }
+
+    private func testRemote(_ name: String) async {
+        guard let api = session.api, busyRemote == nil else { return }
+        busyRemote = name
+        defer { busyRemote = nil }
+        setupMessage = nil
+        do {
+            let res = try await api.testRcloneRemote(name: name)
+            setupOK = res.ok
+            if res.ok {
+                let folders = res.folders.prefix(5).joined(separator: ", ")
+                setupMessage = folders.isEmpty
+                    ? "\(name): connected (no folders yet)"
+                    : "\(name): connected — \(folders)"
+            } else {
+                setupMessage = "\(name): \(res.detail)"
+            }
+        } catch {
+            session.handleAPIError(error)
+            setupOK = false
+            setupMessage = (error as? ApiError)?.message ?? error.localizedDescription
+        }
+    }
+
+    private func removeRemote(_ name: String) async {
+        guard let api = session.api, busyRemote == nil else { return }
+        busyRemote = name
+        defer { busyRemote = nil }
+        do {
+            try await api.deleteRcloneRemote(name: name)
+            await loadRcloneCatalogue()
+        } catch {
+            session.handleAPIError(error)
+            setupOK = false
+            setupMessage = (error as? ApiError)?.message ?? error.localizedDescription
+        }
+    }
 
     // MARK: - Cloud archive
 
