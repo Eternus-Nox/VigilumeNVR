@@ -24,13 +24,18 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
+import html
+
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from ..auth import require_admin
 from ..integrations.mqtt_ha import test_connection
-from ..native import rclone_config
+from ..native import rclone_config, rclone_oauth
 from ..native.rclone_config import ConfigError
+from ..native.rclone_oauth import OAuthError
 from .settings import MqttSettings
 
 log = logging.getLogger(__name__)
@@ -228,3 +233,157 @@ async def rclone_test_remote(name: str) -> dict[str, Any]:
         return {"ok": False, "detail": err or "The remote did not answer.", "folders": []}
     folders = [line.split(None, 4)[-1] for line in out.splitlines() if line.strip()]
     return {"ok": True, "detail": "", "folders": folders[:25]}
+
+
+# ------------------------------------------------------- browser OAuth (cloud)
+
+_PENDING = rclone_oauth.PendingFlows()
+
+# SEPARATE ROUTER, no admin dependency. The provider redirects a bare browser
+# back here with no Authorization header, so an admin-gated callback could never
+# fire. `state` is what authorizes it — 256 unguessable bits, single use, with a
+# short TTL (see rclone_oauth).
+oauth_router = APIRouter(prefix="/api/integrations/rclone/oauth", tags=["integrations"])
+
+
+class OAuthStart(BaseModel):
+    name: str
+    type: str
+    client_id: str
+    client_secret: str
+    # The browser's own origin, e.g. "http://192.168.1.45:8080". Sent by the UI
+    # rather than guessed here: only the browser knows the address it actually
+    # reached this server on, and that address must match the one registered
+    # with the provider exactly.
+    origin: str
+
+
+@router.get("/rclone/oauth/redirect-uri")
+async def rclone_oauth_redirect_uri(origin: str) -> dict[str, Any]:
+    """The exact string to paste into the provider's app settings."""
+    try:
+        return {"redirect_uri": rclone_oauth.redirect_uri_for(origin)}
+    except OAuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/rclone/oauth/start")
+async def rclone_oauth_start(body: OAuthStart) -> dict[str, Any]:
+    """Begin a browser authorization; the UI sends the operator to `auth_url`."""
+    try:
+        name = rclone_config.validate_name(body.name)
+        flow = rclone_oauth.start_flow(
+            remote_name=name, type_=body.type, client_id=body.client_id,
+            client_secret=body.client_secret, origin=body.origin,
+        )
+    except (ConfigError, OAuthError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _PENDING.add(flow)
+    log.info("rclone oauth: started %s flow for remote %r", body.type, name)
+    return {
+        "auth_url": rclone_oauth.build_auth_url(flow),
+        "redirect_uri": flow.redirect_uri,
+    }
+
+
+def _callback_page(title: str, message: str, ok: bool) -> HTMLResponse:
+    """The page the provider's redirect lands on.
+
+    Self-contained and styled inline: this is served by the API, not the web
+    app, so it cannot rely on the frontend's stylesheet — and it is the last
+    thing the operator sees, so "it worked, go back" has to be unmistakable.
+    """
+    colour = "#1f9d55" if ok else "#c53030"
+    return HTMLResponse(
+        f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{html.escape(title)}</title></head>
+<body style="font-family:system-ui,-apple-system,sans-serif;background:#14161a;
+color:#e6e8eb;display:flex;align-items:center;justify-content:center;
+min-height:100vh;margin:0;padding:24px">
+<div style="max-width:34rem;text-align:center">
+<h1 style="color:{colour};font-size:1.4rem;margin:0 0 .6rem">{html.escape(title)}</h1>
+<p style="line-height:1.5;color:#aab2bd">{html.escape(message)}</p>
+<p style="margin-top:1.4rem;color:#7d8590;font-size:.9rem">
+You can close this tab and return to Vigilume.</p>
+</div></body></html>""",
+        status_code=200 if ok else 400,
+    )
+
+
+@oauth_router.get("/callback")
+async def rclone_oauth_callback(
+    request: Request,
+    state: str = "",
+    code: str = "",
+    error: str = "",
+    error_description: str = "",
+) -> HTMLResponse:
+    """Finish the handshake: code -> token -> a working rclone remote.
+
+    Returns HTML, not JSON: a human's browser lands here.
+    """
+    flow = _PENDING.take(state) if state else None
+    if flow is None:
+        # An unknown state and an expired one are reported IDENTICALLY — the
+        # response must not confirm whether a guessed state ever existed.
+        return _callback_page(
+            "Sign-in expired",
+            "This authorization is no longer valid. Go back to Vigilume and "
+            "press Connect again.",
+            ok=False,
+        )
+    if error:
+        return _callback_page(
+            "Sign-in cancelled",
+            error_description or error,
+            ok=False,
+        )
+    if not code:
+        return _callback_page(
+            "Sign-in incomplete",
+            "The provider did not return an authorization code.",
+            ok=False,
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                flow.provider.token_url,
+                data=rclone_oauth.token_request_body(flow, code),
+                headers={"Accept": "application/json"},
+            )
+        if resp.status_code != 200:
+            log.warning("rclone oauth: token exchange failed %s", resp.status_code)
+            return _callback_page(
+                "Sign-in failed",
+                f"The provider rejected the exchange ({resp.status_code}). "
+                "Check that the app key, secret and redirect URI all match.",
+                ok=False,
+            )
+        token_blob = rclone_oauth.to_rclone_token(resp.json())
+    except OAuthError as exc:
+        return _callback_page("Sign-in failed", str(exc), ok=False)
+    except Exception:  # noqa: BLE001 — a browser must never see a stack trace
+        log.exception("rclone oauth: token exchange blew up")
+        return _callback_page(
+            "Sign-in failed", "Could not reach the provider to finish signing in.",
+            ok=False,
+        )
+
+    code_, _out, err = await _rclone(
+        rclone_config.build_config_create_args(
+            flow.remote_name, flow.provider.type,
+            rclone_oauth.remote_values(flow, token_blob),
+        )
+    )
+    if code_ != 0:
+        return _callback_page("Almost there", f"Signed in, but saving failed: {err}", ok=False)
+
+    log.info("rclone oauth: remote %r authorized via browser", flow.remote_name)
+    return _callback_page(
+        "Connected",
+        f"{flow.remote_name} is ready. Back in Vigilume, set the archive remote "
+        f"to {flow.remote_name}:Vigilume and save.",
+        ok=True,
+    )

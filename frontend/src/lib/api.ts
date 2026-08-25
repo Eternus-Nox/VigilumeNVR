@@ -889,6 +889,8 @@ export interface RcloneProvider {
    */
   oauth: boolean;
   authorize_command: string;
+  /** Where to create the OAuth app whose key/secret the browser flow needs. */
+  console_url: string;
   fields: RcloneField[];
 }
 
@@ -1596,6 +1598,42 @@ export const api = {
       // fall back to the SAVED settings, so the draft must be wrapped.
       body: JSON.stringify({ mqtt }),
     }),
+
+  /**
+   * The exact redirect URI to register on the provider's app, derived from the
+   * address this browser actually reached the server on. Asked of the server
+   * rather than built here so the callback path has one owner.
+   */
+  rcloneRedirectUri: (origin: string) =>
+    request<{ redirect_uri: string }>(
+      `/api/integrations/rclone/oauth/redirect-uri?origin=${encodeURIComponent(origin)}`,
+    ),
+
+  /**
+   * Begin a browser sign-in. Returns the provider URL to send the operator to;
+   * the provider then redirects back to this server, which finishes the
+   * handshake and writes the remote.
+   */
+  startRcloneOAuth: (
+    name: string,
+    type: string,
+    clientId: string,
+    clientSecret: string,
+    origin: string,
+  ) =>
+    request<{ auth_url: string; redirect_uri: string }>(
+      '/api/integrations/rclone/oauth/start',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          name,
+          type,
+          client_id: clientId,
+          client_secret: clientSecret,
+          origin,
+        }),
+      },
+    ),
 
   /** The storage backends the server can configure, with their form fields. */
   rcloneProviders: () =>

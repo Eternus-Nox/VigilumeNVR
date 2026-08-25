@@ -71,6 +71,15 @@ struct IntegrationsView: View {
     @State private var busyRemote: String?
     @State private var setupMessage: String?
     @State private var setupOK = false
+    /// OAuth providers offer two routes. `.browser` finishes the sign-in on the
+    /// NVR itself and needs the operator's own app credentials; `.token` is the
+    /// paste-a-blob path, which needs no app registration but does need rclone
+    /// on a desktop.
+    @State private var authMode: AuthMode = .browser
+    @State private var redirectUri = ""
+    @State private var signingIn = false
+
+    enum AuthMode: String, CaseIterable { case browser, token }
 
     // Test-connection state (a draft probe, never a save).
     @State private var testing = false
@@ -452,7 +461,9 @@ struct IntegrationsView: View {
                 // switch would submit another backend's keys and be refused.
                 newValues = [:]
                 setupMessage = nil
+                authMode = .browser
                 if newName.trimmed.isEmpty { newName = type }
+                Task { await loadRedirectUri() }
             }
 
             if let p = selectedProvider {
@@ -472,50 +483,117 @@ struct IntegrationsView: View {
                 .padding(.vertical, 2)
 
                 if p.oauth {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("\(p.label) needs a browser sign-in, and the server has no browser. Run this on a computer with rclone installed, approve the sign-in, then paste what it prints below.")
-                            .font(.caption)
-                            .foregroundStyle(Theme.textSecondary)
-                        HStack {
-                            Text(p.authorizeCommand)
-                                .font(.caption.monospaced())
-                                .foregroundStyle(Theme.textPrimary)
-                                .textSelection(.enabled)
-                            Spacer()
-                            Button {
-                                UIPasteboard.general.string = p.authorizeCommand
-                            } label: {
-                                Image(systemName: "doc.on.doc")
-                            }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(Theme.accent)
-                            .accessibilityLabel("Copy command")
-                        }
-                        .padding(8)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.bg))
+                    Picker("Sign-in method", selection: $authMode) {
+                        Text("Sign in here").tag(AuthMode.browser)
+                        Text("Paste a token").tag(AuthMode.token)
                     }
-                    .padding(.vertical, 2)
+                    .pickerStyle(.segmented)
+                    .onChange(of: authMode) { _, _ in
+                        setupMessage = nil
+                        Task { await loadRedirectUri() }
+                    }
+
+                    if authMode == .browser {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Sign-in finishes on the NVR itself, so nothing is needed on a computer. It does need its own free app on \(p.label)'s developer site — create one, add this exact redirect address to it, then paste its key and secret below.")
+                                .font(.caption)
+                                .foregroundStyle(Theme.textSecondary)
+                            if !p.consoleUrl.isEmpty, let url = URL(string: p.consoleUrl) {
+                                Link("Open the \(p.label) developer site", destination: url)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(Theme.accent)
+                            }
+                            if !redirectUri.isEmpty {
+                                HStack {
+                                    Text(redirectUri)
+                                        .font(.caption.monospaced())
+                                        .foregroundStyle(Theme.textPrimary)
+                                        .textSelection(.enabled)
+                                        .lineLimit(3)
+                                    Spacer()
+                                    Button {
+                                        UIPasteboard.general.string = redirectUri
+                                    } label: {
+                                        Image(systemName: "doc.on.doc")
+                                    }
+                                    .buttonStyle(.plain)
+                                    .foregroundStyle(Theme.accent)
+                                    .accessibilityLabel("Copy redirect address")
+                                }
+                                .padding(8)
+                                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.bg))
+                            }
+                        }
+                        .padding(.vertical, 2)
+                        .task(id: p.type) { await loadRedirectUri() }
+                    } else {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Run this on a computer with rclone installed, approve the sign-in, then paste what it prints below. No app registration needed — it uses rclone's own.")
+                                .font(.caption)
+                                .foregroundStyle(Theme.textSecondary)
+                            HStack {
+                                Text(p.authorizeCommand)
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(Theme.textPrimary)
+                                    .textSelection(.enabled)
+                                Spacer()
+                                Button {
+                                    UIPasteboard.general.string = p.authorizeCommand
+                                } label: {
+                                    Image(systemName: "doc.on.doc")
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(Theme.accent)
+                                .accessibilityLabel("Copy command")
+                            }
+                            .padding(8)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(Theme.bg))
+                        }
+                        .padding(.vertical, 2)
+                    }
                 }
 
-                ForEach(p.fields) { field in
+                ForEach(p.fields.filter { field in
+                    browserAuth
+                        ? (field.key == "client_id" || field.key == "client_secret")
+                        : (field.key != "client_id" && field.key != "client_secret")
+                }) { field in
                     providerField(field)
                 }
 
-                Button {
-                    Task { await createRemote() }
-                } label: {
-                    HStack {
-                        Spacer()
-                        if creating {
-                            ProgressView().tint(Theme.accent)
-                        } else {
-                            Text("Connect")
-                                .foregroundStyle(canCreateRemote ? Theme.accent : Theme.textSecondary)
+                if browserAuth {
+                    Button {
+                        Task { await startBrowserSignIn() }
+                    } label: {
+                        HStack {
+                            Spacer()
+                            if signingIn {
+                                ProgressView().tint(Theme.accent)
+                            } else {
+                                Text("Sign in to \(p.label)")
+                                    .foregroundStyle(canBrowserSignIn ? Theme.accent : Theme.textSecondary)
+                            }
+                            Spacer()
                         }
-                        Spacer()
                     }
+                    .disabled(!canBrowserSignIn)
+                } else {
+                    Button {
+                        Task { await createRemote() }
+                    } label: {
+                        HStack {
+                            Spacer()
+                            if creating {
+                                ProgressView().tint(Theme.accent)
+                            } else {
+                                Text("Connect")
+                                    .foregroundStyle(canCreateRemote ? Theme.accent : Theme.textSecondary)
+                            }
+                            Spacer()
+                        }
+                    }
+                    .disabled(!canCreateRemote)
                 }
-                .disabled(!canCreateRemote)
             }
 
             if let setupMessage {
@@ -649,6 +727,62 @@ struct IntegrationsView: View {
         do {
             try await api.deleteRcloneRemote(name: name)
             await loadRcloneCatalogue()
+        } catch {
+            session.handleAPIError(error)
+            setupOK = false
+            setupMessage = (error as? ApiError)?.message ?? error.localizedDescription
+        }
+    }
+
+
+    /// The address this app reaches the server on — the redirect URI is derived
+    /// from it, and must match what is registered on the provider's app.
+    private var serverOrigin: String {
+        guard let base = session.api?.apiBase,
+              let scheme = base.scheme, let host = base.host
+        else { return "" }
+        let port = base.port.map { ":\($0)" } ?? ""
+        return "\(scheme)://\(host)\(port)"
+    }
+
+    private var browserAuth: Bool {
+        (selectedProvider?.oauth ?? false) && authMode == .browser
+    }
+
+    private var canBrowserSignIn: Bool {
+        guard selectedProvider != nil, !newName.trimmed.isEmpty, !signingIn else { return false }
+        return !(newValues["client_id"] ?? "").trimmed.isEmpty
+            && !(newValues["client_secret"] ?? "").trimmed.isEmpty
+    }
+
+    private func loadRedirectUri() async {
+        guard let api = session.api, selectedProvider?.oauth == true else { return }
+        redirectUri = (try? await api.rcloneRedirectUri(origin: serverOrigin)) ?? ""
+    }
+
+    private func startBrowserSignIn() async {
+        guard let api = session.api, let p = selectedProvider, !signingIn else { return }
+        signingIn = true
+        defer { signingIn = false }
+        setupMessage = nil
+        do {
+            let res = try await api.startRcloneOAuth(
+                name: newName.trimmed, type: p.type,
+                clientId: newValues["client_id"] ?? "",
+                clientSecret: newValues["client_secret"] ?? "",
+                origin: serverOrigin
+            )
+            guard let url = URL(string: res.authUrl) else {
+                setupOK = false
+                setupMessage = "The provider returned an address this device cannot open."
+                return
+            }
+            // Safari, not an in-app sheet: providers routinely refuse to sign in
+            // inside an embedded web view, and the operator may already be
+            // signed in on Safari.
+            await UIApplication.shared.open(url)
+            setupOK = true
+            setupMessage = "Approve the sign-in in Safari, then pull down here to refresh."
         } catch {
             session.handleAPIError(error)
             setupOK = false

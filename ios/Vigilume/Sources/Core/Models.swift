@@ -1356,12 +1356,14 @@ struct RcloneProvider: Decodable, Sendable, Identifiable {
     /// desktop, plus a box for the token it prints.
     var oauth: Bool
     var authorizeCommand: String
+    /// Where to create the OAuth app whose key/secret the browser flow needs.
+    var consoleUrl: String
     var fields: [RcloneField]
 
     var id: String { type }
 
     private enum CodingKeys: String, CodingKey {
-        case type, label, blurb, oauth, authorizeCommand, fields
+        case type, label, blurb, oauth, authorizeCommand, consoleUrl, fields
     }
 
     init(from decoder: Decoder) throws {
@@ -1371,6 +1373,7 @@ struct RcloneProvider: Decodable, Sendable, Identifiable {
         blurb = try c.decodeIfPresent(String.self, forKey: .blurb) ?? ""
         oauth = try c.decodeIfPresent(Bool.self, forKey: .oauth) ?? false
         authorizeCommand = try c.decodeIfPresent(String.self, forKey: .authorizeCommand) ?? ""
+        consoleUrl = try c.decodeIfPresent(String.self, forKey: .consoleUrl) ?? ""
         fields = try c.decodeIfPresent([RcloneField].self, forKey: .fields) ?? []
     }
 }
@@ -1448,5 +1451,20 @@ struct RcloneTestResult: Decodable, Sendable {
         ok = try c.decodeIfPresent(Bool.self, forKey: .ok) ?? false
         detail = try c.decodeIfPresent(String.self, forKey: .detail) ?? ""
         folders = try c.decodeIfPresent([String].self, forKey: .folders) ?? []
+    }
+}
+
+/// POST /api/integrations/rclone/oauth/start — the provider URL to open, plus
+/// the redirect URI that must already be registered on the operator's app.
+struct RcloneOAuthStart: Decodable, Sendable {
+    var authUrl: String
+    var redirectUri: String
+
+    private enum CodingKeys: String, CodingKey { case authUrl, redirectUri }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        authUrl = try c.decodeIfPresent(String.self, forKey: .authUrl) ?? ""
+        redirectUri = try c.decodeIfPresent(String.self, forKey: .redirectUri) ?? ""
     }
 }

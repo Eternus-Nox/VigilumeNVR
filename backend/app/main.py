@@ -642,6 +642,10 @@ app.include_router(settings_router.router)
 app.include_router(privacy_router.router)
 app.include_router(detection_router.router)
 app.include_router(integrations_router.router)
+# Unauthenticated by necessity: a cloud provider redirects a bare browser
+# here to finish an OAuth sign-in, carrying no Authorization header. The
+# single-use `state` it must present is what authorizes it.
+app.include_router(integrations_router.oauth_router)
 
 
 @app.websocket("/api/ws")

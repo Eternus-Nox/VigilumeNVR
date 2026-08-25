@@ -624,6 +624,38 @@ struct APIClient: Sendable {
         return w.providers
     }
 
+    /// ADMIN: GET /api/integrations/rclone/oauth/redirect-uri — the exact
+    /// string to register on the provider's app, derived from the address this
+    /// app reaches the server on.
+    func rcloneRedirectUri(origin: String) async throws -> String {
+        struct Wrapper: Decodable { let redirectUri: String }
+        let w: Wrapper = try await get(
+            "api/integrations/rclone/oauth/redirect-uri",
+            query: [URLQueryItem(name: "origin", value: origin)]
+        )
+        return w.redirectUri
+    }
+
+    /// ADMIN: POST /api/integrations/rclone/oauth/start — begin a browser
+    /// sign-in. The returned URL is opened in Safari; the provider redirects
+    /// back to the NVR, which finishes the handshake and writes the remote.
+    func startRcloneOAuth(
+        name: String, type: String, clientId: String, clientSecret: String, origin: String
+    ) async throws -> RcloneOAuthStart {
+        struct Body: Encodable {
+            let name: String
+            let type: String
+            let clientId: String
+            let clientSecret: String
+            let origin: String
+        }
+        return try await sendJSON(
+            "POST", "api/integrations/rclone/oauth/start",
+            body: Body(name: name, type: type, clientId: clientId,
+                       clientSecret: clientSecret, origin: origin)
+        )
+    }
+
     /// ADMIN: GET /api/integrations/rclone/remotes — configured destinations.
     /// Secrets are redacted server-side and never reach this device.
     func rcloneRemotes() async throws -> RcloneRemotesResponse {

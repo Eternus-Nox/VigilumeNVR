@@ -68,13 +68,32 @@ class Provider:
     label: str
     blurb: str
     fields: tuple[Field, ...] = ()
-    # True when the only way to authenticate is the browser round-trip that a
-    # headless box cannot perform for itself (see the module docstring).
+    # True when the only way to authenticate is a browser round-trip.
     oauth: bool = False
+    # Where the operator creates the OAuth app whose id/secret lets the NVR act
+    # as its own redirect target — see rclone_oauth. Empty for key-based
+    # providers, which need no app at all.
+    console_url: str = ""
 
     def field_map(self) -> dict[str, Field]:
         return {f.key: f for f in self.fields}
 
+
+# Present on every OAuth provider: rclone needs the operator's OWN app
+# credentials to refresh the token it was issued, so they are stored with it.
+# Optional on the manual-paste path (rclone's built-in app covers that), and
+# supplied automatically by the browser flow.
+_CLIENT_FIELDS = (
+    Field(
+        key="client_id", label="App key", required=False,
+        help="From your own app on the provider's developer site. Needed only "
+             "for browser sign-in.",
+    ),
+    Field(
+        key="client_secret", label="App secret", kind="secret", required=False,
+        help="Stored so the token can renew itself.",
+    ),
+)
 
 _TOKEN_FIELD = Field(
     key="token",
@@ -90,18 +109,21 @@ _TOKEN_FIELD = Field(
 PROVIDERS: tuple[Provider, ...] = (
     Provider(
         type="dropbox",
+        console_url="https://www.dropbox.com/developers/apps",
         label="Dropbox",
         blurb="Personal or Business Dropbox.",
         oauth=True,
-        fields=(_TOKEN_FIELD,),
+        fields=(_TOKEN_FIELD, *_CLIENT_FIELDS),
     ),
     Provider(
         type="drive",
+        console_url="https://console.cloud.google.com/apis/credentials",
         label="Google Drive",
         blurb="A Google account's Drive.",
         oauth=True,
         fields=(
             _TOKEN_FIELD,
+            *_CLIENT_FIELDS,
             Field(
                 key="root_folder_id", label="Root folder ID", required=False,
                 help="Optional. Restricts Vigilume to one folder — take it from the "
@@ -111,11 +133,13 @@ PROVIDERS: tuple[Provider, ...] = (
     ),
     Provider(
         type="onedrive",
+        console_url="https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps",
         label="OneDrive",
         blurb="Microsoft OneDrive or SharePoint.",
         oauth=True,
         fields=(
             _TOKEN_FIELD,
+            *_CLIENT_FIELDS,
             Field(key="drive_id", label="Drive ID", required=False,
                   help="Optional; rclone authorize usually reports it."),
             Field(
@@ -214,6 +238,7 @@ def providers_payload() -> list[dict[str, Any]]:
             "blurb": p.blurb,
             "oauth": p.oauth,
             "authorize_command": authorize_command(p.type) if p.oauth else "",
+            "console_url": p.console_url,
             "fields": [
                 {
                     "key": f.key, "label": f.label, "kind": f.kind,

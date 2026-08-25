@@ -86,6 +86,12 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
   const [creating, setCreating] = useState(false);
   const [setupMsg, setSetupMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [busyRemote, setBusyRemote] = useState<string | null>(null);
+  // OAuth providers offer two routes. 'browser' finishes the sign-in on this
+  // server and needs the operator's own app credentials; 'token' is the older
+  // paste-a-blob path, kept because it needs no app registration at all.
+  const [authMode, setAuthMode] = useState<'browser' | 'token'>('browser');
+  const [redirectUri, setRedirectUri] = useState('');
+  const [signingIn, setSigningIn] = useState(false);
 
   // Re-sync from the server document (e.g. after a save echoes it back). A
   // backend without MQTT support omits the block — fall back to the defaults.
@@ -132,6 +138,54 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
   }, [loadRemotes]);
 
   const selectedProvider = providers.find((p) => p.type === newType) ?? null;
+  const browserAuth = !!selectedProvider?.oauth && authMode === 'browser';
+
+  // The redirect URI depends on the address THIS browser reached the server on
+  // (192.168.1.45:8080, a hostname, a tunnel…), so it is resolved live rather
+  // than configured — and it is what the operator registers on the app.
+  useEffect(() => {
+    if (!selectedProvider?.oauth) return;
+    void (async () => {
+      try {
+        setRedirectUri((await api.rcloneRedirectUri(window.location.origin)).redirect_uri);
+      } catch {
+        setRedirectUri('');
+      }
+    })();
+  }, [selectedProvider]);
+
+  const startBrowserSignIn = async () => {
+    if (!selectedProvider) return;
+    setSigningIn(true);
+    setSetupMsg(null);
+    try {
+      const res = await api.startRcloneOAuth(
+        newName,
+        selectedProvider.type,
+        newValues.client_id ?? '',
+        newValues.client_secret ?? '',
+        window.location.origin,
+      );
+      // A new tab, not a redirect: the operator keeps this settings page (and
+      // its unsaved state) while approving on the provider's site.
+      window.open(res.auth_url, '_blank', 'noopener');
+      setSetupMsg({
+        ok: true,
+        text: 'Approve the sign-in in the new tab, then come back and press Refresh below.',
+      });
+    } catch (e) {
+      setSetupMsg({ ok: false, text: e instanceof Error ? e.message : 'Could not start sign-in' });
+    } finally {
+      setSigningIn(false);
+    }
+  };
+
+  const canBrowserSignIn =
+    !!selectedProvider &&
+    newName.trim().length > 0 &&
+    (newValues.client_id ?? '').trim().length > 0 &&
+    (newValues.client_secret ?? '').trim().length > 0 &&
+    !signingIn;
 
   // Switching provider clears the form: field keys are per-provider, so keeping
   // values would send another backend's keys and be refused.
@@ -139,6 +193,7 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
     setNewType(type);
     setNewValues({});
     setSetupMsg(null);
+    setAuthMode('browser');
     if (!newName.trim()) setNewName(type);
   };
 
@@ -466,18 +521,75 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
 
         {selectedProvider?.oauth && (
           <div className="muted small" style={{ margin: '0.7rem 0' }}>
-            <p>
-              {selectedProvider.label} needs a browser sign-in, and this server has no
-              browser. Run this <strong>on your own computer</strong> (it needs rclone
-              installed), approve the sign-in, and paste what it prints below:
-            </p>
-            <pre><code>{selectedProvider.authorize_command}</code></pre>
+            <div className="row-inline wrap" style={{ gap: '1rem', marginBottom: '0.5rem' }}>
+              <label className="row-inline" style={{ gap: '0.35rem' }}>
+                <input
+                  type="radio"
+                  checked={authMode === 'browser'}
+                  onChange={() => setAuthMode('browser')}
+                />
+                <span>Sign in here (recommended)</span>
+              </label>
+              <label className="row-inline" style={{ gap: '0.35rem' }}>
+                <input
+                  type="radio"
+                  checked={authMode === 'token'}
+                  onChange={() => setAuthMode('token')}
+                />
+                <span>Paste a token</span>
+              </label>
+            </div>
+
+            {authMode === 'browser' ? (
+              <>
+                <p>
+                  {selectedProvider.label} sign-in finishes on this server, so no terminal
+                  is needed anywhere. It does need its own app on{' '}
+                  {selectedProvider.console_url ? (
+                    <a href={selectedProvider.console_url} target="_blank" rel="noreferrer">
+                      the {selectedProvider.label} developer site
+                    </a>
+                  ) : (
+                    "the provider's developer site"
+                  )}{' '}
+                  — free, and about two minutes. Create one, add this exact redirect URI to
+                  it, then paste its app key and secret below.
+                </p>
+                {redirectUri && (
+                  <div className="row-inline wrap" style={{ gap: '0.4rem' }}>
+                    <code style={{ wordBreak: 'break-all' }}>{redirectUri}</code>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => void navigator.clipboard?.writeText(redirectUri)}
+                    >
+                      Copy
+                    </button>
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                <p>
+                  Run this <strong>on your own computer</strong> (it needs rclone installed),
+                  approve the sign-in, and paste what it prints below. No app registration
+                  needed — it uses rclone&rsquo;s own.
+                </p>
+                <pre><code>{selectedProvider.authorize_command}</code></pre>
+              </>
+            )}
           </div>
         )}
 
         {selectedProvider && (
           <div className="form-grid">
-            {selectedProvider.fields.map((f) => (
+            {selectedProvider.fields
+              .filter((f) =>
+                browserAuth
+                  ? f.key === 'client_id' || f.key === 'client_secret'
+                  : f.key !== 'client_id' && f.key !== 'client_secret',
+              )
+              .map((f) => (
               <label key={f.key}>
                 {f.label}
                 {f.kind === 'select' ? (
@@ -510,7 +622,7 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
                 {(f.help || !f.required) && (
                   <span className="control-hint">
                     {f.help}
-                    {!f.required && (f.help ? ' (optional)' : 'Optional.')}
+                    {!f.required && !browserAuth && (f.help ? ' (optional)' : 'Optional.')}
                   </span>
                 )}
               </label>
@@ -520,17 +632,43 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
 
         {selectedProvider && (
           <div className="row-inline wrap" style={{ marginTop: '0.8rem' }}>
-            <button
-              type="button"
-              className="btn btn-sm"
-              disabled={!canCreate}
-              onClick={() => void createRemote()}
-            >
-              {creating ? 'Connecting…' : 'Connect'}
-            </button>
-            <span className="muted small">
-              Saves the account and immediately checks it works.
-            </span>
+            {browserAuth ? (
+              <>
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={!canBrowserSignIn}
+                  onClick={() => void startBrowserSignIn()}
+                >
+                  {signingIn ? 'Opening…' : `Sign in to ${selectedProvider.label}`}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={busyRemote !== null}
+                  onClick={() => void loadRemotes()}
+                >
+                  Refresh
+                </button>
+                <span className="muted small">
+                  Opens in a new tab; the account appears above once approved.
+                </span>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={!canCreate}
+                  onClick={() => void createRemote()}
+                >
+                  {creating ? 'Connecting…' : 'Connect'}
+                </button>
+                <span className="muted small">
+                  Saves the account and immediately checks it works.
+                </span>
+              </>
+            )}
           </div>
         )}
         {setupMsg && (
