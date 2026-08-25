@@ -38,6 +38,19 @@ struct IntegrationsView: View {
     @State private var discoveryPrefix = "homeassistant"
     @State private var baseTopic = "vigilume"
 
+    // Draft — cloud archive (a SEPARATE settings subtree from mqtt; save()
+    // patches only the ones that actually changed).
+    @State private var archiveEnabled = false
+    @State private var archiveRemote = ""
+    @State private var archiveHour = 3
+    @State private var archiveKeepDays = 30
+    @State private var archiveIncludeSnapshots = true
+    @State private var archiveBwlimit = ""
+    /// Read-only server state, fetched separately from the settings document.
+    @State private var archiveStatus: ArchiveStatus?
+    @State private var archiveRunning = false
+    @State private var archiveError: String?
+
     // Test-connection state (a draft probe, never a save).
     @State private var testing = false
     @State private var testResult: MqttTestResult?
@@ -73,8 +86,14 @@ struct IntegrationsView: View {
         .background(Theme.bg)
         .navigationTitle("Integrations")
         .navigationBarTitleDisplayMode(.inline)
-        .task { await load() }
-        .refreshable { await load() }
+        .task {
+            await load()
+            await loadArchiveStatus()
+        }
+        .refreshable {
+            await load()
+            await loadArchiveStatus()
+        }
     }
 
     private var form: some View {
@@ -84,6 +103,8 @@ struct IntegrationsView: View {
             authSection
             topicsSection
             testSection
+            archiveSection
+            archiveStatusSection
             saveSection
         }
         .scrollContentBackground(.hidden)
@@ -302,7 +323,19 @@ struct IntegrationsView: View {
 
     // MARK: - Dirty machinery
 
-    private var dirty: Bool {
+    private var dirty: Bool { mqttDirty || archiveDirty }
+
+    private var archiveDirty: Bool {
+        guard let a = doc?.archive else { return false }
+        return a.enabled != archiveEnabled
+            || a.remote != archiveRemote.trimmed
+            || a.hour != archiveHour
+            || a.keepDays != archiveKeepDays
+            || a.includeSnapshots != archiveIncludeSnapshots
+            || a.bwlimit != archiveBwlimit.trimmed
+    }
+
+    private var mqttDirty: Bool {
         guard let m = doc?.mqtt else { return false }
         return m.enabled != enabled
             || m.host != host.trimmed
@@ -314,6 +347,169 @@ struct IntegrationsView: View {
     }
 
     private var canTest: Bool { !host.trimmed.isEmpty && !testing }
+
+
+    // MARK: - Cloud archive
+
+    /// Mirrors the web's Integrations → "Cloud archive" card. A DIFFERENT
+    /// settings subtree from MQTT above, so `save()` patches each only when it
+    /// changed — editing the broker must never rewrite archive settings.
+    private var archiveSection: some View {
+        Section {
+            Toggle("Upload event media nightly", isOn: $archiveEnabled)
+                .tint(Theme.accent)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Remote").foregroundStyle(Theme.textPrimary)
+                TextField("dropbox:Vigilume", text: $archiveRemote)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .foregroundStyle(Theme.textPrimary)
+                Text("The rclone remote and path, as name:path. Set it up once on the server with `rclone config`.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+            .padding(.vertical, 2)
+
+            Stepper(value: $archiveHour, in: 0 ... 23) {
+                HStack {
+                    Text("Run at").foregroundStyle(Theme.textPrimary)
+                    Spacer()
+                    Text(String(format: "%02d:00", archiveHour))
+                        .font(.subheadline.weight(.medium).monospacedDigit())
+                        .foregroundStyle(Theme.textPrimary)
+                }
+            }
+            .tint(Theme.accent)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Stepper(value: $archiveKeepDays, in: 0 ... 3650, step: 5) {
+                    HStack {
+                        Text("Keep in cloud").foregroundStyle(Theme.textPrimary)
+                        Spacer()
+                        Text(archiveKeepDays == 0 ? "Forever" : "\(archiveKeepDays) days")
+                            .font(.subheadline.weight(.medium).monospacedDigit())
+                            .foregroundStyle(archiveKeepDays == 0 ? Theme.warning : Theme.textPrimary)
+                    }
+                }
+                .tint(Theme.accent)
+                Text(archiveKeepDays == 0
+                     ? "Nothing is ever deleted from the cloud — the archive grows without limit."
+                     : "Older day folders are deleted from the cloud. Independent of local retention.")
+                    .font(.caption)
+                    .foregroundStyle(archiveKeepDays == 0 ? Theme.warning : Theme.textSecondary)
+            }
+            .padding(.vertical, 2)
+
+            Toggle("Include snapshots", isOn: $archiveIncludeSnapshots)
+                .tint(Theme.accent)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Upload speed limit").foregroundStyle(Theme.textPrimary)
+                TextField("unlimited", text: $archiveBwlimit)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .foregroundStyle(Theme.textPrimary)
+                Text("e.g. 2M. Worth setting on a thin uplink so the nightly run does not starve live view.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+            .padding(.vertical, 2)
+        } header: {
+            Text("Cloud archive")
+        } footer: {
+            Text("Copies each finished day of event clips and snapshots to cloud storage overnight, one folder per day. 24/7 footage is never uploaded — far too large for any normal connection. This backs up the evidence, not everything.")
+        }
+        .listRowBackground(Theme.surface)
+    }
+
+    private var archiveStatusSection: some View {
+        Section {
+            Button {
+                Task { await runArchiveNow() }
+            } label: {
+                HStack {
+                    Spacer()
+                    if archiveRunning {
+                        ProgressView().tint(Theme.accent)
+                    } else {
+                        Text("Run now")
+                            .foregroundStyle(canRunArchive ? Theme.accent : Theme.textSecondary)
+                    }
+                    Spacer()
+                }
+            }
+            .disabled(!canRunArchive)
+
+            if let archiveError {
+                Text(archiveError)
+                    .font(.footnote)
+                    .foregroundStyle(Theme.danger)
+            }
+            if let status = archiveStatus, status.available {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Archived through: \(status.lastUploadedDay ?? "nothing yet")")
+                        .font(.footnote)
+                        .foregroundStyle(Theme.textPrimary)
+                    if let at = status.lastResult.at {
+                        Text(lastRunSummary(status.lastResult, at: at))
+                            .font(.caption)
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    if let errors = status.lastResult.errors, !errors.isEmpty {
+                        Text(errors.joined(separator: " · "))
+                            .font(.caption)
+                            .foregroundStyle(Theme.danger)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+        } footer: {
+            Text("Runs the real nightly pass, so a clean result proves the remote works. It uses the SAVED settings — save first. A day of clips can take a while on a slow connection.")
+        }
+        .listRowBackground(Theme.surface)
+    }
+
+    /// Gated on the SAVED state, not the draft: the run uses what the server
+    /// holds, so offering the button for unsaved settings would test the wrong
+    /// thing and report a confusing result.
+    private var canRunArchive: Bool {
+        guard let a = doc?.archive else { return false }
+        return a.enabled && !a.remote.isEmpty && !archiveRunning && !saving
+    }
+
+    private func lastRunSummary(_ r: ArchiveStatus.RunResult, at: String) -> String {
+        let uploaded = r.uploadedDays?.joined(separator: ", ")
+        var parts = ["Last run \(at)"]
+        parts.append("uploaded \(uploaded?.isEmpty == false ? uploaded! : "nothing")")
+        if let files = r.files, files > 0 { parts.append("\(files) files") }
+        if let pruned = r.prunedDays, !pruned.isEmpty {
+            parts.append("expired \(pruned.joined(separator: ", "))")
+        }
+        return parts.joined(separator: " — ")
+    }
+
+    private func runArchiveNow() async {
+        guard let api = session.api, !archiveRunning else { return }
+        archiveRunning = true
+        defer { archiveRunning = false }
+        archiveError = nil
+        do {
+            let result = try await api.runArchive()
+            if !result.ok, !result.detail.isEmpty { archiveError = result.detail }
+            archiveStatus = try? await api.archiveStatus()
+        } catch {
+            session.handleAPIError(error)
+            archiveError = (error as? ApiError)?.message ?? error.localizedDescription
+        }
+    }
+
+    private func loadArchiveStatus() async {
+        guard let api = session.api else { return }
+        // A backend predating the archive 404s here; the card's own copy already
+        // explains what is needed, so a failure just leaves the status hidden.
+        archiveStatus = try? await api.archiveStatus()
+    }
 
     // MARK: - Load / Test / Save
 
@@ -366,8 +562,10 @@ struct IntegrationsView: View {
         // Every field on SettingsPatch.Mqtt is Optional and JSONEncoder omits
         // nil, so the backend deep-merge only touches what's sent. The whole
         // block rides one PATCH (like ntfy), with the one twist below.
+        // Each subtree is sent ONLY when it changed. Both ride one PATCH, and
+        // the backend deep-merges, so an untouched block is never rewritten.
         let patch = SettingsPatch(
-            mqtt: .init(
+            mqtt: mqttDirty ? .init(
                 enabled: enabled,
                 host: host.trimmed,
                 port: clampedPort,
@@ -380,7 +578,15 @@ struct IntegrationsView: View {
                 password: passwordChanged ? password : nil,
                 discoveryPrefix: discoveryPrefix.trimmed,
                 baseTopic: baseTopic.trimmed
-            )
+            ) : nil,
+            archive: archiveDirty ? .init(
+                enabled: archiveEnabled,
+                remote: archiveRemote.trimmed,
+                hour: archiveHour,
+                keepDays: archiveKeepDays,
+                includeSnapshots: archiveIncludeSnapshots,
+                bwlimit: archiveBwlimit.trimmed
+            ) : nil
         )
         do {
             apply(try await api.patchSettings(patch))
@@ -404,6 +610,13 @@ struct IntegrationsView: View {
         username = m.username
         discoveryPrefix = m.discoveryPrefix
         baseTopic = m.baseTopic
+        let a = document.archive
+        archiveEnabled = a.enabled
+        archiveRemote = a.remote
+        archiveHour = a.hour
+        archiveKeepDays = a.keepDays
+        archiveIncludeSnapshots = a.includeSnapshots
+        archiveBwlimit = a.bwlimit
         // Deliberately NOT `password = m.password`: the server sends it masked,
         // and pre-filling the SecureField would let that placeholder be saved
         // back as the real secret. Empty field = "keep the stored password".

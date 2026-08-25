@@ -650,6 +650,12 @@ export interface AppSettings {
    * Integrations tab renders and saves cleanly against either backend.
    */
   mqtt?: MqttSettings;
+  /**
+   * Optional like `mqtt`, and for the same reason: a backend that predates the
+   * cloud archive omits the block, and the Integrations tab must render and
+   * save cleanly against either.
+   */
+  archive?: ArchiveSettings;
 }
 
 /**
@@ -675,6 +681,7 @@ export type SettingsPatch = {
   detection?: Partial<AppSettings['detection']>;
   system?: Partial<AppSettings['system']>;
   mqtt?: Partial<MqttSettings>;
+  archive?: Partial<ArchiveSettings>;
 };
 
 /**
@@ -839,6 +846,43 @@ export interface ApnsDevice {
  * Assistant automatically (with optional two-way control of camera features).
  * The whole block round-trips through GET/PUT /api/settings (admin-only).
  */
+/**
+ * Nightly cloud archive of EVENT media (clips + snapshots) to an rclone remote,
+ * one folder per local day. Never touches 24/7 footage.
+ */
+export interface ArchiveSettings {
+  enabled: boolean;
+  /** An rclone destination, e.g. "dropbox:Vigilume" or "b2:bucket/events". */
+  remote: string;
+  /** Local hour (0–23) the nightly pass runs; it uploads the PREVIOUS day. */
+  hour: number;
+  /** Day folders kept in the cloud. 0 = never expire. Independent of event_days. */
+  keep_days: number;
+  include_snapshots: boolean;
+  /** rclone --bwlimit, e.g. "2M". Empty = unlimited. */
+  bwlimit: string;
+}
+
+/** What the archive has actually done — GET /api/integrations/archive/status. */
+export interface ArchiveStatus {
+  /** False on a backend that predates the feature. */
+  available: boolean;
+  enabled: boolean;
+  /**
+   * Outcome of the last pass IN THIS PROCESS — cleared by a restart, so an
+   * empty object means "nothing has run since boot", not "nothing has ever run".
+   */
+  last_result: {
+    at?: string;
+    uploaded_days?: string[];
+    files?: number;
+    pruned_days?: string[];
+    errors?: string[];
+  };
+  /** The durable watermark: the last day successfully uploaded, or null. */
+  last_uploaded_day: string | null;
+}
+
 export interface MqttSettings {
   enabled: boolean;
   /** Broker hostname or IP (no scheme), e.g. "192.168.1.5" or "homeassistant.local". */
@@ -1513,4 +1557,20 @@ export const api = {
       // fall back to the SAVED settings, so the draft must be wrapped.
       body: JSON.stringify({ mqtt }),
     }),
+
+  /** What the nightly cloud archive has done. */
+  archiveStatus: () => request<ArchiveStatus>('/api/integrations/archive/status'),
+
+  /**
+   * Run an archive pass NOW instead of waiting for the configured hour.
+   *
+   * Slow by design — it is the real pass, not a separate connectivity probe, so
+   * a green result is evidence the remote actually works. Callers should show a
+   * pending state rather than assuming it hung.
+   */
+  runArchive: () =>
+    request<{ ok: boolean; detail: string; result?: ArchiveStatus['last_result'] }>(
+      '/api/integrations/archive/run',
+      { method: 'POST' },
+    ),
 };

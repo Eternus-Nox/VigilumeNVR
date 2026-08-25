@@ -616,6 +616,25 @@ struct APIClient: Sendable {
                       query: [URLQueryItem(name: "hours", value: String(hours))])
     }
 
+    /// ADMIN: GET /api/integrations/archive/status — what the nightly cloud
+    /// archive has actually done.
+    func archiveStatus() async throws -> ArchiveStatus {
+        try await get("api/integrations/archive/status")
+    }
+
+    /// ADMIN: POST /api/integrations/archive/run — run a pass NOW.
+    ///
+    /// Uses the SAVED settings, not a draft, and runs the real nightly pass
+    /// rather than a separate probe — so a clean result is evidence the remote
+    /// works. Deliberately slow: a day of clips on a thin uplink takes a while,
+    /// so callers must show progress rather than assume it hung.
+    func runArchive() async throws -> ArchiveRunResult {
+        // makeRequest + decode rather than sendJSON: the route takes no body,
+        // and sendJSON requires one to encode.
+        let data = try await send(try makeRequest("POST", "api/integrations/archive/run"))
+        return try Self.decoder.decode(ArchiveRunResult.self, from: data)
+    }
+
     /// ADMIN: POST /api/integrations/mqtt/test — probe the broker with a DRAFT
     /// config (no save). Returns {ok, detail}.
     func testMqtt(enabled: Bool, host: String, port: Int, username: String,

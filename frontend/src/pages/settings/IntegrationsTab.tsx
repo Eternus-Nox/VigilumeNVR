@@ -13,8 +13,14 @@
  * block is optional (falls back to DEFAULT_MQTT) and the test endpoint's
  * absence is caught and shown inline, so nothing breaks pre-deploy.
  */
-import { useEffect, useState } from 'react';
-import { api, type MqttSettings, type MqttTestStatus } from '../../lib/api';
+import { useCallback, useEffect, useState } from 'react';
+import {
+  api,
+  type ArchiveSettings,
+  type ArchiveStatus,
+  type MqttSettings,
+  type MqttTestStatus,
+} from '../../lib/api';
 import { useAdoptSaved, type TabProps } from '../Settings';
 import SettingsDisclosure from '../../components/SettingsDisclosure';
 
@@ -26,6 +32,15 @@ const DEFAULT_MQTT: MqttSettings = {
   password: '',
   discovery_prefix: 'homeassistant',
   base_topic: 'vigilume',
+};
+
+const DEFAULT_ARCHIVE: ArchiveSettings = {
+  enabled: false,
+  remote: '',
+  hour: 3,
+  keep_days: 30,
+  include_snapshots: true,
+  bwlimit: '',
 };
 
 const TEST_LABEL: Record<MqttTestStatus, string> = {
@@ -52,10 +67,33 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
     ...(pending.mqtt ?? {}),
   });
   const [test, setTest] = useState<TestState>({ kind: 'idle' });
+  const [archive, setArchive] = useState<ArchiveSettings>({
+    ...(settings.archive ?? DEFAULT_ARCHIVE),
+    ...(pending.archive ?? {}),
+  });
+  const [archiveStatus, setArchiveStatus] = useState<ArchiveStatus | null>(null);
+  const [archiveRunning, setArchiveRunning] = useState(false);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
 
   // Re-sync from the server document (e.g. after a save echoes it back). A
   // backend without MQTT support omits the block — fall back to the defaults.
   useAdoptSaved(settings.mqtt ?? DEFAULT_MQTT, setDraft);
+  useAdoptSaved(settings.archive ?? DEFAULT_ARCHIVE, setArchive);
+
+  // Status is READ-ONLY server state, not part of the settings draft, so it is
+  // fetched separately and re-fetched after a manual run.
+  const loadArchiveStatus = useCallback(async () => {
+    try {
+      setArchiveStatus(await api.archiveStatus());
+    } catch {
+      // A backend predating the archive 404s here. Not an error worth showing —
+      // the card's own copy already explains what is needed.
+      setArchiveStatus(null);
+    }
+  }, []);
+  useEffect(() => {
+    void loadArchiveStatus();
+  }, [loadArchiveStatus]);
 
   // Any edit invalidates a previous test result (it was for the old values).
   const patch = (p: Partial<MqttSettings>) => {
@@ -77,10 +115,34 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
   // persists it alongside every other tab's pending changes. Normalized here so
   // what is reported is exactly what would be stored.
   useEffect(() => {
-    onDraftChange({ mqtt: normalized() });
+    onDraftChange({ mqtt: normalized(), archive: normalizedArchive() });
     // `normalized` is derived from `draft`; re-report whenever the draft moves.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draft, onDraftChange]);
+  }, [draft, archive, onDraftChange]);
+
+  // Same contract as `normalized` above: what is reported up is exactly what
+  // would be stored, so the form cannot save something it never showed.
+  const normalizedArchive = (): ArchiveSettings => ({
+    ...archive,
+    remote: archive.remote.trim(),
+    bwlimit: archive.bwlimit.trim(),
+    hour: Math.min(23, Math.max(0, Math.floor(archive.hour) || 0)),
+    keep_days: Math.min(3650, Math.max(0, Math.floor(archive.keep_days) || 0)),
+  });
+
+  const runArchiveNow = async () => {
+    setArchiveRunning(true);
+    setArchiveError(null);
+    try {
+      const res = await api.runArchive();
+      if (!res.ok && res.detail) setArchiveError(res.detail);
+      await loadArchiveStatus();
+    } catch (e) {
+      setArchiveError(e instanceof Error ? e.message : 'Archive run failed');
+    } finally {
+      setArchiveRunning(false);
+    }
+  };
 
   const runTest = async () => {
     setTest({ kind: 'testing' });
@@ -211,6 +273,143 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
           )}
           {test.kind === 'error' && <span className="form-error">{test.message}</span>}
         </div>
+      </SettingsDisclosure>
+
+      <SettingsDisclosure
+        title="Cloud archive (Dropbox, Drive, S3…)"
+        badge={archive.enabled ? archive.remote.trim() || 'On' : 'Off'}
+        tone={archive.enabled ? 'on' : 'muted'}
+      >
+        <p className="muted small">
+          Copies each finished day of <strong>event clips and snapshots</strong> to cloud
+          storage overnight, as one folder per day (<code>2026-08-25/</code>). 24/7 footage is
+          never uploaded — it is far too large for any normal connection. This is a backup of
+          the evidence, not of everything.
+        </p>
+        <p className="muted small">
+          Set the destination up once on the server with{' '}
+          <code>docker compose exec backend rclone config</code>, then put the remote name
+          here. Anything rclone supports works: Dropbox, Google Drive, S3, Backblaze.
+        </p>
+
+        <label className="row-inline">
+          <input
+            type="checkbox"
+            checked={archive.enabled}
+            onChange={(e) => setArchive({ ...archive, enabled: e.target.checked })}
+          />
+          <span>Upload event media nightly</span>
+        </label>
+
+        <div className="form-grid">
+          <label>
+            Remote
+            <input
+              type="text"
+              value={archive.remote}
+              placeholder="dropbox:Vigilume"
+              onChange={(e) => setArchive({ ...archive, remote: e.target.value })}
+            />
+            <span className="control-hint">
+              The rclone remote and path, as <code>name:path</code>.
+            </span>
+          </label>
+          <label>
+            Run at (hour)
+            <input
+              type="number"
+              min={0}
+              max={23}
+              value={archive.hour}
+              onChange={(e) =>
+                setArchive({ ...archive, hour: Math.max(0, Math.min(23, Number(e.target.value) || 0)) })
+              }
+            />
+            <span className="control-hint">
+              Local time. Each run uploads the PREVIOUS day, once it is complete.
+            </span>
+          </label>
+          <label>
+            Keep in cloud (days)
+            <input
+              type="number"
+              min={0}
+              max={3650}
+              value={archive.keep_days}
+              onChange={(e) =>
+                setArchive({
+                  ...archive,
+                  keep_days: Math.max(0, Math.min(3650, Number(e.target.value) || 0)),
+                })
+              }
+            />
+            <span className="control-hint">
+              {archive.keep_days === 0
+                ? 'Never expires — the archive grows forever.'
+                : `Older day folders are deleted from the cloud. Independent of local retention — outliving the local copy is the point.`}
+            </span>
+          </label>
+          <label>
+            Upload speed limit
+            <input
+              type="text"
+              value={archive.bwlimit}
+              placeholder="unlimited"
+              onChange={(e) => setArchive({ ...archive, bwlimit: e.target.value })}
+            />
+            <span className="control-hint">
+              e.g. <code>2M</code>. Worth setting on a thin uplink so the nightly run does not
+              starve live view.
+            </span>
+          </label>
+        </div>
+
+        <label className="row-inline">
+          <input
+            type="checkbox"
+            checked={archive.include_snapshots}
+            onChange={(e) => setArchive({ ...archive, include_snapshots: e.target.checked })}
+          />
+          <span>Include event snapshots (small — clips dominate the size)</span>
+        </label>
+
+        <div className="row-inline wrap" style={{ marginTop: '0.8rem' }}>
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={archiveRunning || !archive.enabled || !archive.remote.trim()}
+            onClick={() => void runArchiveNow()}
+          >
+            {archiveRunning ? 'Running…' : 'Run now'}
+          </button>
+          <span className="muted small">
+            Runs the real nightly pass, so a clean result proves the remote works. Save first —
+            it uses the SAVED settings, not what is typed above. It can take a while.
+          </span>
+        </div>
+        {archiveError && <div className="form-error">{archiveError}</div>}
+        {archiveStatus?.available && (
+          <div className="muted small" style={{ marginTop: '0.6rem' }}>
+            <div>
+              Archived through:{' '}
+              <strong>{archiveStatus.last_uploaded_day ?? 'nothing yet'}</strong>
+            </div>
+            {archiveStatus.last_result?.at && (
+              <div>
+                Last run {archiveStatus.last_result.at} — uploaded{' '}
+                {archiveStatus.last_result.uploaded_days?.join(', ') || 'nothing'}
+                {typeof archiveStatus.last_result.files === 'number' &&
+                  ` (${archiveStatus.last_result.files} files)`}
+                {archiveStatus.last_result.pruned_days?.length
+                  ? `, expired ${archiveStatus.last_result.pruned_days.join(', ')}`
+                  : ''}
+              </div>
+            )}
+            {archiveStatus.last_result?.errors?.length ? (
+              <div className="form-error">{archiveStatus.last_result.errors.join(' · ')}</div>
+            ) : null}
+          </div>
+        )}
       </SettingsDisclosure>
 
       {/* No Save button here by design — the shell owns the single Save for

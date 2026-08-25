@@ -635,6 +635,43 @@ struct SettingsDocument: Decodable, Sendable {
         }
     }
 
+    /// `archive` — the optional nightly cloud copy of EVENT media (clips +
+    /// snapshots) to an rclone remote, one folder per local day. Never 24/7
+    /// footage. Absent on a backend predating the feature -> the defaults here,
+    /// which are "off".
+    struct Archive: Decodable, Sendable {
+        var enabled: Bool
+        /// An rclone destination, "name:path" — e.g. "dropbox:Vigilume".
+        var remote: String
+        /// Local hour the nightly pass runs; it uploads the PREVIOUS day.
+        var hour: Int
+        /// Day folders kept in the cloud. 0 = never expire. Independent of
+        /// local event retention.
+        var keepDays: Int
+        var includeSnapshots: Bool
+        /// rclone --bwlimit, e.g. "2M". Empty = unlimited.
+        var bwlimit: String
+
+        private enum CodingKeys: String, CodingKey {
+            case enabled, remote, hour, keepDays, includeSnapshots, bwlimit
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+            remote = try c.decodeIfPresent(String.self, forKey: .remote) ?? ""
+            hour = try c.decodeIfPresent(Int.self, forKey: .hour) ?? 3
+            keepDays = try c.decodeIfPresent(Int.self, forKey: .keepDays) ?? 30
+            includeSnapshots = try c.decodeIfPresent(Bool.self, forKey: .includeSnapshots) ?? true
+            bwlimit = try c.decodeIfPresent(String.self, forKey: .bwlimit) ?? ""
+        }
+
+        init() {
+            enabled = false; remote = ""; hour = 3
+            keepDays = 30; includeSnapshots = true; bwlimit = ""
+        }
+    }
+
     struct System: Decodable, Sendable {
         /// Nightly self-restart at a fixed local time. Absent on an older
         /// backend -> off.
@@ -841,9 +878,11 @@ struct SettingsDocument: Decodable, Sendable {
     var notifications: Notifications
     var mqtt: Mqtt
     var timeSync: TimeSync
+    /// Absent on a backend predating the cloud archive -> defaults (off).
+    var archive: Archive
 
     private enum CodingKeys: String, CodingKey {
-        case recording, detection, system, notifications, mqtt, timeSync
+        case recording, detection, system, notifications, mqtt, timeSync, archive
     }
 
     init(from decoder: Decoder) throws {
@@ -855,6 +894,7 @@ struct SettingsDocument: Decodable, Sendable {
             ?? Notifications()
         mqtt = try c.decodeIfPresent(Mqtt.self, forKey: .mqtt) ?? Mqtt()
         timeSync = try c.decodeIfPresent(TimeSync.self, forKey: .timeSync) ?? TimeSync()
+        archive = try c.decodeIfPresent(Archive.self, forKey: .archive) ?? Archive()
     }
 }
 
@@ -903,6 +943,17 @@ struct SettingsPatch: Encodable, Sendable {
         var coralModel: String?
         /// Seconds a label may go unseen before its event ends.
         var absenceTimeoutS: Int?
+    }
+
+    /// Every field Optional + omitted when nil, per the convention above: a
+    /// screen touching one archive field cannot reset the others.
+    struct Archive: Encodable, Sendable {
+        var enabled: Bool?
+        var remote: String?
+        var hour: Int?
+        var keepDays: Int?
+        var includeSnapshots: Bool?
+        var bwlimit: String?
     }
 
     struct System: Encodable, Sendable {
@@ -985,6 +1036,7 @@ struct SettingsPatch: Encodable, Sendable {
     var notifications: Notifications?
     var mqtt: Mqtt?
     var timeSync: TimeSync?
+    var archive: Archive?
 }
 
 /// One registered APNs device (GET /api/notifications/apns/devices) — only an
@@ -1189,5 +1241,71 @@ enum WSMessage: Sendable {
             break
         }
         return .unknown(type: type)
+    }
+}
+
+// MARK: - Cloud archive status
+
+/// GET /api/integrations/archive/status — what the nightly archive has done.
+struct ArchiveStatus: Decodable, Sendable {
+    /// The outcome of the last pass IN THIS SERVER PROCESS. Cleared by a
+    /// restart, so all-nil means "nothing has run since boot", NOT "nothing has
+    /// ever run" — `lastUploadedDay` is the durable answer to that.
+    struct RunResult: Decodable, Sendable {
+        var at: String?
+        var uploadedDays: [String]?
+        var files: Int?
+        var prunedDays: [String]?
+        var errors: [String]?
+
+        private enum CodingKeys: String, CodingKey {
+            case at, uploadedDays, files, prunedDays, errors
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            at = try c.decodeIfPresent(String.self, forKey: .at)
+            uploadedDays = try c.decodeIfPresent([String].self, forKey: .uploadedDays)
+            files = try c.decodeIfPresent(Int.self, forKey: .files)
+            prunedDays = try c.decodeIfPresent([String].self, forKey: .prunedDays)
+            errors = try c.decodeIfPresent([String].self, forKey: .errors)
+        }
+
+        init() {}
+    }
+
+    /// False on a backend predating the feature.
+    var available: Bool
+    var enabled: Bool
+    var lastResult: RunResult
+    /// The durable watermark — the last day successfully uploaded, "YYYY-MM-DD".
+    var lastUploadedDay: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case available, enabled, lastResult, lastUploadedDay
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        available = try c.decodeIfPresent(Bool.self, forKey: .available) ?? false
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        lastResult = try c.decodeIfPresent(RunResult.self, forKey: .lastResult) ?? RunResult()
+        lastUploadedDay = try c.decodeIfPresent(String.self, forKey: .lastUploadedDay)
+    }
+}
+
+/// POST /api/integrations/archive/run.
+struct ArchiveRunResult: Decodable, Sendable {
+    var ok: Bool
+    var detail: String
+    var result: ArchiveStatus.RunResult?
+
+    private enum CodingKeys: String, CodingKey { case ok, detail, result }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ok = try c.decodeIfPresent(Bool.self, forKey: .ok) ?? false
+        detail = try c.decodeIfPresent(String.self, forKey: .detail) ?? ""
+        result = try c.decodeIfPresent(ArchiveStatus.RunResult.self, forKey: .result)
     }
 }
