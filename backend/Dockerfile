@@ -25,10 +25,25 @@ ENV PYTHONUNBUFFERED=1 \
 # transcoding; see the gpu target below for the full rationale. Present in both
 # targets so a Coral box (which has no reason to run the CUDA image) still gets
 # hardware HEVC->H.264 instead of falling back to libx264.
+
+# rclone — the transport for the OPTIONAL nightly cloud archive of event media
+# (settings.archive; app/native/archive.py). Distro package, not the upstream
+# installer script: apt keeps it patched with everything else, and the archive
+# uses only `copy`, `lsf` and `purge`, which have been stable for years.
+#
+# ~20 MB, and inert unless someone configures a remote — it is a binary sitting
+# on disk, not a running service. Carried in BOTH stages so the cpu target used
+# for dev/tests behaves the same as the deployed gpu one.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends libglib2.0-0 libgl1 ffmpeg \
-        mesa-va-drivers libva-drm2 \
+        mesa-va-drivers libva-drm2 rclone \
  && rm -rf /var/lib/apt/lists/*
+# rclone's config (the Dropbox/Drive/S3 tokens from `rclone config`) defaults to
+# ~/.config/rclone/rclone.conf — which is INSIDE the image, not on a volume, so
+# every `docker compose up --build` would silently discard the operator's cloud
+# authorization. Point it at the persistent /data mount instead, where the DB
+# and the JWT secret already live.
+ENV RCLONE_CONFIG=/data/rclone.conf
 
 WORKDIR /srv
 COPY requirements.txt requirements-cpu.txt ./
@@ -143,7 +158,14 @@ RUN apt-get update \
         python3.12 python3.12-venv \
         ffmpeg libglib2.0-0 libgl1 \
         mesa-va-drivers libva-drm2 \
+        rclone \
  && rm -rf /var/lib/apt/lists/*
+# rclone's config (the Dropbox/Drive/S3 tokens from `rclone config`) defaults to
+# ~/.config/rclone/rclone.conf — which is INSIDE the image, not on a volume, so
+# every `docker compose up --build` would silently discard the operator's cloud
+# authorization. Point it at the persistent /data mount instead, where the DB
+# and the JWT secret already live.
+ENV RCLONE_CONFIG=/data/rclone.conf
 
 ENV VIRTUAL_ENV=/opt/venv
 RUN python3.12 -m venv "$VIRTUAL_ENV"

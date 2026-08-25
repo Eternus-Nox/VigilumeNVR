@@ -197,6 +197,42 @@ class RecordingSettings(BaseModel):
         return self
 
 
+class ArchiveSettings(BaseModel):
+    """Nightly cloud copy of event media — see DEFAULT_SETTINGS for the shape."""
+
+    enabled: bool = False
+    # An rclone destination: "dropbox:Vigilume", "b2:bucket/events", etc. Not
+    # validated beyond shape here — rclone owns what a valid remote is, and a
+    # regex guessing at that would reject working destinations. A remote that
+    # does not resolve surfaces as a logged run error, not a rejected save.
+    remote: str = Field(default="", max_length=512)
+    hour: int = Field(default=3, ge=0, le=23)
+    # 0 = never expire. Independent of local event_days: outliving the local
+    # copy is the entire point of an archive.
+    keep_days: int = Field(default=30, ge=0, le=3650)
+    include_snapshots: bool = True
+    bwlimit: str = Field(default="", max_length=32)
+
+    @field_validator("remote")
+    @classmethod
+    def _remote_clean(cls, v: str) -> str:
+        return v.strip()
+
+    @field_validator("bwlimit")
+    @classmethod
+    def _bwlimit_clean(cls, v: str) -> str:
+        # rclone's own syntax: a bare number (KiB/s) or one with a unit suffix,
+        # optionally a colon-separated upload:download pair. Anything else would
+        # make rclone exit non-zero every night, so it is refused at save time
+        # where the operator can see why.
+        v = v.strip()
+        if v and not re.fullmatch(r"\d+(\.\d+)?[KMGTP]?(:\d+(\.\d+)?[KMGTP]?)?", v, re.I):
+            raise ValueError(
+                'bwlimit must look like "2M", "512K" or "2M:8M" (rclone syntax), or be empty'
+            )
+        return v
+
+
 class DetectionSettings(BaseModel):
     # Model pins/hashes live in native/detector.py; a model change triggers
     # download (if absent) + engine reload.
@@ -353,6 +389,7 @@ class AppSettings(BaseModel):
     system: SystemSettings = Field(default_factory=SystemSettings)
     mqtt: MqttSettings = Field(default_factory=MqttSettings)
     time_sync: TimeSyncSettings = Field(default_factory=TimeSyncSettings)
+    archive: ArchiveSettings = Field(default_factory=ArchiveSettings)
 
 
 def _with_webrtc(settings: dict[str, Any]) -> dict[str, Any]:

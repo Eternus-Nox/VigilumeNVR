@@ -26,6 +26,7 @@ from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 
 from .amcrest.ai_events import AiEventListener
 from .amcrest.doorbell import DoorbellManager
+from .native.archive_runner import ArchiveRunner, archive_loop
 from .amcrest.features import static_capabilities
 from .amcrest.ir_reassert import IrReasserter
 from .amcrest.lens_mask import LensMaskCleaner
@@ -392,6 +393,10 @@ async def lifespan(app: FastAPI):
     pipeline.set_recorder(recorder)
     go2rtc = Go2rtcManager(config, db, settings)
     doorbells = DoorbellManager(pipeline.handle_doorbell)
+    # Nightly cloud archive of finished days of EVENT media. Constructed
+    # unconditionally and gated on settings at tick time, so enabling it in the
+    # UI takes effect without a restart — same shape as the auto-restart loop.
+    archive_runner = ArchiveRunner(config, db, settings)
     # Camera on-board AI event listener (SMD/IVS) for camera-AI-gated detection.
     # Attaches a long-lived digest event stream per ai_on_camera camera running
     # in a camera-AI mode; the ingest gate reads its live "AI active" state and
@@ -462,6 +467,7 @@ async def lifespan(app: FastAPI):
     app.state.recorder = recorder
     app.state.go2rtc = go2rtc
     app.state.doorbells = doorbells
+    app.state.archive = archive_runner
     app.state.ai_events = ai_events
     app.state.spotlight = spotlight
     app.state.ir_reasserter = ir_reasserter
@@ -514,6 +520,10 @@ async def lifespan(app: FastAPI):
             # default; the loop is always running so the setting takes effect
             # without needing a restart to schedule a restart.
             asyncio.create_task(_auto_restart_loop(settings), name="auto-restart"),
+            # Nightly cloud archive of EVENT media (off unless configured). A
+            # no-op tick when disabled, so it costs nothing on installs that
+            # never turn it on.
+            asyncio.create_task(archive_loop(archive_runner), name="cloud-archive"),
         ]
         cams = await db.list_cameras()
         await doorbells.sync(cams)

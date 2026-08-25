@@ -375,6 +375,30 @@ DEFAULT_SETTINGS: dict = {
         # hedge, someone stepping out of frame and back.
         "absence_timeout_s": 5,
     },
+    # Optional nightly copy of EVENT media (clips + snapshots) to cloud storage,
+    # one folder per local day: <remote>/2026-08-25/<event id>.mp4|.jpg
+    #
+    # Off by default and never touches 24/7 footage. Events are what this is for:
+    # a clip is the evidence the system exists to produce and it otherwise lives
+    # on one disk in one building, while continuous recording is bulk that no
+    # sane uplink could carry (~135 GB/day for three cameras, against ~1.3 GB/day
+    # of events at 100 events/day).
+    #
+    # `remote` is an rclone destination — "dropbox:Vigilume", "b2:bucket/path",
+    # anything `rclone config` set up. `keep_days` expires whole day folders in
+    # the cloud and is INDEPENDENT of local retention: the point of an archive is
+    # to outlive the local copy.
+    "archive": {
+        "enabled": False,
+        "remote": "",
+        "hour": 3,
+        "keep_days": 30,
+        "include_snapshots": True,
+        # rclone --bwlimit, e.g. "2M". Empty = unlimited. Worth setting on a
+        # thin uplink: the box's day job is recording, and saturating upstream
+        # is how a nightly archive breaks live view for whoever is away.
+        "bwlimit": "",
+    },
     # auto_restart: optional nightly restart of the BACKEND process at a local
     # wall-clock time. Off by default — a restart costs a short recording gap,
     # so it is never something an install does uninvited.
