@@ -445,13 +445,26 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
       </SettingsDisclosure>
 
       <SettingsDisclosure
-        title="Cloud storage accounts"
-        badge={remotes.length ? `${remotes.length} connected` : 'None'}
-        tone={remotes.length ? 'on' : 'muted'}
+        title="Cloud storage"
+        badge={
+          archive.enabled
+            ? archive.remote.trim() || 'On'
+            : remotes.length
+              ? `${remotes.length} connected, off`
+              : 'Off'
+        }
+        tone={archive.enabled ? 'on' : 'muted'}
       >
         <p className="muted small">
-          Connect the storage the nightly archive uploads to. Everything happens here —
-          no terminal on the server.
+          Copies each finished day of <strong>event clips and snapshots</strong> to cloud
+          storage overnight, as one folder per day (<code>2026-08-25/</code>). 24/7 footage is
+          never uploaded — far too large for any normal connection. This backs up the
+          evidence, not everything.
+        </p>
+
+        <h4 style={{ margin: '1rem 0 0.3rem' }}>1. Connect an account</h4>
+        <p className="muted small">
+          Everything happens here — no terminal on the server.
         </p>
 
         {!rcloneAvailable && (
@@ -676,24 +689,8 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
             {setupMsg.text}
           </div>
         )}
-      </SettingsDisclosure>
 
-      <SettingsDisclosure
-        title="Cloud archive (Dropbox, Drive, S3…)"
-        badge={archive.enabled ? archive.remote.trim() || 'On' : 'Off'}
-        tone={archive.enabled ? 'on' : 'muted'}
-      >
-        <p className="muted small">
-          Copies each finished day of <strong>event clips and snapshots</strong> to cloud
-          storage overnight, as one folder per day (<code>2026-08-25/</code>). 24/7 footage is
-          never uploaded — it is far too large for any normal connection. This is a backup of
-          the evidence, not of everything.
-        </p>
-        <p className="muted small">
-          Set the destination up once on the server with{' '}
-          <code>docker compose exec backend rclone config</code>, then put the remote name
-          here. Anything rclone supports works: Dropbox, Google Drive, S3, Backblaze.
-        </p>
+        <h4 style={{ margin: '1.4rem 0 0.3rem' }}>2. Schedule the upload</h4>
 
         <label className="row-inline">
           <input

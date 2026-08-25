@@ -27,10 +27,24 @@ redirects a browser, carrying no Authorization header):
     except as part of the finished rclone remote, and is never echoed back.
   * A callback for an unknown state is indistinguishable from an expired one on
     purpose — the response says "start again", not "that state was wrong".
+
+PKCE (RFC 7636) IS NOT OPTIONAL HERE, and not merely for defence in depth.
+Dropbox refuses outright:
+
+    Invalid redirect_uri. When response_type=code without PKCE, only localhost
+    URIs can start with "http://"; all others must start with "https://".
+
+An NVR on a LAN is reached at `http://192.168.1.45:8080` — plain HTTP, not
+localhost — so the whole in-browser flow depends on presenting a code
+challenge. Which is the right rule: without PKCE, anyone who could observe the
+redirect on an unencrypted hop could replay the code. With it, the code is
+useless without the verifier, which never leaves this server.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 import secrets
 import time
@@ -120,6 +134,9 @@ class Pending:
     client_secret: str
     redirect_uri: str
     created_at: float
+    # PKCE: the verifier stays HERE and is sent only on the back-channel token
+    # exchange; only its SHA-256 challenge ever travels through the browser.
+    code_verifier: str = ""
 
 
 class PendingFlows:
@@ -182,12 +199,26 @@ def redirect_uri_for(origin: str) -> str:
     return validate_origin(origin) + CALLBACK_PATH
 
 
+def code_challenge_for(verifier: str) -> str:
+    """S256 challenge: base64url(sha256(verifier)), unpadded per RFC 7636 §4.2.
+
+    Unpadded matters — providers compare the string literally, and a trailing
+    '=' makes an otherwise correct challenge mismatch at exchange time.
+    """
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
 def build_auth_url(flow: Pending) -> str:
     params = {
         "client_id": flow.client_id,
         "response_type": "code",
         "redirect_uri": flow.redirect_uri,
         "state": flow.state,
+        # See the module docstring: without these Dropbox rejects any http://
+        # redirect that is not localhost, which is every LAN address.
+        "code_challenge": code_challenge_for(flow.code_verifier),
+        "code_challenge_method": "S256",
         **flow.provider.auth_extra,
     }
     if flow.provider.scope:
@@ -218,18 +249,30 @@ def start_flow(
         client_secret=client_secret,
         redirect_uri=redirect_uri_for(origin),
         created_at=time.time(),
+        # token_urlsafe(64) yields ~86 chars drawn from [A-Za-z0-9_-], inside
+        # RFC 7636's 43-128 unreserved-character range with no escaping needed.
+        code_verifier=secrets.token_urlsafe(64),
     )
 
 
 def token_request_body(flow: Pending, code: str) -> dict[str, str]:
-    """Form body for the code -> token exchange (RFC 6749 §4.1.3)."""
-    return {
+    """Form body for the code -> token exchange (RFC 6749 §4.1.3 + RFC 7636 §4.5).
+
+    Both `client_secret` AND `code_verifier` are sent. The verifier is what the
+    provider demanded to allow a plain-HTTP LAN redirect at all; the secret is
+    still needed because this is a confidential client whose credentials rclone
+    will reuse to refresh the token later.
+    """
+    body = {
         "grant_type": "authorization_code",
         "code": code,
         "client_id": flow.client_id,
         "client_secret": flow.client_secret,
         "redirect_uri": flow.redirect_uri,
     }
+    if flow.code_verifier:
+        body["code_verifier"] = flow.code_verifier
+    return body
 
 
 def to_rclone_token(payload: dict[str, Any], *, now: Optional[datetime] = None) -> str:

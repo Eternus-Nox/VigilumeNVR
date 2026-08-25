@@ -34,6 +34,7 @@ from app.native.rclone_oauth import (  # noqa: E402
     OAuthError,
     PendingFlows,
     build_auth_url,
+    code_challenge_for,
     redirect_uri_for,
     remote_values,
     start_flow,
@@ -115,6 +116,35 @@ def main() -> int:
         "overnight with nobody awake to read the error",
     )
     check("APPSECRET" not in url, "the app SECRET never appears in a URL the browser sees")
+
+    # --- PKCE: what makes a plain-HTTP LAN redirect legal at all -----------
+    # Dropbox: "When response_type=code without PKCE, only localhost URIs can
+    # start with http://; all others must start with https://." An NVR is
+    # reached at http://192.168.1.45:8080, so this is load-bearing, not extra.
+    check(
+        "code_challenge_method=S256" in url,
+        "the auth URL presents an S256 code challenge — without it Dropbox "
+        "REJECTS every non-localhost http:// redirect, which is every LAN address",
+    )
+    check(
+        f"code_challenge={code_challenge_for(flow.code_verifier)}" in url,
+        "and the challenge is the SHA-256 of this flow's own verifier",
+    )
+    check(
+        flow.code_verifier not in url,
+        "the VERIFIER never travels through the browser — only its hash does, "
+        "which is the whole point: an observed code is useless without it",
+    )
+    check(
+        43 <= len(flow.code_verifier) <= 128,
+        f"the verifier is inside RFC 7636's length range ({len(flow.code_verifier)})",
+    )
+    check(
+        not code_challenge_for("x").endswith("="),
+        "the challenge is base64url UNPADDED — providers compare it literally, "
+        "so a stray '=' fails the exchange",
+    )
+    check(a_flow().code_verifier != a_flow().code_verifier, "a fresh verifier per flow")
     drive_url = build_auth_url(a_flow("g", "drive"))
     check(
         "access_type=offline" in drive_url and "prompt=consent" in drive_url,
@@ -131,6 +161,15 @@ def main() -> int:
         body["redirect_uri"] == flow.redirect_uri,
         "and REPEATS the redirect URI — providers verify it matches the one "
         "used to get the code",
+    )
+    check(
+        body["code_verifier"] == flow.code_verifier,
+        "the exchange proves possession of the verifier behind the challenge",
+    )
+    check(
+        body["client_secret"] == "APPSECRET" and "code_verifier" in body,
+        "BOTH secret and verifier are sent: the verifier is what allowed the "
+        "http:// redirect, the secret is what rclone reuses to refresh later",
     )
 
     # --- state is the whole access control ---------------------------------
