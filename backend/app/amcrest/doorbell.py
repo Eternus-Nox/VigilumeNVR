@@ -35,6 +35,32 @@ _STREAM_STABLE_S = 60.0
 _BACKOFF_MIN_S = 5.0
 _BACKOFF_MAX_S = 120.0
 
+# HOW A DEAD STREAM IS NOTICED — the difference between a doorbell that rings
+# and one that is "hit and miss".
+#
+# An idle attach sends nothing, so a stream that has silently died (the AD410 is
+# Wi-Fi; the camera reboots, the AP drops the flow, a NAT table forgets it) looks
+# exactly like a quiet doorstep. The socket stays open on our side and the read
+# simply never returns, so every press during that window is lost — with a bare
+# 300 s read timeout, up to five minutes of deafness per occurrence, and nothing
+# in the log to say so.
+#
+# The fix is to make silence meaningful: `&heartbeat=N` asks the camera to emit a
+# periodic keepalive part, so no data for appreciably longer than N means the
+# stream is genuinely gone. Dahua's documented range is 1-60 s.
+_HEARTBEAT_S = 30
+# 2.5 heartbeats — long enough that one dropped keepalive is not a reconnect,
+# short enough that a dead stream is noticed in ~a minute instead of five.
+_READ_TIMEOUT_HEARTBEAT_S = 75.0
+# Fallback for firmware that ignores `heartbeat=` and stays silent when idle.
+# Reconnecting every 75 s there would be worse than the stall it prevents, so a
+# watcher that has never SEEN a heartbeat reverts to waiting the old 300 s.
+_READ_TIMEOUT_SILENT_S = 300.0
+
+# Codes that arrive constantly and say nothing about a button. Heartbeat belongs
+# here for the same reason as the rest: it is the mechanism working, not news.
+_NOISY_CODES = ("VideoMotion", "AudioMutation", "TimeChange", "NTPAdjustTime", "Heartbeat")
+
 
 def parse_event_part(part: str) -> Optional[dict[str, Any]]:
     """Parse one multipart segment into {code, action, index, data}."""
@@ -67,6 +93,8 @@ def is_button_press(event: dict[str, Any]) -> bool:
     data = event.get("data") or {}
     if code == "_DoTalkAction_":
         return isinstance(data, dict) and data.get("Action") == "Invite"
+    if code == "Heartbeat":
+        return False  # explicit: the keepalive must never look like a press
     if code == "Invite":
         return action in ("start", "pulse")
     if code == "CallNoAnswered":
@@ -83,6 +111,10 @@ class DoorbellWatcher:
         self._on_press = on_press
         self._task: Optional[asyncio.Task] = None
         self._last_press = 0.0
+        # Sticky: set the first time this camera sends a keepalive, and never
+        # cleared. It is a fact about the FIRMWARE, so re-learning it on every
+        # reconnect would just re-run the slow probe forever.
+        self._heartbeat_seen = False
 
     def start(self) -> None:
         if self._task is None or self._task.done():
@@ -116,11 +148,19 @@ class DoorbellWatcher:
             backoff = min(backoff * 2, _BACKOFF_MAX_S)
 
     async def _attach_once(self) -> None:
-        timeout = httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=10.0)
+        # Short read timeout only once this camera has PROVEN it sends
+        # keepalives; until then a silence is not evidence of anything.
+        read_timeout = (
+            _READ_TIMEOUT_HEARTBEAT_S if self._heartbeat_seen else _READ_TIMEOUT_SILENT_S
+        )
+        timeout = httpx.Timeout(connect=10.0, read=read_timeout, write=10.0, pool=10.0)
         async with httpx.AsyncClient(
             auth=httpx.DigestAuth(self._username, self._password), timeout=timeout
         ) as client:
-            url = f"http://{self._ip}/cgi-bin/eventManager.cgi?action=attach&codes=[All]"
+            url = (
+                f"http://{self._ip}/cgi-bin/eventManager.cgi"
+                f"?action=attach&codes=[All]&heartbeat={_HEARTBEAT_S}"
+            )
             async with client.stream("GET", url) as resp:
                 if resp.status_code != 200:
                     log.warning(
@@ -146,7 +186,16 @@ class DoorbellWatcher:
         event = parse_event_part(part)
         if event is None:
             return
-        if event["code"] not in ("VideoMotion", "AudioMutation", "TimeChange", "NTPAdjustTime"):
+        if event["code"] == "Heartbeat":
+            if not self._heartbeat_seen:
+                self._heartbeat_seen = True
+                log.info(
+                    "doorbell %s: keepalives supported — a dead stream is now "
+                    "detected in ~%.0fs instead of %.0fs",
+                    self.name, _READ_TIMEOUT_HEARTBEAT_S, _READ_TIMEOUT_SILENT_S,
+                )
+            return
+        if event["code"] not in _NOISY_CODES:
             log.debug("doorbell %s: event %s action=%s", self.name, event["code"], event["action"])
         if not is_button_press(event):
             return
