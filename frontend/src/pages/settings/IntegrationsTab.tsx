@@ -91,6 +91,10 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
   // paste-a-blob path, kept because it needs no app registration at all.
   const [authMode, setAuthMode] = useState<'browser' | 'token'>('browser');
   const [redirectUri, setRedirectUri] = useState('');
+  // Non-empty when this page's origin cannot be used for browser sign-in at
+  // all — providers refuse a plain-http non-localhost redirect URI when it is
+  // REGISTERED, so this has to be said before an app is created.
+  const [oauthBlocked, setOauthBlocked] = useState('');
   const [signingIn, setSigningIn] = useState(false);
 
   // Re-sync from the server document (e.g. after a save echoes it back). A
@@ -147,9 +151,12 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
     if (!selectedProvider?.oauth) return;
     void (async () => {
       try {
-        setRedirectUri((await api.rcloneRedirectUri(window.location.origin)).redirect_uri);
+        const res = await api.rcloneRedirectUri(window.location.origin);
+        setRedirectUri(res.redirect_uri);
+        setOauthBlocked(res.blocked_reason || '');
       } catch {
         setRedirectUri('');
+        setOauthBlocked('');
       }
     })();
   }, [selectedProvider]);
@@ -553,7 +560,9 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
               </label>
             </div>
 
-            {authMode === 'browser' ? (
+            {authMode === 'browser' && oauthBlocked ? (
+              <p className="form-error">{oauthBlocked}</p>
+            ) : authMode === 'browser' ? (
               <>
                 <p>
                   {selectedProvider.label} sign-in finishes on this server, so no terminal
@@ -650,7 +659,7 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
                 <button
                   type="button"
                   className="btn btn-sm"
-                  disabled={!canBrowserSignIn}
+                  disabled={!canBrowserSignIn || !!oauthBlocked}
                   onClick={() => void startBrowserSignIn()}
                 >
                   {signingIn ? 'Opening…' : `Sign in to ${selectedProvider.label}`}

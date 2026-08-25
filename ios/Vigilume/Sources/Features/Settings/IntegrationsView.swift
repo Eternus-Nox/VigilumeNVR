@@ -77,6 +77,9 @@ struct IntegrationsView: View {
     /// on a desktop.
     @State private var authMode: AuthMode = .browser
     @State private var redirectUri = ""
+    /// Non-empty when this app reaches the server over plain http on a LAN
+    /// address, which providers refuse as a redirect URI.
+    @State private var oauthBlocked = ""
     @State private var signingIn = false
 
     enum AuthMode: String, CaseIterable { case browser, token }
@@ -493,7 +496,12 @@ struct IntegrationsView: View {
                         Task { await loadRedirectUri() }
                     }
 
-                    if authMode == .browser {
+                    if authMode == .browser, !oauthBlocked.isEmpty {
+                        Text(oauthBlocked)
+                            .font(.caption)
+                            .foregroundStyle(Theme.warning)
+                            .padding(.vertical, 2)
+                    } else if authMode == .browser {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("Sign-in finishes on the NVR itself, so nothing is needed on a computer. It does need its own free app on \(p.label)'s developer site — create one, add this exact redirect address to it, then paste its key and secret below.")
                                 .font(.caption)
@@ -576,7 +584,7 @@ struct IntegrationsView: View {
                             Spacer()
                         }
                     }
-                    .disabled(!canBrowserSignIn)
+                    .disabled(!canBrowserSignIn || !oauthBlocked.isEmpty)
                 } else {
                     Button {
                         Task { await createRemote() }
@@ -757,7 +765,13 @@ struct IntegrationsView: View {
 
     private func loadRedirectUri() async {
         guard let api = session.api, selectedProvider?.oauth == true else { return }
-        redirectUri = (try? await api.rcloneRedirectUri(origin: serverOrigin)) ?? ""
+        if let res = try? await api.rcloneRedirectUri(origin: serverOrigin) {
+            redirectUri = res.uri
+            oauthBlocked = res.blocked
+        } else {
+            redirectUri = ""
+            oauthBlocked = ""
+        }
     }
 
     private func startBrowserSignIn() async {

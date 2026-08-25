@@ -1605,7 +1605,7 @@ export const api = {
    * rather than built here so the callback path has one owner.
    */
   rcloneRedirectUri: (origin: string) =>
-    request<{ redirect_uri: string }>(
+    request<{ redirect_uri: string; blocked_reason: string }>(
       `/api/integrations/rclone/oauth/redirect-uri?origin=${encodeURIComponent(origin)}`,
     ),
 

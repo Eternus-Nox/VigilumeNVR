@@ -260,9 +260,18 @@ class OAuthStart(BaseModel):
 
 @router.get("/rclone/oauth/redirect-uri")
 async def rclone_oauth_redirect_uri(origin: str) -> dict[str, Any]:
-    """The exact string to paste into the provider's app settings."""
+    """The string to register, plus whether this origin can be used at all.
+
+    `blocked_reason` is the important half. Providers refuse a plain-http
+    non-localhost redirect URI at REGISTRATION time, so the UI has to say so
+    before the operator creates an app and pastes a URI the console will not
+    accept.
+    """
     try:
-        return {"redirect_uri": rclone_oauth.redirect_uri_for(origin)}
+        return {
+            "redirect_uri": rclone_oauth.redirect_uri_for(origin),
+            "blocked_reason": rclone_oauth.browser_auth_blocked(origin) or "",
+        }
     except OAuthError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

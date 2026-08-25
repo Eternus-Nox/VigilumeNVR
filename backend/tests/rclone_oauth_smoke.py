@@ -33,6 +33,7 @@ from app.native.rclone_oauth import (  # noqa: E402
     OAUTH_PROVIDERS,
     OAuthError,
     PendingFlows,
+    browser_auth_blocked,
     build_auth_url,
     code_challenge_for,
     redirect_uri_for,
@@ -65,13 +66,16 @@ def rejects(fn, *a, **kw) -> bool:
         return True
 
 
+# A LAN address over plain http — the case that CANNOT do browser sign-in.
 ORIGIN = "http://192.168.1.45:8080"
+# The same box over the repo's `tls` profile, which can.
+SECURE_ORIGIN = "https://192.168.1.45:8443"
 
 
 def a_flow(name: str = "dropbox", type_: str = "dropbox"):
     return start_flow(
         remote_name=name, type_=type_, client_id="APPKEY",
-        client_secret="APPSECRET", origin=ORIGIN,
+        client_secret="APPSECRET", origin=SECURE_ORIGIN,
     )
 
 
@@ -80,7 +84,7 @@ def main() -> int:
 
     # --- the redirect URI the operator registers ---------------------------
     check(
-        redirect_uri_for(ORIGIN) == f"{ORIGIN}{CALLBACK_PATH}",
+        redirect_uri_for(SECURE_ORIGIN) == f"{SECURE_ORIGIN}{CALLBACK_PATH}",
         f"the redirect URI is the origin plus one fixed path ({CALLBACK_PATH})",
     )
     check(validate_origin("http://192.168.1.45:8080/") == ORIGIN, "a trailing slash is trimmed")
@@ -93,11 +97,45 @@ def main() -> int:
         "that never matches the registered one, failing opaquely at the provider",
     )
 
+    # --- the SCHEME rule, which PKCE does not rescue ------------------------
+    # Dropbox's console: "Non-local OAuth 2 redirect URIs may not start with
+    # http:". The URI is refused at REGISTRATION, so no request can succeed —
+    # this must be caught before an operator creates an app.
+    check(
+        browser_auth_blocked("https://192.168.1.45:8443") is None,
+        "an https origin is usable for browser sign-in",
+    )
+    check(
+        browser_auth_blocked("http://localhost:8080") is None
+        and browser_auth_blocked("http://127.0.0.1:8080") is None,
+        "and so is a localhost http one — providers exempt local addresses",
+    )
+    blocked = browser_auth_blocked(ORIGIN)
+    check(
+        blocked is not None,
+        "but a plain-http LAN address is BLOCKED — the provider would refuse to "
+        "register it, and PKCE does not change that",
+    )
+    check(
+        "https" in (blocked or "") and "8443" in (blocked or ""),
+        "and the reason names the way out (browse over HTTPS on 8443)",
+    )
+    check(
+        "Paste a token" in (blocked or "") and "B2" in (blocked or ""),
+        "as well as the two alternatives that work over plain http today",
+    )
+    check(
+        rejects(start_flow, remote_name="d", type_="dropbox", client_id="k",
+                client_secret="s", origin=ORIGIN),
+        "starting a flow from a blocked origin is REFUSED here, not at the "
+        "provider after an app has already been created",
+    )
+
     # --- starting a flow ----------------------------------------------------
     check(rejects(a_flow, "x", "s3"), "a key-based provider has no browser flow")
     check(
         rejects(start_flow, remote_name="d", type_="dropbox", client_id="",
-                client_secret="s", origin=ORIGIN),
+                client_secret="s", origin=SECURE_ORIGIN),
         "a missing app key is refused before the browser is sent anywhere",
     )
     flow = a_flow()

@@ -28,17 +28,29 @@ redirects a browser, carrying no Authorization header):
   * A callback for an unknown state is indistinguishable from an expired one on
     purpose — the response says "start again", not "that state was wrong".
 
-PKCE (RFC 7636) IS NOT OPTIONAL HERE, and not merely for defence in depth.
-Dropbox refuses outright:
+PLAIN HTTP DOES NOT WORK, AND PKCE DOES NOT RESCUE IT. This was learned the
+expensive way. Dropbox's authorize endpoint reports:
 
     Invalid redirect_uri. When response_type=code without PKCE, only localhost
     URIs can start with "http://"; all others must start with "https://".
 
-An NVR on a LAN is reached at `http://192.168.1.45:8080` — plain HTTP, not
-localhost — so the whole in-browser flow depends on presenting a code
-challenge. Which is the right rule: without PKCE, anyone who could observe the
-redirect on an unencrypted hop could replay the code. With it, the code is
-useless without the verifier, which never leaves this server.
+which reads as "add PKCE and http is fine". It is not: Dropbox's app console
+REFUSES TO SAVE the URI in the first place —
+
+    Non-local OAuth 2 redirect URIs may not start with "http:" or "javascript:"
+
+— so the URI is never registered and the authorize request is rejected no
+matter what the request carries. Google and Microsoft enforce the same rule.
+PKCE is still sent (it is required, and it is right), but the binding
+constraint is the SCHEME: browser sign-in needs an https:// origin, or a
+localhost one.
+
+That is a solved problem in this repo rather than a dead end — the `tls`
+compose profile runs Caddy with `tls internal`, so browsing
+https://<box>:8443 makes the origin secure and the redirect URI acceptable.
+`browser_auth_blocked` below detects the unusable case and says exactly that,
+because discovering it at the provider's console (as happened) is a miserable
+way to find out.
 """
 
 from __future__ import annotations
@@ -195,6 +207,39 @@ def validate_origin(origin: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
+# Hosts a provider treats as "local", where plain http is still permitted.
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]", "::1"})
+
+
+def browser_auth_blocked(origin: str) -> Optional[str]:
+    """Why browser sign-in cannot work from this origin, or None if it can.
+
+    The rule is the providers', not ours: a redirect URI must be https, or a
+    localhost http one. A LAN address over plain http fails at REGISTRATION, so
+    it must be caught here — the alternative is the operator creating an app,
+    pasting a URI the console silently refuses, and getting an error about
+    something else entirely.
+    """
+    try:
+        cleaned = validate_origin(origin)
+    except OAuthError as exc:
+        return str(exc)
+    parsed = urlparse(cleaned)
+    if parsed.scheme == "https":
+        return None
+    host = (parsed.hostname or "").lower()
+    if host in _LOCAL_HOSTS:
+        return None
+    return (
+        f"Cloud providers only accept a sign-in redirect over https (or "
+        f"localhost), and this page is {cleaned}. Browse Vigilume over HTTPS "
+        f"and try again \u2014 enable the `tls` compose profile and use "
+        f"https://<your-box>:8443. Or use \u201cPaste a token\u201d below, "
+        f"which has no such restriction, or pick a provider that needs no "
+        f"browser sign-in at all (Backblaze B2, S3)."
+    )
+
+
 def redirect_uri_for(origin: str) -> str:
     return validate_origin(origin) + CALLBACK_PATH
 
@@ -241,6 +286,12 @@ def start_flow(
     client_secret = (client_secret or "").strip()
     if not client_id or not client_secret:
         raise OAuthError("Paste the app key and app secret from the provider first.")
+    # Refuse BEFORE sending anyone to the provider: the failure would otherwise
+    # surface there, blamed on redirect_uri, after the operator had already
+    # created an app and pasted credentials.
+    blocked = browser_auth_blocked(origin)
+    if blocked:
+        raise OAuthError(blocked)
     return Pending(
         state=secrets.token_urlsafe(32),
         remote_name=remote_name,

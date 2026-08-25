@@ -627,13 +627,20 @@ struct APIClient: Sendable {
     /// ADMIN: GET /api/integrations/rclone/oauth/redirect-uri — the exact
     /// string to register on the provider's app, derived from the address this
     /// app reaches the server on.
-    func rcloneRedirectUri(origin: String) async throws -> String {
-        struct Wrapper: Decodable { let redirectUri: String }
+    /// Returns the URI to register AND why browser sign-in is impossible from
+    /// this origin (empty when it is fine). Providers refuse a plain-http
+    /// non-localhost redirect URI at registration, so the reason has to reach
+    /// the operator before they create an app.
+    func rcloneRedirectUri(origin: String) async throws -> (uri: String, blocked: String) {
+        struct Wrapper: Decodable {
+            let redirectUri: String
+            let blockedReason: String?
+        }
         let w: Wrapper = try await get(
             "api/integrations/rclone/oauth/redirect-uri",
             query: [URLQueryItem(name: "origin", value: origin)]
         )
-        return w.redirectUri
+        return (w.redirectUri, w.blockedReason ?? "")
     }
 
     /// ADMIN: POST /api/integrations/rclone/oauth/start — begin a browser
