@@ -374,6 +374,21 @@ DEFAULT_SETTINGS: dict = {
         # once the event ends). Raise it for scenes with cover — cars behind a
         # hedge, someone stepping out of frame and back.
         "absence_timeout_s": 5,
+        # NIGHT CONTRAST BOOST for the detector's input frame only (see
+        # native/enhance.py). For a camera run WITHOUT IR, where the scene is
+        # dim rather than dark and the model has little to work with.
+        #
+        #   off    — the model sees exactly what the camera sent (default)
+        #   auto   — boost only frames measured darker than the threshold
+        #   always — boost every frame, to A/B against off
+        #
+        # Off by default deliberately: D-FINE was trained on ordinary images, so
+        # changing the input distribution can help OR hurt depending on camera,
+        # scene and light. It never touches recordings, clips, live view or the
+        # event snapshot — only what inference sees.
+        "night_boost": "off",
+        # Mean luma (0-255) below which `auto` treats a frame as night.
+        "night_boost_threshold": 60,
     },
     # Optional nightly copy of EVENT media (clips + snapshots) to cloud storage,
     # one folder per local day: <remote>/2026-08-25/<event id>.mp4|.jpg

@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 import numpy as np
 
 from ..config import effective_detect_mode
+from .enhance import maybe_boost, settings_for as night_boost_settings
 from .engine import observations_from_supervision
 from .streams import resolve_urls, sub_stream_name
 
@@ -281,6 +282,9 @@ class IngestManager:
         self._worker_task: Optional[asyncio.Task] = None
         self._supervisor_task: Optional[asyncio.Task] = None
         self._detect_error_logged: dict[str, float] = {}
+        # Rate-limits the "night boost active" line to once per camera per 5 min
+        # — it is a state, not an event, and one line per frame is noise.
+        self._boost_logged: dict[str, float] = {}
         # Monotonic time each source last delivered a FRESH frame to the worker.
         # Drives the empty-observation heartbeat: a source stale for longer than
         # HEARTBEAT_TICK_S gets ticked so its open events end by absence.
@@ -578,9 +582,24 @@ class IngestManager:
         # live-snapshot cache / fps stats / absence-based event ending keep working
         # exactly as an empty-observation heartbeat would.
         if detector.ready and self._should_infer(name, cam):
+            # Optional night contrast boost, on a COPY handed only to inference.
+            # `frame` itself is passed to the engine untouched below, so the
+            # event snapshot stays what the camera actually sent — the archive
+            # is evidence, and a detection aid must not rewrite it.
+            # `self._settings` is optional here (see _is_private) — a None store
+            # must mean "no boost", not an AttributeError on every frame.
+            mode, dark_threshold = night_boost_settings(
+                self._settings.detection if self._settings is not None else {}
+            )
+            detect_frame, boosted = maybe_boost(
+                frame, mode=mode, dark_threshold=dark_threshold
+            )
+            if boosted and time.monotonic() - self._boost_logged.get(name, 0.0) > 300.0:
+                self._boost_logged[name] = time.monotonic()
+                log.info("night boost active on %s (mode=%s)", name, mode)
             try:
                 detections = await asyncio.wait_for(
-                    asyncio.to_thread(detector.detect, frame, width, height),
+                    asyncio.to_thread(detector.detect, detect_frame, width, height),
                     timeout=DETECT_TIMEOUT_S,
                 )
                 tracker = self._trackers.get(name)

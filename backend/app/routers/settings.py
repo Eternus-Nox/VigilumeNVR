@@ -272,6 +272,12 @@ class DetectionSettings(BaseModel):
     # clip is not cut until the event ends, and an event that never closes is
     # an event whose footage never arrives.
     absence_timeout_s: int = Field(default=5, ge=1, le=300)
+    # Night contrast boost on the DETECTOR's frame only — never on recordings,
+    # clips, live view or the event snapshot. See native/enhance.py for the two
+    # honest limits (it cannot create signal in a black frame, and the model was
+    # not trained on boosted images).
+    night_boost: Literal["off", "auto", "always"] = "off"
+    night_boost_threshold: int = Field(default=60, ge=0, le=255)
 
 
 class AutoRestartSettings(BaseModel):
