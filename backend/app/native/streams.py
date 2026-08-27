@@ -73,7 +73,19 @@ _PORT_SUFFIX_RE = re.compile(r":\d{1,5}$")
 # LAN IP itself. These helpers derive a host candidate WITHOUT the operator
 # hand-entering one, layered by trust: env override -> PUBLIC_URL IP literal ->
 # auto-derived default-route LAN IPv4. All are best-effort and never raise; the
-# manual settings.system.webrtc_candidates + a stun entry are always kept too.
+# manual settings.system.webrtc_candidates are always kept too. A `stun:` entry
+# is added ONLY when system.public_url is set — see _wants_stun: a LAN-only box
+# would otherwise wait on an outbound STUN lookup it can never use, and cannot
+# answer at all with no internet.
+
+
+def _wants_stun(settings: dict[str, Any]) -> bool:
+    """Whether public-address discovery is worth an outbound STUN lookup.
+
+    True only when ``system.public_url`` is set — the operator's declaration
+    that this NVR is reached from outside the LAN. See the call site.
+    """
+    return bool(str((settings.get("system") or {}).get("public_url") or "").strip())
 
 
 def _is_docker_bridge_ipv4(ip: str) -> bool:
@@ -242,16 +254,18 @@ def webrtc_status(settings: dict[str, Any]) -> dict[str, Any]:
 
     Returns:
       candidates   — full list handed to go2rtc: manual entries + the derived
-                     host candidate + ``stun:<port>``, deduped, order-stable.
+                     host candidate, deduped, order-stable, plus ``stun:<port>``
+                     when (and only when) system.public_url is set.
       ready        — True when at least one HOST candidate exists (manual OR
-                     derived); False means WebRTC has only STUN and will almost
-                     certainly fall back to MSE on the LAN.
+                     derived); False means WebRTC has no LAN candidate and will
+                     almost certainly fall back to MSE.
       detected_ip  — best host to pre-fill the UI's "use detected IP" button
                      (bare host, no port), or None.
       source       — where detected_ip came from ("env"|"public_url"|"auto"|
                      "observed" = learned from a LAN client's Host header) or None.
 
-    Never raises — a detection failure degrades to stun-only + ready:false."""
+    Never raises — a detection failure degrades to no host candidate and
+    ready:false."""
     manual = [
         str(c).strip()
         for c in ((settings.get("system") or {}).get("webrtc_candidates") or [])
@@ -267,9 +281,29 @@ def webrtc_status(settings: dict[str, Any]) -> dict[str, Any]:
         host_candidate = _host_to_candidate(host)
         if host_candidate not in candidates:
             candidates.append(host_candidate)
-    stun = f"stun:{WEBRTC_PORT}"
-    if stun not in candidates:
-        candidates.append(stun)
+    # STUN ONLY WHEN THE INSTALL IS ACTUALLY REACHABLE FROM OUTSIDE.
+    #
+    # `stun:<port>` asks go2rtc to discover this box's PUBLIC address, which
+    # means an outbound round-trip to a public STUN server. On a LAN-only NVR
+    # that address is useless — every viewer reaches it by the host candidate
+    # above — and with no internet at all the lookup can only time out. An
+    # appliance whose whole job is recording the house must not spend its live
+    # -view setup waiting on the internet to answer, so the cost is only paid
+    # where the answer can be used.
+    #
+    # `public_url` is the signal: it is how an operator declares this NVR is
+    # reachable from off-LAN. Empty means LAN-only, and STUN is dropped. A
+    # remote install is unchanged. (Manual candidates are NOT the signal — the
+    # documented use for them is the box's own LAN and Tailscale addresses.)
+    # `not candidates` keeps STUN as the LAST RESORT it always was: when host
+    # detection found nothing, a possibly-useless candidate still beats an empty
+    # list. What is dropped is only the case that motivated this — a LAN-only
+    # box that ALREADY has a working host candidate, where STUN adds an
+    # outbound wait and nothing else.
+    if _wants_stun(settings) or not candidates:
+        stun = f"stun:{WEBRTC_PORT}"
+        if stun not in candidates:
+            candidates.append(stun)
 
     return {
         "candidates": candidates,
@@ -362,7 +396,8 @@ def build_config(cameras: list[dict[str, Any]], settings: dict[str, Any]) -> dic
     """go2rtc YAML config as a dict (api/rtsp/webrtc listeners + streams).
 
     WebRTC candidates are the manual settings entries + a best-effort derived
-    host candidate (env / PUBLIC_URL / auto LAN IP) + stun — see webrtc_status.
+    host candidate (env / PUBLIC_URL / auto LAN IP), plus stun only when a
+    public_url is configured — see webrtc_status.
     """
     candidates = webrtc_status(settings)["candidates"]
 

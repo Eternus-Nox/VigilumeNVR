@@ -1892,7 +1892,12 @@ def webrtc_candidate_checks() -> None:
 
         # --- manual candidates present: ready even without a derived host ---
         st = webrtc_status(base_settings(["10.0.0.5:8555"]))
-        check(st["candidates"] == ["10.0.0.5:8555", stun], "manual candidate + stun, order-stable")
+        check(
+            st["candidates"] == ["10.0.0.5:8555"],
+            "manual candidate, NO stun — a LAN-only box (no public_url) has a "
+            "working host candidate, so a public-address lookup is an outbound "
+            "wait it can never use, and cannot answer at all offline",
+        )
         check(st["ready"] is True, "a manual candidate makes WebRTC ready")
         check(st["detected_ip"] is None and st["source"] is None,
               "manual-only readiness reports no auto-detected host")
@@ -1916,16 +1921,37 @@ def webrtc_candidate_checks() -> None:
         # env host already present in the manual list -> no duplicate
         os.environ[env_key] = "192.168.1.10"
         st = webrtc_status(base_settings(["192.168.1.10:8555"]))
-        check(st["candidates"] == ["192.168.1.10:8555", stun],
+        check(st["candidates"] == ["192.168.1.10:8555"],
               "derived host equal to a manual entry is de-duplicated")
 
         # --- (b) auto-derived LAN IPv4 used when no env/public url ---
         os.environ.pop(env_key, None)
         streams_module._auto_lan_ipv4 = lambda: "192.168.7.7"
         st = webrtc_status(base_settings())
-        check(st["candidates"] == ["192.168.7.7:8555", stun]
+        check(st["candidates"] == ["192.168.7.7:8555"]
               and st["ready"] is True and st["source"] == "auto",
               "auto-derived LAN IPv4 appended as a host candidate (source=auto)")
+
+        # --- STUN is conditional: an offline LAN box must not wait on it -----
+        streams_module._auto_lan_ipv4 = lambda: "192.168.7.7"
+        st = webrtc_status(base_settings(public_url="https://nvr.example.com"))
+        check(
+            stun in st["candidates"],
+            "a PUBLIC_URL install still gets stun — it is reachable from "
+            "outside, so discovering the public address is worth the lookup",
+        )
+        st = webrtc_status(base_settings())
+        check(
+            stun not in st["candidates"],
+            "the same box with no public_url does not, because every viewer "
+            "reaches it by the host candidate",
+        )
+        streams_module._auto_lan_ipv4 = lambda: None
+        check(
+            webrtc_status(base_settings())["candidates"] == [stun],
+            "but with NO host candidate at all, stun remains the last resort "
+            "it always was — a possibly-useless candidate beats an empty list",
+        )
 
         # a docker-bridge auto result is already filtered inside _auto_lan_ipv4;
         # simulate that filter returning None -> falls through to stun-only.
