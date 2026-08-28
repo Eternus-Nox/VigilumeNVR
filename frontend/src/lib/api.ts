@@ -1115,6 +1115,35 @@ export interface DetectorStatus {
   model_sha_ok: boolean | null;
   last_inference_ms: number | null;
   per_camera: DetectorCameraStatus[];
+  /**
+   * What is ENCODING video, which is a different GPU question from what runs
+   * inference. Detection is CUDA-only, so an AMD/Intel iGPU can never do it —
+   * but it can do the HEVC→H.264 transcode, and this is the only place that
+   * says whether it is. Optional: absent on a backend predating the field.
+   */
+  transcode?: TranscodeStatus;
+}
+
+/** GET /api/system/detector → `transcode`. */
+export interface TranscodeStatus {
+  /** ffmpeg + ffprobe both present. False means nothing can transcode at all. */
+  enabled: boolean;
+  /** `h264_nvenc` | `h264_vaapi` | `libx264`, or null when unavailable. */
+  encoder: string | null;
+  encoder_label: string;
+  /** The headline: is a GPU encoding, or is this the CPU? */
+  hardware: boolean;
+  /**
+   * The DRI render node in use. `null` on an AMD/Intel box almost always means
+   * `VAAPI_DEVICE` is unset in the server's `.env`, so the container cannot see
+   * the iGPU — not that the box has no GPU.
+   */
+  vaapi_device: string | null;
+  nvidia: boolean;
+  /** Encoders that failed at RUNTIME and were permanently demoted. */
+  failed: string[];
+  /** Completed transcodes per encoder — the evidence behind `hardware`. */
+  runs: Record<string, { ok: number; failed: number }>;
 }
 
 // ---------- Recordings (24/7 continuous footage — the timeline source) ----------

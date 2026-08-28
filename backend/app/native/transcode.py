@@ -43,7 +43,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 log = logging.getLogger(__name__)
 
@@ -394,6 +394,12 @@ class Transcoder:
         self._failed_encoders: set[str] = set()
         self._inflight: dict[str, asyncio.Future] = {}
         self._codec_inflight: dict[str, asyncio.Future] = {}
+        # Completed transcodes per encoder: {encoder: [ok, failed]}. The point
+        # is the gap between SELECTED and WORKING — "we picked h264_vaapi" and
+        # "the iGPU actually produced frames" are different claims, and only the
+        # second one answers "is my GPU doing anything". Counted here rather
+        # than inferred from logs so the status endpoint can just say it.
+        self._runs: dict[str, list[int]] = {}
 
     @property
     def enabled(self) -> bool:
@@ -656,6 +662,7 @@ class Transcoder:
             encoder, what, camera, source_codec or "?",
         )
         rc, _, err = await self._run(args_for(encoder), timeout=timeout)
+        self._note_run(encoder, rc == 0)
         if rc == 0:
             return True
         if encoder in HW_ENCODERS:
@@ -668,6 +675,7 @@ class Transcoder:
                 "transcode: %s %s camera=%s (%s retry)", retry, what, camera, encoder,
             )
             rc, _, err = await self._run(args_for(retry), timeout=timeout)
+            self._note_run(retry, rc == 0)
             if rc == 0:
                 return True
         if err:
@@ -676,6 +684,55 @@ class Transcoder:
                 what, camera, err.decode("utf-8", "replace").strip()[-300:],
             )
         return False
+
+    def _note_run(self, encoder: str, ok: bool) -> None:
+        tally = self._runs.setdefault(encoder, [0, 0])
+        tally[0 if ok else 1] += 1
+
+    async def status(self) -> dict[str, Any]:
+        """What is actually encoding video, for GET /api/system/detector.
+
+        Answers the question an operator with an iGPU actually has — "is my GPU
+        doing anything?" — which log-reading answers badly and nothing else
+        answered at all.
+
+        It AWAITS the encoder selection rather than reporting "not probed yet".
+        The probe is a single `ffmpeg -encoders` run, cached for the life of the
+        process, and it is the same one the first timeline seek would trigger —
+        so asking here costs one probe and gives a real answer instead of a
+        shrug.
+
+        `hardware` is the headline. `runs` is the evidence behind it: an encoder
+        can be SELECTED and still never have produced a frame, and one that was
+        selected and then failed at runtime shows up in `failed` — which is the
+        case that would otherwise silently drop a box back to CPU with nobody
+        the wiser.
+        """
+        if not self.enabled:
+            return {
+                "enabled": False,
+                "encoder": None,
+                "encoder_label": "ffmpeg not available",
+                "hardware": False,
+                "vaapi_device": self._vaapi_device,
+                "nvidia": self._nvidia_present,
+                "failed": [],
+                "runs": {},
+            }
+        enc = await self.encoder()
+        return {
+            "enabled": True,
+            "encoder": enc,
+            "encoder_label": _ENCODER_LABEL.get(enc, enc),
+            "hardware": enc in HW_ENCODERS,
+            # None here means no DRI render node is visible INSIDE the
+            # container — on an AMD/Intel box that is nearly always a missing
+            # VAAPI_DEVICE in .env rather than a missing GPU.
+            "vaapi_device": self._vaapi_device,
+            "nvidia": self._nvidia_present,
+            "failed": sorted(self._failed_encoders),
+            "runs": {k: {"ok": v[0], "failed": v[1]} for k, v in self._runs.items()},
+        }
 
     # ---- on-disk LRU helpers ----
 

@@ -885,6 +885,76 @@ async def _real_ffmpeg_cases(ffmpeg: str, ffprobe: str) -> None:
     check(_probe_vcodec(ffprobe, clip) == "h264", "REAL: transcoded clip is H.264")
 
 
+def gpu_status_checks() -> None:
+    """Transcoder.status() — the answer to "is my iGPU actually doing anything?"
+
+    This exists because that question had NO answer short of grepping container
+    logs, and on an AMD/Intel box it is the only GPU question with a hopeful
+    answer: D-FINE inference is CUDA-only, so an iGPU can never do detection,
+    but it can do the HEVC->H.264 transcode.
+    """
+    print("9. GPU/transcode status reporting")
+    from app.native.transcode import HW_ENCODERS, LIBX264, VAAPI
+
+    listing = " V....D h264_vaapi   H.264/AVC (VAAPI) (codec h264)\n V....D libx264 x264"
+
+    async def cases() -> None:
+        # No render node inside the container — the usual AMD/Intel case when
+        # VAAPI_DEVICE is not set in .env. The GPU exists; the container cannot
+        # see it.
+        cpu = Transcoder(cache_dir="/tmp/vgstat", ffmpeg="/bin/ffmpeg",
+                         ffprobe="/bin/ffprobe", vaapi_device=None, nvidia_present=False)
+        cpu._encoders_listing = listing
+        st = await cpu.status()
+        check(st["encoder"] == LIBX264 and st["hardware"] is False,
+              "no DRI render node -> libx264, and hardware is reported FALSE")
+        check(st["vaapi_device"] is None,
+              "with vaapi_device null — which is what says 'the container cannot "
+              "see a GPU', as opposed to 'this box has none'")
+
+        # Render node present: VAAPI is selected.
+        gpu = Transcoder(cache_dir="/tmp/vgstat", ffmpeg="/bin/ffmpeg",
+                         ffprobe="/bin/ffprobe", vaapi_device="/dev/dri/renderD128",
+                         nvidia_present=False)
+        gpu._encoders_listing = listing
+        st = await gpu.status()
+        check(st["encoder"] == VAAPI and st["hardware"] is True,
+              "a render node + an ffmpeg that has h264_vaapi -> hardware encoding")
+        check(st["encoder_label"] == "GPU VAAPI" and st["vaapi_device"].endswith("renderD128"),
+              "and the status names the encoder and the node it runs on")
+        check(st["runs"] == {},
+              "with an EMPTY run tally — selected is not the same claim as working")
+
+        gpu._note_run(VAAPI, True)
+        gpu._note_run(VAAPI, True)
+        gpu._note_run(VAAPI, False)
+        st = await gpu.status()
+        check(st["runs"][VAAPI] == {"ok": 2, "failed": 1},
+              "after real transcodes the tally is the EVIDENCE that the GPU ran")
+
+        # The case that would otherwise be invisible: VAAPI was chosen, then
+        # failed at runtime, and the box quietly went back to the CPU.
+        gpu.mark_hw_failed(VAAPI)
+        st = await gpu.status()
+        check(st["encoder"] == LIBX264 and st["hardware"] is False,
+              "a runtime hardware failure demotes to libx264...")
+        check(st["failed"] == [VAAPI],
+              "...and `failed` names it, so a box that silently stopped using "
+              "its GPU says so instead of just being mysteriously slower")
+
+        # ffmpeg genuinely absent (empty string, NOT None — None means autodetect).
+        off = Transcoder(cache_dir="/tmp/vgstat", ffmpeg="", ffprobe="",
+                         vaapi_device="/dev/dri/renderD128", nvidia_present=False)
+        st = await off.status()
+        check(st["enabled"] is False and st["hardware"] is False,
+              "no ffmpeg at all -> enabled False, and it still answers rather "
+              "than raising on a health endpoint")
+
+        check(VAAPI in HW_ENCODERS, "VAAPI counts as hardware for the headline flag")
+
+    asyncio.run(cases())
+
+
 def main() -> None:
     codec_branch_checks()
     arg_builder_checks()
@@ -894,6 +964,7 @@ def main() -> None:
     clip_concurrency_checks()
     failure_checks()
     real_ffmpeg_checks()
+    gpu_status_checks()
     print(f"\nALL {PASS} CHECKS PASSED (HEVC->H.264 transcode: probe/encoder/cache/clip)")
 
 

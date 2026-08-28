@@ -230,7 +230,36 @@ async def detector_status(request: Request) -> dict:
         status["model_state"] = None
         status["model_progress_pct"] = 0
     status["per_camera"] = _per_camera_health(state)
+    # What is actually ENCODING video, which is a different GPU question from
+    # what is running inference. On an AMD/Intel box they have different
+    # answers — D-FINE runs on CUDA only, so an iGPU can never do detection,
+    # but it can absolutely do the HEVC->H.264 transcode. Reporting only the
+    # detector's device left "is my iGPU doing anything?" unanswerable.
+    status["transcode"] = await _transcode_status(state)
     return status
+
+
+async def _transcode_status(state) -> dict:
+    """Transcoder.status(), or a shaped stand-in. Never raises and never 500s
+    the health endpoint over a transcoder that is missing or wedged: a status
+    call that dies is worse than one that says it does not know."""
+    recorder = getattr(state, "recorder", None)
+    transcoder = getattr(recorder, "transcoder", None) if recorder is not None else None
+    if transcoder is None:
+        return {
+            "enabled": False, "encoder": None, "encoder_label": "no transcoder",
+            "hardware": False, "vaapi_device": None, "nvidia": False,
+            "failed": [], "runs": {},
+        }
+    try:
+        return await transcoder.status()
+    except Exception:  # noqa: BLE001
+        log.exception("transcode status probe failed")
+        return {
+            "enabled": True, "encoder": None, "encoder_label": "probe failed",
+            "hardware": False, "vaapi_device": None, "nvidia": False,
+            "failed": [], "runs": {},
+        }
 
 
 def _per_camera_health(state) -> list:

@@ -284,6 +284,62 @@ export default function SystemTab({ settings, onDraftChange, pending }: TabProps
                 <span className="pill">inference: {detector.last_inference_ms.toFixed(1)} ms</span>
               )}
             </div>
+            {detector.transcode && (
+              <>
+                {/* A SEPARATE line from the detector pills on purpose: these are
+                    two different GPU questions with two different answers on an
+                    AMD/Intel box, and merging them is how "my GPU works" and
+                    "my GPU does nothing for detection" both end up sounding
+                    true at once. */}
+                <p className="detector-active" style={{ marginTop: '0.9rem' }}>
+                  Video encoding:{' '}
+                  <strong>{detector.transcode.encoder_label}</strong>
+                </p>
+                <div className="row-inline wrap">
+                  <span
+                    className={`pill ${detector.transcode.hardware ? 'pill-ok' : ''}`}
+                  >
+                    {detector.transcode.hardware ? 'GPU' : 'CPU'}
+                  </span>
+                  {detector.transcode.encoder && (
+                    <span className="pill">{detector.transcode.encoder}</span>
+                  )}
+                  {detector.transcode.vaapi_device && (
+                    <span className="pill">{detector.transcode.vaapi_device}</span>
+                  )}
+                  {Object.entries(detector.transcode.runs).map(([enc, r]) => (
+                    <span key={enc} className="pill">
+                      {enc}: {r.ok} ok{r.failed ? `, ${r.failed} failed` : ''}
+                    </span>
+                  ))}
+                  {detector.transcode.failed.map((f) => (
+                    <span key={f} className="pill pill-down">
+                      {f} failed at runtime
+                    </span>
+                  ))}
+                </div>
+                {!detector.transcode.hardware &&
+                  detector.transcode.enabled &&
+                  !detector.transcode.vaapi_device &&
+                  !detector.transcode.nvidia && (
+                    <p className="muted small">
+                      No GPU render node is visible inside the container, so HEVC→H.264
+                      runs on the CPU. If this box has an AMD or Intel iGPU, add{' '}
+                      <code>VAAPI_DEVICE=/dev/dri/renderD128</code> to the server&rsquo;s{' '}
+                      <code>.env</code> (check <code>ls /dev/dri</code> first) and run{' '}
+                      <code>docker compose up -d backend</code>. This only affects video
+                      encoding — object detection needs CUDA and never uses an iGPU.
+                    </p>
+                  )}
+                {Object.keys(detector.transcode.runs).length === 0 && (
+                  <p className="muted small">
+                    Nothing has been transcoded yet, so this is the encoder that{' '}
+                    <em>would</em> be used. Scrub an HEVC camera&rsquo;s timeline, then
+                    press Refresh to see it actually run.
+                  </p>
+                )}
+              </>
+            )}
             {detector.per_camera.length > 0 && (
               <table className="detector-table">
                 <thead>
