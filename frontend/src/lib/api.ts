@@ -318,6 +318,13 @@ export interface Camera {
   include_zones?: IncludeZone[];
   /** Boundaries whose crossings are counted. Optional for the same reason. */
   cross_lines?: CrossLine[];
+  /**
+   * Only send a notification once something crosses one of this camera's lines.
+   * Gates the ALERT only — the event, its clip and its snapshot are recorded
+   * either way — and it is ignored entirely when no lines are drawn, so it can
+   * never silently mute a camera.
+   */
+  notify_on_cross?: boolean;
   detect: { enabled: boolean };
   record: { enabled: boolean };
   /**
@@ -394,6 +401,8 @@ export interface CameraInput {
    */
   include_zones?: IncludeZone[];
   cross_lines?: CrossLine[];
+  /** Alert only on a line crossing; omitted = keep server value. */
+  notify_on_cross?: boolean;
   /** Optional per-camera engine toggles; omitted = keep server value. */
   detect_enabled?: boolean;
   record_enabled?: boolean;

@@ -66,6 +66,7 @@ const EMPTY_FORM: CameraInput = {
   exempt_zones: [],
   include_zones: [],
   cross_lines: [],
+  notify_on_cross: false,
   detect_fps: DEFAULT_DETECT_FPS,
   // Omitted (undefined) so a new camera inherits the global default_mode
   // (Camera-triggered) instead of being pinned to Server. The mode control
@@ -183,6 +184,7 @@ export default function CamerasTab() {
         start: [l.start[0], l.start[1]] as [number, number],
         end: [l.end[0], l.end[1]] as [number, number],
       })),
+      notify_on_cross: cam.notify_on_cross ?? false,
       detect_fps: cam.detect_fps ?? DEFAULT_DETECT_FPS,
       detect_mode: cam.detect_mode ?? 'always',
       main_url: cam.main_url ?? '',
@@ -582,6 +584,7 @@ export default function CamerasTab() {
                   exempt={editing.exempt_zones ?? []}
                   include={editing.include_zones ?? []}
                   lines={editing.cross_lines ?? []}
+                  notifyOnCross={editing.notify_on_cross ?? false}
                   onChange={(next) => setEditing({ ...editing, ...next })}
                 />
                 {/* Explainer sits UNDER the picture — keeps the frame the first
@@ -722,16 +725,19 @@ function DetectionGeometryEditor({
   exempt,
   include,
   lines,
+  notifyOnCross,
   onChange,
 }: {
   cameraName: string;
   exempt: ExemptZone[];
   include: IncludeZone[];
   lines: CrossLine[];
+  notifyOnCross: boolean;
   onChange: (next: {
     exempt_zones?: ExemptZone[];
     include_zones?: IncludeZone[];
     cross_lines?: CrossLine[];
+    notify_on_cross?: boolean;
   }) => void;
 }) {
   const [snapUrl, setSnapUrl] = useState<string | null>(null);
@@ -996,6 +1002,27 @@ function DetectionGeometryEditor({
                 </li>
               ))}
             </ul>
+          )}
+          {/* Only offered once a line exists. The backend ignores this flag on a
+              camera with no lines (it fails open rather than muting the camera),
+              and showing a toggle that does nothing would be a worse way to say
+              the same thing. */}
+          {lines.length > 0 && (
+            <>
+              <label className="row-label">
+                <input
+                  type="checkbox"
+                  checked={notifyOnCross}
+                  onChange={(e) => onChange({ notify_on_cross: e.target.checked })}
+                />
+                Only notify me when a line is crossed
+              </label>
+              <p className="muted small">
+                A much sharper trigger than &ldquo;a person appeared in frame&rdquo;. The
+                event, its clip and its snapshot are still recorded either way — this only
+                holds back the alert until something actually crosses.
+              </p>
+            </>
           )}
         </>
       ) : (

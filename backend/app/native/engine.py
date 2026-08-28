@@ -903,6 +903,11 @@ class DetectionEngine:
             # this is the geometry that actually did the filtering/counting for
             # THIS event, even if the operator has since redrawn it.
             "include_zones": zonelib.zone_geometry(cam.include_zones) if cam else [],
+            # "Only alert on a crossing" for this camera, carried on the payload
+            # rather than re-read by the pipeline: this is the setting that was
+            # in force for THIS event, and it costs the notification path no
+            # database round-trip per update.
+            "notify_on_cross": bool(cam.row.get("notify_on_cross")) if cam else False,
             "lines": [
                 {**line, "in": st.line_counts.get(line["name"], (0, 0))[0],
                  "out": st.line_counts.get(line["name"], (0, 0))[1]}

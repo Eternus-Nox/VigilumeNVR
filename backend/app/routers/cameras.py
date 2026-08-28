@@ -143,6 +143,11 @@ class CameraInput(BaseModel):
     # explicit [] clears them.
     include_zones: Optional[list[IncludeZone]] = None
     cross_lines: Optional[list[CrossLine]] = None
+    # "Only alert me when something crosses a line on this camera." None
+    # (omitted) = keep stored on update / off on create. Gates the NOTIFICATION
+    # only — the event, its clip and its snapshot are recorded either way — and
+    # the pipeline ignores it entirely on a camera with no crossing lines.
+    notify_on_cross: Optional[bool] = None
     # Optional per-camera engine toggles. None means "default true" on
     # create and "keep the stored value" on update, so clients that don't
     # send them never flip a camera's state.
@@ -445,6 +450,7 @@ def _camera_response(
         # is stored, same as exempt_zones.
         "include_zones": list(cam.get("include_zones") or []),
         "cross_lines": list(cam.get("cross_lines") or []),
+        "notify_on_cross": bool(cam.get("notify_on_cross") or False),
         "detect": {"enabled": bool(cam.get("detect_enabled", True))},
         "record": {"enabled": bool(cam.get("record_enabled", True))},
         "detect_fps": int(cam.get("detect_fps") or DEFAULT_DETECT_FPS),
@@ -626,6 +632,7 @@ async def add_camera(body: CameraInput, request: Request) -> dict[str, Any]:
         "exempt_zones": _zones_to_stored(body.exempt_zones),
         "include_zones": _include_to_stored(body.include_zones),
         "cross_lines": _lines_to_stored(body.cross_lines),
+        "notify_on_cross": bool(body.notify_on_cross),
         "detect_width": width,
         "detect_height": height,
         "detect_fps": body.detect_fps or DEFAULT_DETECT_FPS,
@@ -731,6 +738,8 @@ async def update_camera(name: str, body: CameraUpdate, request: Request) -> dict
         cam["include_zones"] = _include_to_stored(body.include_zones)
     if body.cross_lines is not None:
         cam["cross_lines"] = _lines_to_stored(body.cross_lines)
+    if body.notify_on_cross is not None:
+        cam["notify_on_cross"] = body.notify_on_cross
     if body.detect_enabled is not None:
         cam["detect_enabled"] = body.detect_enabled
     if body.record_enabled is not None:

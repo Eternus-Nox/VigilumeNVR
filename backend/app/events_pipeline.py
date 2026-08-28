@@ -131,6 +131,33 @@ def _scene_labels(after: dict[str, Any]) -> list[str]:
     return seen
 
 
+def _crossing_gate_open(after: dict[str, Any]) -> bool:
+    """May this event notify yet, given the camera's "alert only on a crossing"
+    setting (cameras.notify_on_cross, carried on the payload)?
+
+    Three ways this returns True, and the last two are the ones that matter:
+
+    1. the setting is off — every existing camera, and every doorbell/audio
+       payload, which carries no such key at all;
+    2. the camera has NO crossing lines. A flag that silently kills every alert
+       because the operator deleted their last line is not a setting, it is a
+       trap, so an unusable configuration fails OPEN;
+    3. something has actually crossed one of them during this event.
+
+    The counts are per-EVENT (the engine's own tally), not the LineZone's
+    lifetime counters, so a crossing from an hour ago cannot open this gate.
+    """
+    if not after.get("notify_on_cross"):
+        return True
+    lines = after.get("lines")
+    if not isinstance(lines, list) or not lines:
+        return True
+    return any(
+        isinstance(ln, dict) and (_as_float(ln.get("in")) + _as_float(ln.get("out"))) > 0
+        for ln in lines
+    )
+
+
 def _humanize_labels(labels: list[str]) -> str:
     """'Person', 'Person and car', 'Person, car and dog' — a concise,
     sentence-leading join of the event's classes for the notification title/body
@@ -506,6 +533,15 @@ class EventsPipeline:
             return
         if self._score_of(after) < float(ns.get("min_score", 0.7)):
             return
+        if not _crossing_gate_open(after):
+            # The camera is set to alert only on a line crossing, and nothing has
+            # crossed yet. This is a DEFERRAL, not a drop: the event, its clip
+            # and its snapshot are already being recorded, `notified` stays
+            # False, and every later update re-runs this check — so the alert
+            # fires the moment someone actually crosses. Returning BEFORE the
+            # cooldown check matters: a deferred notification must not burn the
+            # cooldown that the real one will need.
+            return
         if not self._cooldown_ok((camera, label), float(ns.get("cooldown_seconds", 60))):
             return
         state["notified"] = True
@@ -584,7 +620,9 @@ class EventsPipeline:
         # awaits _send_notification INLINE while holding the per-event flag — a
         # slow ntfy must never stall a doorbell ring.
         if self._ntfy is not None:
-            self._spawn(self._send_ntfy(title, body, event_id, image_url, tag))
+            self._spawn(
+                self._send_ntfy(title, body, event_id, image_url, tag, urgent=urgent, icon=icon)
+            )
 
     async def _send_ntfy(
         self,
@@ -593,6 +631,13 @@ class EventsPipeline:
         event_id: int,
         image_url: Optional[str],
         tag: str,
+        *,
+        # Both come from _send_notification and were previously read as free
+        # variables here — which they never were, so EVERY ntfy send raised
+        # NameError before it reached the network. Keyword-only so a future
+        # caller cannot silently pass them in the wrong order.
+        urgent: bool = False,
+        icon: Optional[str] = None,
     ) -> None:
         assert self._ntfy is not None
         res = await self._ntfy.send(

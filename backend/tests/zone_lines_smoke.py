@@ -325,6 +325,72 @@ def main() -> int:  # noqa: C901 — a checklist, not a branchy algorithm
 
     asyncio.run(cases())
 
+    # ---------------- "alert only on a crossing" ----------------
+    print("\nnotify-on-cross gate")
+    from app.events_pipeline import _crossing_gate_open
+
+    line_no = [{"name": "gate", "in": 0, "out": 0}]
+    line_yes = [{"name": "gate", "in": 1, "out": 0}]
+    check(
+        _crossing_gate_open({"lines": line_no}),
+        "with the setting OFF the gate is wide open — every camera you already "
+        "own, unchanged",
+    )
+    check(
+        _crossing_gate_open({}),
+        "a doorbell/audio payload, which carries no geometry at all, notifies "
+        "normally rather than being gated by a key it has never heard of",
+    )
+    check(
+        not _crossing_gate_open({"notify_on_cross": True, "lines": line_no}),
+        "setting ON and nothing has crossed yet -> hold the alert",
+    )
+    check(
+        _crossing_gate_open({"notify_on_cross": True, "lines": line_yes}),
+        "and the moment something crosses, it opens",
+    )
+    check(
+        _crossing_gate_open({"notify_on_cross": True, "lines": [{"in": 0, "out": 2}]}),
+        "a crossing the OTHER way counts too — the gate asks whether the line "
+        "was crossed, not which direction the operator happened to draw it",
+    )
+    check(
+        _crossing_gate_open({"notify_on_cross": True, "lines": []}),
+        "setting ON but NO lines drawn -> the gate fails OPEN. A flag that "
+        "silently kills every alert because the last line was deleted is a trap, "
+        "not a setting",
+    )
+    check(
+        _crossing_gate_open({"notify_on_cross": True}),
+        "and the same when the payload carries no lines key at all",
+    )
+
+    # The gate must DEFER, not drop: it sits before the cooldown check so a held
+    # notification does not spend the cooldown the real one will need.
+    import inspect as _inspect
+
+    from app.events_pipeline import EventsPipeline
+    src = _inspect.getsource(EventsPipeline._maybe_notify_object)
+    check(
+        src.index("_crossing_gate_open") < src.index("_cooldown_ok"),
+        "the crossing gate is checked BEFORE the cooldown, so holding an alert "
+        "never burns the cooldown the eventual alert needs",
+    )
+    check(
+        src.index("_crossing_gate_open") < src.index('state["notified"] = True'),
+        "and before `notified` is set, so every later update re-tries it and the "
+        "alert fires on the crossing rather than being lost",
+    )
+
+    # A pre-existing NameError: _send_ntfy read `icon`/`urgent` as free
+    # variables, so every ntfy send raised before reaching the network.
+    sig = _inspect.signature(EventsPipeline._send_ntfy).parameters
+    check(
+        "icon" in sig and "urgent" in sig,
+        "_send_ntfy takes icon and urgent as real parameters — they were read as "
+        "free variables, which made EVERY ntfy notification a NameError",
+    )
+
     # ---------------- smoothing ----------------
     print("\nbox smoothing")
     import supervision as sv

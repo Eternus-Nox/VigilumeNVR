@@ -15,7 +15,7 @@ import aiosqlite
 
 from .config import DEFAULT_DETECT_OBJECTS
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cameras (
@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS cameras (
     exempt_zones    TEXT NOT NULL DEFAULT '[]',
     include_zones   TEXT NOT NULL DEFAULT '[]',
     cross_lines     TEXT NOT NULL DEFAULT '[]',
+    notify_on_cross INTEGER NOT NULL DEFAULT 0,
     detect_width    INTEGER NOT NULL DEFAULT 704,
     detect_height   INTEGER NOT NULL DEFAULT 480,
     detect_fps      INTEGER NOT NULL DEFAULT 5,
@@ -526,6 +527,29 @@ class Database:
                                 f"ALTER TABLE cameras ADD COLUMN {_col} "
                                 "TEXT NOT NULL DEFAULT '[]'"
                             )
+            if version < 21:
+                # v21: cameras.notify_on_cross — "only alert me when something
+                # crosses a line on this camera". Additive, defaults 0 (off), so
+                # an upgraded box notifies exactly as it did before.
+                #
+                # It gates the NOTIFICATION only: the event, clip and snapshot
+                # are recorded either way. And it is inert unless the camera has
+                # crossing lines — a flag that silently kills every alert because
+                # the last line was deleted is not a setting, it is a trap.
+                cur = await self.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cameras'"
+                )
+                if await cur.fetchone() is not None:
+                    existing = [
+                        r[1] for r in await (
+                            await self.conn.execute("PRAGMA table_info(cameras)")
+                        ).fetchall()
+                    ]
+                    if "notify_on_cross" not in existing:
+                        await self.conn.execute(
+                            "ALTER TABLE cameras ADD COLUMN notify_on_cross "
+                            "INTEGER NOT NULL DEFAULT 0"
+                        )
         if version < SCHEMA_VERSION:
             await self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         await self.conn.commit()
@@ -550,6 +574,11 @@ class Database:
             # Crossing lines: normalized {name, start:[x,y], end:[x,y]} pairs
             # counted in/out by sv.LineZone. [] = no crossing detection.
             "cross_lines": json.loads(row["cross_lines"]),
+            # When true AND the camera has crossing lines, an object event on
+            # this camera only NOTIFIES once something crosses one. The event,
+            # its clip and its snapshot are recorded either way — this gates the
+            # alert, never the footage.
+            "notify_on_cross": bool(row["notify_on_cross"]),
             "detect_width": row["detect_width"],
             "detect_height": row["detect_height"],
             "detect_fps": row["detect_fps"],
@@ -598,6 +627,7 @@ class Database:
     _CAMERA_INSERT_SQL = """
         INSERT INTO cameras (name, friendly_name, model, ip, username, password,
                              detect_objects, exempt_zones, include_zones, cross_lines,
+                             notify_on_cross,
                              detect_width, detect_height,
                              detect_fps, audio_events, detect_enabled, record_enabled,
                              capabilities, source, position, main_url, sub_url,
@@ -605,6 +635,7 @@ class Database:
                              spotlight_hold_seconds, created_at)
         VALUES (:name, :friendly_name, :model, :ip, :username, :password,
                 :detect_objects, :exempt_zones, :include_zones, :cross_lines,
+                :notify_on_cross,
                 :detect_width, :detect_height,
                 :detect_fps, :audio_events, :detect_enabled, :record_enabled,
                 :capabilities, :source,
@@ -621,6 +652,7 @@ class Database:
             "exempt_zones": json.dumps(cam.get("exempt_zones") or []),
             "include_zones": json.dumps(cam.get("include_zones") or []),
             "cross_lines": json.dumps(cam.get("cross_lines") or []),
+            "notify_on_cross": int(cam.get("notify_on_cross") or False),
             "capabilities": json.dumps(cam.get("capabilities") or {}),
             "audio_events": int(cam.get("audio_events", True)),
             "detect_enabled": int(cam.get("detect_enabled", True)),
@@ -660,6 +692,7 @@ class Database:
                 exempt_zones  = excluded.exempt_zones,
                 include_zones = excluded.include_zones,
                 cross_lines   = excluded.cross_lines,
+                notify_on_cross = excluded.notify_on_cross,
                 detect_width  = excluded.detect_width,
                 detect_height = excluded.detect_height,
                 detect_fps    = excluded.detect_fps,
