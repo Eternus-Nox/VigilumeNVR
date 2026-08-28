@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   api,
+  ApiError,
   type ArchiveSettings,
   type ArchiveStatus,
   type MqttSettings,
@@ -79,7 +80,15 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
   // --- rclone remote setup (replaces `rclone config` over SSH) -------------
   const [providers, setProviders] = useState<RcloneProvider[]>([]);
   const [remotes, setRemotes] = useState<RcloneRemote[]>([]);
+  // Why cloud storage is unavailable, if it is. Three states, because they need
+  // three different actions and collapsing them into one "rebuild" message is
+  // how someone rebuilds twice and is no wiser:
+  //   null          — available, nothing to say
+  //   'missing'     — the route 404s: this backend predates the feature
+  //   <rclone text> — the route answered and rclone itself failed; that string
+  //                   is rclone's own stderr, which names the real problem
   const [rcloneAvailable, setRcloneAvailable] = useState(true);
+  const [rcloneWhy, setRcloneWhy] = useState<string | null>(null);
   const [newType, setNewType] = useState('');
   const [newName, setNewName] = useState('');
   const [newValues, setNewValues] = useState<Record<string, string>>({});
@@ -121,11 +130,21 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
     try {
       const res = await api.rcloneRemotes();
       setRcloneAvailable(res.available);
+      // The endpoint answered, so the code IS deployed. If it still says
+      // unavailable, the reason is rclone's, and rclone already said what it
+      // was — show that instead of guessing on its behalf.
+      setRcloneWhy(res.available ? null : res.detail || 'rclone reported no reason.');
       setRemotes(res.remotes);
-    } catch {
-      // A backend predating the feature 404s. Treated as "not available" so the
-      // card explains the rebuild instead of showing a bare error.
+    } catch (err) {
+      // A 404 is the only error that really means "this build predates the
+      // feature". Anything else (500, a proxy error, a dropped connection) is
+      // a live backend failing, and telling that operator to rebuild would send
+      // them down the wrong path entirely.
+      const missing = err instanceof ApiError && err.status === 404;
       setRcloneAvailable(false);
+      setRcloneWhy(
+        missing ? 'missing' : err instanceof Error ? err.message : 'Request failed',
+      );
       setRemotes([]);
     }
   }, []);
@@ -475,10 +494,28 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
         </p>
 
         {!rcloneAvailable && (
-          <p className="form-error">
-            Cloud storage support is not in this backend build. Rebuild with{' '}
-            <code>docker compose up -d --build</code> and reload.
-          </p>
+          <div className="form-error">
+            {rcloneWhy === 'missing' ? (
+              <>
+                This backend build predates cloud storage — the server has no{' '}
+                <code>/api/integrations/rclone</code> routes yet. On the server:{' '}
+                <code>git pull</code>, then{' '}
+                <code>docker compose up -d --build backend</code>, then reload this page.
+                Your settings and recordings are on the <code>/data</code> volume and are
+                not touched by a rebuild.
+              </>
+            ) : (
+              <>
+                Cloud storage is deployed but not working: <em>{rcloneWhy}</em>
+                {rcloneWhy?.includes('not installed') && (
+                  <>
+                    {' '}Rebuild the backend image (the Dockerfile installs rclone) rather
+                    than restarting the container — a restart reuses the same image.
+                  </>
+                )}
+              </>
+            )}
+          </div>
         )}
 
         {remotes.length > 0 && (
