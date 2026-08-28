@@ -101,6 +101,31 @@ class ExemptZone(BaseModel):
     points: list[tuple[float, float]] = Field(default_factory=list)
 
 
+class IncludeZone(BaseModel):
+    """One "only alert here" polygon — the allow-list counterpart of
+    :class:`ExemptZone`, same normalized 0..1 point format.
+
+    The two compose: include zones decide what is watched at all, exempt zones
+    then punch holes in it. Configure none and the whole frame is watched, which
+    is what every existing install does."""
+
+    name: str = Field(default="", max_length=64)
+    points: list[tuple[float, float]] = Field(default_factory=list)
+
+
+class CrossLine(BaseModel):
+    """A boundary whose crossings are counted (sv.LineZone).
+
+    ``start``/``end`` are normalized 0..1 ``[x, y]``. Direction matters: a
+    crossing to the LEFT of the start->end arrow counts as "in", the other way
+    as "out", so drawing the line the other way round swaps the two. The web UI
+    draws the arrow, so this is a visible property rather than a hidden one."""
+
+    name: str = Field(default="", max_length=64)
+    start: tuple[float, float]
+    end: tuple[float, float]
+
+
 class CameraInput(BaseModel):
     name: str
     friendly_name: str = Field(min_length=1, max_length=64)
@@ -113,6 +138,11 @@ class CameraInput(BaseModel):
     # = defaults ([]) on create / keep stored on update; an explicit [] clears
     # all zones. Each zone is normalized-coord polygon (see ExemptZone).
     exempt_zones: Optional[list[ExemptZone]] = None
+    # Per-camera INCLUDE zones and crossing lines. Same None/[] contract as
+    # exempt_zones: omitted = defaults on create / keep stored on update; an
+    # explicit [] clears them.
+    include_zones: Optional[list[IncludeZone]] = None
+    cross_lines: Optional[list[CrossLine]] = None
     # Optional per-camera engine toggles. None means "default true" on
     # create and "keep the stored value" on update, so clients that don't
     # send them never flip a camera's state.
@@ -180,6 +210,42 @@ class CameraInput(BaseModel):
             pts = [(min(1.0, max(0.0, x)), min(1.0, max(0.0, y))) for x, y in zone.points]
             if len(pts) >= 3:
                 cleaned.append(ExemptZone(name=zone.name.strip(), points=pts))
+        return cleaned
+
+    @field_validator("include_zones")
+    @classmethod
+    def _clean_include(cls, v: Optional[list[IncludeZone]]) -> Optional[list[IncludeZone]]:
+        # Same contract as _clean_zones: None (omitted) survives, points clamp to
+        # [0, 1], and anything under 3 points is dropped rather than stored. A
+        # degenerate include zone is more dangerous than a degenerate exempt one
+        # — it would silently include NOTHING and blind the camera — so it must
+        # never reach the engine.
+        if v is None:
+            return None
+        cleaned: list[IncludeZone] = []
+        for zone in v:
+            pts = [(min(1.0, max(0.0, x)), min(1.0, max(0.0, y))) for x, y in zone.points]
+            if len(pts) >= 3:
+                cleaned.append(IncludeZone(name=zone.name.strip(), points=pts))
+        return cleaned
+
+    @field_validator("cross_lines")
+    @classmethod
+    def _clean_lines(cls, v: Optional[list[CrossLine]]) -> Optional[list[CrossLine]]:
+        # Endpoints clamp to [0, 1]; a line whose ends coincide is dropped —
+        # sv.LineZone raises on a zero-magnitude vector, so storing one would
+        # turn a mis-click into a camera that logs a warning every reload.
+        if v is None:
+            return None
+        cleaned: list[CrossLine] = []
+        for line in v:
+            sx, sy = (min(1.0, max(0.0, c)) for c in line.start)
+            ex, ey = (min(1.0, max(0.0, c)) for c in line.end)
+            if (sx, sy) == (ex, ey):
+                continue
+            cleaned.append(
+                CrossLine(name=line.name.strip(), start=(sx, sy), end=(ex, ey))
+            )
         return cleaned
 
     @field_validator("detect_mode")
@@ -307,6 +373,19 @@ def _zones_to_stored(zones: Optional[list[ExemptZone]]) -> list[dict[str, Any]]:
     return out
 
 
+def _include_to_stored(zones: Optional[list[IncludeZone]]) -> list[dict[str, Any]]:
+    """IncludeZone models -> plain dicts for the DB / response."""
+    return [{"name": z.name, "points": [[x, y] for x, y in z.points]} for z in zones or []]
+
+
+def _lines_to_stored(lines: Optional[list[CrossLine]]) -> list[dict[str, Any]]:
+    """CrossLine models -> plain dicts for the DB / response."""
+    return [
+        {"name": ln.name, "start": list(ln.start), "end": list(ln.end)}
+        for ln in lines or []
+    ]
+
+
 def _caps_of(cam: dict[str, Any]) -> dict[str, bool]:
     stored = cam.get("capabilities") or {}
     caps = static_capabilities(cam["model"])
@@ -361,6 +440,11 @@ def _camera_response(
         "detect_objects": list(cam.get("detect_objects") or []),
         # Stored exempt (privacy/ignore) zones, verbatim: [{name, points:[[x,y]]}].
         "exempt_zones": list(cam.get("exempt_zones") or []),
+        # Stored INCLUDE zones ([{name, points}]) and crossing lines
+        # ([{name, start, end}]), verbatim — the editor round-trips exactly what
+        # is stored, same as exempt_zones.
+        "include_zones": list(cam.get("include_zones") or []),
+        "cross_lines": list(cam.get("cross_lines") or []),
         "detect": {"enabled": bool(cam.get("detect_enabled", True))},
         "record": {"enabled": bool(cam.get("record_enabled", True))},
         "detect_fps": int(cam.get("detect_fps") or DEFAULT_DETECT_FPS),
@@ -540,6 +624,8 @@ async def add_camera(body: CameraInput, request: Request) -> dict[str, Any]:
         ),
         # None (omitted) -> no zones; otherwise the cleaned polygons verbatim.
         "exempt_zones": _zones_to_stored(body.exempt_zones),
+        "include_zones": _include_to_stored(body.include_zones),
+        "cross_lines": _lines_to_stored(body.cross_lines),
         "detect_width": width,
         "detect_height": height,
         "detect_fps": body.detect_fps or DEFAULT_DETECT_FPS,
@@ -639,6 +725,12 @@ async def update_camera(name: str, body: CameraUpdate, request: Request) -> dict
     if body.exempt_zones is not None:
         # Omitted keeps stored zones; an explicit [] clears them.
         cam["exempt_zones"] = _zones_to_stored(body.exempt_zones)
+    if body.include_zones is not None:
+        # Omitted keeps stored zones; an explicit [] clears them (back to
+        # watching the whole frame).
+        cam["include_zones"] = _include_to_stored(body.include_zones)
+    if body.cross_lines is not None:
+        cam["cross_lines"] = _lines_to_stored(body.cross_lines)
     if body.detect_enabled is not None:
         cam["detect_enabled"] = body.detect_enabled
     if body.record_enabled is not None:

@@ -225,6 +225,28 @@ class FrameSource:
             )
 
 
+def drop_pending(detections: Any) -> Any:
+    """Strip detections the tracker has not activated yet (tracker_id < 0).
+
+    trackers 2.4.0 marks a pending track with tracker_id **-1**, and the engine
+    already discards those. Handing them to sv.DetectionsSmoother would be worse
+    than pointless: it keys its history by tracker_id, so EVERY pending
+    detection in the frame would be averaged together into a single phantom box
+    under id -1. Dropping them first keeps the smoother honest.
+    """
+    if detections is None or getattr(detections, "tracker_id", None) is None:
+        return detections
+    return detections[detections.tracker_id >= 0]
+
+
+def _make_smoother(frames: int) -> Any:
+    """One sv.DetectionsSmoother per camera; state is per-track, so sharing one
+    across cameras would blend tracks that merely happen to share an id."""
+    import supervision as sv
+
+    return sv.DetectionsSmoother(length=frames)
+
+
 def _make_tracker(detect_fps: int) -> Any:
     """One ByteTrackTracker per camera (pinned trackers==2.4.0 signature,
     design doc §1.4). Imported lazily: the trackers import is heavyweight
@@ -277,6 +299,11 @@ class IngestManager:
         self._sources: dict[str, FrameSource] = {}
         self._source_tasks: dict[str, asyncio.Task] = {}
         self._trackers: dict[str, Any] = {}
+        # One box smoother per camera, created and destroyed with its tracker so
+        # the two never disagree about which tracker_ids exist. Empty (and never
+        # consulted) while settings.detection.smoothing is off.
+        self._smoothers: dict[str, Any] = {}
+        self._smoothing_frames = 0
         self._cams: dict[str, dict[str, Any]] = {}
         self._keys: dict[str, tuple] = {}
         self._worker_task: Optional[asyncio.Task] = None
@@ -345,6 +372,24 @@ class IngestManager:
         A change in a camera's stream URL, fps or detect dims restarts just
         that camera's ffmpeg child."""
         self._default_mode = default_mode or "always"
+        # Box smoothing (sv.DetectionsSmoother). Resolved here, once per reload,
+        # so the per-frame path never touches the settings store. 0 means off.
+        # A change of window length throws the existing smoothers away — their
+        # deques are sized at construction, so the new length would otherwise
+        # only apply to cameras added later.
+        detection = (self._settings.detection if self._settings is not None else {}) or {}
+        frames = (
+            max(2, min(10, int(detection.get("smoothing_frames") or 3)))
+            if bool(detection.get("smoothing"))
+            else 0
+        )
+        if frames != self._smoothing_frames:
+            log.info(
+                "detection box smoothing %s",
+                f"on ({frames}-frame window)" if frames else "off",
+            )
+            self._smoothing_frames = frames
+            self._smoothers.clear()
         # Detect-enabled AND has at least one wanted object. A detect-enabled
         # camera with an EMPTY detect_objects records only (detects nothing) —
         # it must run NO ingest ffmpeg/inference at all (no GPU, no detect
@@ -442,6 +487,7 @@ class IngestManager:
         self._sources.pop(name, None)
         self._keys.pop(name, None)
         self._trackers.pop(name, None)
+        self._smoothers.pop(name, None)
         self._last_frame_mono.pop(name, None)
         if task is not None:
             task.cancel()
@@ -605,6 +651,18 @@ class IngestManager:
                 tracker = self._trackers.get(name)
                 if tracker is not None:
                     detections = tracker.update(detections)
+                if self._smoothing_frames:
+                    # Created lazily rather than in _start_source, so switching
+                    # smoothing on in Settings takes effect on running cameras
+                    # without restarting their ffmpeg children.
+                    smoother = self._smoothers.get(name)
+                    if smoother is None:
+                        smoother = self._smoothers[name] = _make_smoother(
+                            self._smoothing_frames
+                        )
+                    detections = smoother.update_with_detections(
+                        drop_pending(detections)
+                    )
                 observations = observations_from_supervision(detections)
                 detector.note_detect_ok()
             except asyncio.CancelledError:

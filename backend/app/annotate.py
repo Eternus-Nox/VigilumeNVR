@@ -17,6 +17,13 @@ log = logging.getLogger(__name__)
 
 _BOX_ANNOTATOR = sv.BoxAnnotator(thickness=2)
 _LABEL_ANNOTATOR = sv.LabelAnnotator(text_scale=0.55, text_thickness=1, text_padding=6)
+# Traces are drawn at the object's GROUND point, so the line on the picture is
+# the path its feet took across the scene rather than a ribbon through the air.
+_TRACE_ANNOTATOR = sv.TraceAnnotator(position=sv.Position.BOTTOM_CENTER, thickness=2)
+# Zone/line overlays. White with a light fill reads on both a bright daytime
+# frame and a dark night one without competing with the class-coloured boxes.
+_ZONE_COLOR = sv.Color(r=255, g=255, b=255)
+_ZONE_OPACITY = 0.12
 
 # Irregular plurals for the count banner; everything else gets a plain "s".
 _PLURALS = {"person": "people", "bus": "buses", "sheep": "sheep"}
@@ -88,6 +95,182 @@ def _draw_banner(image: np.ndarray, text: str) -> np.ndarray:
     return np.vstack([strip, image])
 
 
+def _scaled_points(
+    points: Any, w: int, h: int, sx: float, sy: float
+) -> Optional[np.ndarray]:
+    """Rescale a list of detect-pixel ``[x, y]`` points onto the image and clamp
+    them to it. None when the input is malformed or has fewer than 2 points."""
+    if not isinstance(points, (list, tuple)) or len(points) < 2:
+        return None
+    out: list[tuple[float, float]] = []
+    for p in points:
+        if not isinstance(p, (list, tuple)) or len(p) != 2:
+            return None
+        try:
+            x, y = float(p[0]) * sx, float(p[1]) * sy
+        except (TypeError, ValueError):
+            return None
+        out.append((max(0.0, min(x, w - 1.0)), max(0.0, min(y, h - 1.0))))
+    return np.array(out, dtype=np.float64)
+
+
+def _draw_zones(
+    image: np.ndarray,
+    zones: Sequence[dict[str, Any]],
+    detections: Optional["sv.Detections"],
+    w: int,
+    h: int,
+    sx: float,
+    sy: float,
+) -> np.ndarray:
+    """Outline each include zone and label it with how many of THIS frame's
+    objects are standing in it.
+
+    The count is recomputed here by re-triggering the zone against the very
+    detections being drawn, rather than carried over from the engine — so the
+    number on the picture is always the number of boxes on the picture.
+    """
+    for zone in zones:
+        if not isinstance(zone, dict):
+            continue
+        poly = _scaled_points(zone.get("points"), w, h, sx, sy)
+        if poly is None or len(poly) < 3:
+            continue
+        try:
+            pz = sv.PolygonZone(polygon=poly.astype(np.int64))
+            inside = int(pz.trigger(detections).sum()) if detections is not None else 0
+            annotator = sv.PolygonZoneAnnotator(
+                zone=pz, color=_ZONE_COLOR, thickness=2, opacity=_ZONE_OPACITY
+            )
+            name = str(zone.get("name") or "zone")
+            image = annotator.annotate(scene=image, label=f"{name}: {inside}")
+        except Exception:  # noqa: BLE001 — never lose a snapshot over an overlay
+            log.warning("annotate: could not draw include zone %r", zone.get("name"))
+    return image
+
+
+def _set_line_counts(line: "sv.LineZone", in_count: int, out_count: int) -> bool:
+    """Put this event's crossing tally onto a freshly-built LineZone so the
+    annotator prints it.
+
+    sv.LineZone exposes in_count/out_count as read-only properties over private
+    Counters, and there is no public setter. We write the Counters directly and
+    report whether it worked; the caller hides the count display rather than
+    printing a confident "0" if a future supervision renames them.
+    """
+    try:
+        from collections import Counter
+
+        line._in_count_per_class = Counter({None: int(in_count)})  # noqa: SLF001
+        line._out_count_per_class = Counter({None: int(out_count)})  # noqa: SLF001
+        return line.in_count == in_count and line.out_count == out_count
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _draw_lines(
+    image: np.ndarray,
+    lines: Sequence[dict[str, Any]],
+    w: int,
+    h: int,
+    sx: float,
+    sy: float,
+) -> np.ndarray:
+    """Draw each crossing line with its name and this event's in/out tally.
+
+    The tally is per-EVENT, not the LineZone's lifetime counter: on a piece of
+    evidence "1 in" means this visit, whereas "in: 412" since the last backend
+    restart tells the viewer nothing about the picture they are looking at.
+    """
+    for line in lines:
+        if not isinstance(line, dict):
+            continue
+        pts = _scaled_points([line.get("start"), line.get("end")], w, h, sx, sy)
+        if pts is None:
+            continue
+        start, end = pts
+        if float(np.hypot(end[0] - start[0], end[1] - start[1])) < 2.0:
+            continue
+        try:
+            lz = sv.LineZone(
+                start=sv.Point(x=float(start[0]), y=float(start[1])),
+                end=sv.Point(x=float(end[0]), y=float(end[1])),
+            )
+            in_n = int(_as_float(line.get("in")))
+            out_n = int(_as_float(line.get("out")))
+            shown = _set_line_counts(lz, in_n, out_n)
+            name = str(line.get("name") or "line")
+            annotator = sv.LineZoneAnnotator(
+                thickness=2,
+                color=_ZONE_COLOR,
+                text_scale=0.45,
+                text_thickness=1,
+                custom_in_text=f"{name} in",
+                custom_out_text=f"{name} out",
+                display_in_count=shown,
+                display_out_count=shown,
+            )
+            image = annotator.annotate(frame=image, line_counter=lz)
+        except Exception:  # noqa: BLE001
+            log.warning("annotate: could not draw crossing line %r", line.get("name"))
+    return image
+
+
+def _draw_traces(
+    image: np.ndarray,
+    traces: Sequence[tuple[int, list[Any]]],
+    entries: Sequence[tuple[tuple[float, float, float, float], str, float]],
+    class_id: Sequence[int],
+    w: int,
+    h: int,
+    sx: float,
+    sy: float,
+) -> np.ndarray:
+    """Draw each object's recent ground path in its own box colour.
+
+    sv.TraceAnnotator keeps its history internally, keyed by tracker_id, and
+    fills it one frame at a time. We have the whole path already — it was
+    captured with the frame — so the stored points are loaded into a Trace and
+    handed to the annotator, which appends the current box's ground point and
+    draws. Colour comes from class_id, matching the box the trace leads to.
+    """
+    paths = [(tid, pts) for tid, pts in traces if isinstance(pts, list) and len(pts) >= 2]
+    if not paths:
+        return image
+    try:
+        from supervision.annotators.utils import Trace
+
+        xy: list[tuple[float, float]] = []
+        ids: list[int] = []
+        frames: list[int] = []
+        for tid, pts in paths:
+            scaled = _scaled_points(pts, w, h, sx, sy)
+            if scaled is None:
+                continue
+            for i, (px, py) in enumerate(scaled):
+                xy.append((px, py))
+                ids.append(tid)
+                frames.append(i)
+        if not xy:
+            return image
+        trace = Trace(max_size=None, anchor=sv.Position.BOTTOM_CENTER)
+        trace.xy = np.array(xy, dtype=np.float32)
+        trace.tracker_id = np.array(ids, dtype=int)
+        trace.frame_id = np.array(frames, dtype=int)
+        trace.current_frame_id = int(max(frames)) + 1
+        _TRACE_ANNOTATOR.trace = trace
+        detections = sv.Detections(
+            xyxy=np.array([e[0] for e in entries], dtype=np.float32),
+            confidence=np.array([e[2] for e in entries], dtype=np.float32),
+            class_id=np.array(class_id),
+            tracker_id=np.array([tid for tid, _ in traces], dtype=int),
+        )
+        return _TRACE_ANNOTATOR.annotate(scene=image, detections=detections)
+    except Exception:  # noqa: BLE001 — an overlay bug must never cost the frame
+        log.warning("annotate: could not draw traces", exc_info=True)
+        return image
+
+
 def annotate_event_snapshot(
     jpeg_bytes: bytes,
     box: Optional[Sequence[float]],
@@ -97,6 +280,11 @@ def annotate_event_snapshot(
     detect_dims: Optional[tuple[int, int]] = None,
     scene: Optional[Sequence[dict[str, Any]]] = None,
     draw_boxes: bool = True,
+    *,
+    zones: Optional[Sequence[dict[str, Any]]] = None,
+    lines: Optional[Sequence[dict[str, Any]]] = None,
+    draw_zones: bool = False,
+    draw_traces: bool = False,
 ) -> Optional[bytes]:
     """Draw a box + '{label} {score}%' for EVERY detected/counted object plus a
     count banner. Returns annotated JPEG bytes, or None if the input can't be
@@ -104,7 +292,15 @@ def annotate_event_snapshot(
 
     ``draw_boxes=False`` (settings.notifications.draw_boxes) skips the box +
     label drawing entirely — the count banner is still added, so the snapshot
-    stays clean while the summary survives.
+    stays clean while the summary survives. That promise of a CLEAN frame also
+    covers the zone/line/trace overlays below: turning boxes off turns all of
+    them off, whatever their own toggles say.
+
+    ``zones`` / ``lines`` are the camera's include zones and crossing lines in
+    detect pixels, carried on the event payload (see native/zones.py). Drawn
+    when ``draw_zones`` is set, they show the boundary that decided this event
+    alongside the object that triggered it. ``draw_traces`` draws each object's
+    recent ground path from the ``trace`` on its scene entry.
 
     ``scene`` (preferred) is a list of ``{box, label, score}`` objects — one per
     tracked object present in the saved frame — so a multi-object event boxes all
@@ -131,6 +327,10 @@ def annotate_event_snapshot(
     # (xyxy, label, score) for each object to draw. Prefer the full scene;
     # otherwise fall back to the single best box for backward compatibility.
     entries: list[tuple[tuple[float, float, float, float], str, float]] = []
+    # Ground paths aligned index-for-index with `entries`. The tracker_id is
+    # only an identity for the trace annotator's own bookkeeping; a scene
+    # without one (doorbell/legacy rows) falls back to its position.
+    traces: list[tuple[int, list[Any]]] = []
     if scene:
         for obj in scene:
             if not isinstance(obj, dict):
@@ -141,10 +341,15 @@ def annotate_event_snapshot(
             entries.append(
                 (xyxy, str(obj.get("label") or label), _as_float(obj.get("score"), score))
             )
+            tid = obj.get("tracker_id")
+            traces.append(
+                (int(tid) if isinstance(tid, int) else len(traces), obj.get("trace") or [])
+            )
     elif box is not None:
         xyxy = _scaled_clamped_box(box, w, h, sx, sy)
         if xyxy is not None:
             entries.append((xyxy, label, score))
+            traces.append((0, []))
 
     if entries and draw_boxes:
         # One class_id per distinct label so same-label boxes share a colour.
@@ -155,6 +360,16 @@ def annotate_event_snapshot(
             confidence=np.array([e[2] for e in entries], dtype=np.float32),
             class_id=np.array(class_id),
         )
+        # Layered back to front: the geometry the operator configured, then the
+        # paths objects took through it, then the boxes and labels on top — so
+        # the thing the event is actually about is never drawn over.
+        if draw_zones:
+            if zones:
+                image = _draw_zones(image, zones, detections, w, h, sx, sy)
+            if lines:
+                image = _draw_lines(image, lines, w, h, sx, sy)
+        if draw_traces:
+            image = _draw_traces(image, traces, entries, class_id, w, h, sx, sy)
         image = _BOX_ANNOTATOR.annotate(scene=image, detections=detections)
         image = _LABEL_ANNOTATOR.annotate(
             scene=image,

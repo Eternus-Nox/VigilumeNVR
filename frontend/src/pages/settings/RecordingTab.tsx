@@ -5,7 +5,13 @@
  * form); this tab keeps the retention windows and the confidence slider.
  */
 import { useEffect, useState } from 'react';
-import { CORAL_MODELS, type CoralModel, type DetectionBackend, type DetectMode } from '../../lib/api';
+import {
+  CORAL_MODELS,
+  type CoralModel,
+  type DetectionBackend,
+  type DetectMode,
+  type NightBoostMode,
+} from '../../lib/api';
 import { useAdoptSaved, type TabProps } from '../Settings';
 import DetectionModels from './DetectionModels';
 
@@ -38,6 +44,23 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
   const [absenceTimeout, setAbsenceTimeout] = useState<number>(
     pending.detection?.absence_timeout_s ?? settings.detection.absence_timeout_s ?? 5,
   );
+  // Night contrast boost on the detector's frame only. Absent on an older
+  // backend -> "off", which is also the shipped default: it changes what the
+  // model sees, so it is opt-in.
+  const [nightBoost, setNightBoost] = useState<NightBoostMode>(
+    pending.detection?.night_boost ?? settings.detection.night_boost ?? 'off',
+  );
+  const [nightBoostThreshold, setNightBoostThreshold] = useState<number>(
+    pending.detection?.night_boost_threshold ?? settings.detection.night_boost_threshold ?? 60,
+  );
+  // Box smoothing over the tracker's output. Also opt-in — it trades box lag
+  // for steadiness (see the copy on the control).
+  const [smoothing, setSmoothing] = useState<boolean>(
+    pending.detection?.smoothing ?? settings.detection.smoothing ?? false,
+  );
+  const [smoothingFrames, setSmoothingFrames] = useState<number>(
+    pending.detection?.smoothing_frames ?? settings.detection.smoothing_frames ?? 3,
+  );
   // No `modelKey` mirror here any more. It existed solely so this form's PUT
   // could re-send the current model instead of clobbering a fresh activation
   // from <DetectionModels>. The patch names only `confidence` and
@@ -51,6 +74,10 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
   useAdoptSaved(settings.detection.backend ?? 'auto', setBackend);
   useAdoptSaved(settings.detection.coral_model ?? 'ssdlite_mobiledet', setCoralModel);
   useAdoptSaved(settings.detection.absence_timeout_s ?? 5, setAbsenceTimeout);
+  useAdoptSaved(settings.detection.night_boost ?? 'off', setNightBoost);
+  useAdoptSaved(settings.detection.night_boost_threshold ?? 60, setNightBoostThreshold);
+  useAdoptSaved(settings.detection.smoothing ?? false, setSmoothing);
+  useAdoptSaved(settings.detection.smoothing_frames ?? 3, setSmoothingFrames);
 
   // Report this tab's slice up on every edit; the shell's single Save button
   // persists it together with every other tab's pending changes.
@@ -60,9 +87,14 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
       detection: {
         confidence, default_mode: defaultMode, backend, coral_model: coralModel,
         absence_timeout_s: absenceTimeout,
+        night_boost: nightBoost, night_boost_threshold: nightBoostThreshold,
+        smoothing, smoothing_frames: smoothingFrames,
       },
     });
-  }, [recording, confidence, defaultMode, backend, coralModel, absenceTimeout, onDraftChange]);
+  }, [
+    recording, confidence, defaultMode, backend, coralModel, absenceTimeout,
+    nightBoost, nightBoostThreshold, smoothing, smoothingFrames, onDraftChange,
+  ]);
 
   const dayInput = (
     label: string,
@@ -437,6 +469,90 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
               appears.
             </span>
           </label>
+        </div>
+      </section>
+
+      <section className="card">
+        <h2>Detector input</h2>
+        <p className="muted small">
+          Two ways to change what the model sees before it looks. Both are off by default
+          and both are genuine trades, not free wins — turn one on, watch a camera you care
+          about for a night, and keep it only if it actually helped.
+        </p>
+        <div className="form-stack">
+          <label>
+            Night contrast boost
+            <select
+              value={nightBoost}
+              onChange={(e) => setNightBoost(e.target.value as NightBoostMode)}
+            >
+              <option value="off">Off — the model sees exactly what the camera sent</option>
+              <option value="auto">Auto — boost only frames darker than the threshold</option>
+              <option value="always">Always — boost every frame (to compare against Off)</option>
+            </select>
+            <span className="control-hint">
+              Lifts local contrast on the frame handed to detection, for a camera run
+              without IR where the scene is dim rather than dark. It never touches
+              recordings, clips, live view or the saved snapshot. It cannot create detail
+              in a frame with no light, and the model was trained on ordinary images — so
+              it can help or hurt depending on the camera.
+            </span>
+          </label>
+          {nightBoost === 'auto' && (
+            <label>
+              Treat a frame as night below (brightness 0–255)
+              <input
+                type="number"
+                min={0}
+                max={255}
+                step={5}
+                value={nightBoostThreshold}
+                onChange={(e) =>
+                  setNightBoostThreshold(
+                    Math.min(255, Math.max(0, Math.floor(Number(e.target.value) || 0))),
+                  )
+                }
+              />
+              <span className="control-hint">
+                60 sits well under a lit indoor scene and above a genuinely black frame.
+              </span>
+            </label>
+          )}
+          <label className="row-label">
+            <input
+              type="checkbox"
+              checked={smoothing}
+              onChange={(e) => setSmoothing(e.target.checked)}
+            />
+            Smooth detection boxes across frames
+          </label>
+          <span className="control-hint">
+            Averages each tracked object&rsquo;s box over the last few frames: steadier
+            boxes on snapshots, and a flickering track can confirm sooner. The cost is real
+            — an averaged box <em>lags</em> a moving subject by about half the window, and
+            an object is still reported for a few frames after it leaves.
+          </span>
+          {smoothing && (
+            <label>
+              Frames averaged
+              <input
+                type="number"
+                min={2}
+                max={10}
+                step={1}
+                value={smoothingFrames}
+                onChange={(e) =>
+                  setSmoothingFrames(
+                    Math.min(10, Math.max(2, Math.floor(Number(e.target.value) || 3))),
+                  )
+                }
+              />
+              <span className="control-hint">
+                3 frames is a 0.6 s window at the default 5 fps. Higher is steadier and
+                laggier.
+              </span>
+            </label>
+          )}
         </div>
       </section>
 

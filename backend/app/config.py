@@ -281,6 +281,16 @@ DEFAULT_SETTINGS: dict = {
         # Draw detection boxes + labels on event snapshots (the count banner
         # always stays). Legacy-safe: a stored blob missing this key means True.
         "draw_boxes": True,
+        # Draw the camera's include zones and crossing lines on the snapshot
+        # (native/zones.py). On by default and free for anyone who has drawn
+        # none: with no geometry configured, there is nothing to draw. When you
+        # HAVE drawn some, seeing the boundary next to the box is what makes an
+        # event snapshot explain itself.
+        "draw_zones": True,
+        # Draw each tracked object's recent ground path. Shows where someone
+        # walked in from rather than only where they stood when the best frame
+        # was picked. On by default; turn it off if a busy scene gets cluttered.
+        "draw_traces": True,
         # APNs (iOS) push — docs/push-architecture.md. "relay" posts E2E
         # ciphertext to a push relay that holds the Apple .p8 (relay/), so no
         # Apple developer account is needed here; "off" disables APNs.
@@ -389,6 +399,19 @@ DEFAULT_SETTINGS: dict = {
         "night_boost": "off",
         # Mean luma (0-255) below which `auto` treats a frame as night.
         "night_boost_threshold": 60,
+        # BOX SMOOTHING (sv.DetectionsSmoother), applied after the tracker and
+        # before the engine. Averages each track's box over the last N frames,
+        # which steadies jittery boxes and can help a flickering track reach
+        # MIN_HITS sooner.
+        #
+        # Off by default, because it is a genuine trade, not a free win: an
+        # averaged box LAGS a moving subject by roughly half the window (~0.3 s
+        # at 3 frames / 5 fps), and the smoother keeps reporting a track for up
+        # to N frames after it actually leaves. Turn it on, watch a camera you
+        # care about, and keep it only if the steadier boxes are worth that.
+        "smoothing": False,
+        # Frames averaged per track. 3 at the default 5 fps is a 0.6 s window.
+        "smoothing_frames": 3,
     },
     # Optional nightly copy of EVENT media (clips + snapshots) to cloud storage,
     # one folder per local day: <remote>/2026-08-25/<event id>.mp4|.jpg

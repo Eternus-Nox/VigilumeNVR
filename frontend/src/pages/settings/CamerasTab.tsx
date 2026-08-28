@@ -23,7 +23,9 @@ import {
   type CameraInput,
   type DetectMode,
   type DeviceSettings,
+  type CrossLine,
   type ExemptZone,
+  type IncludeZone,
   type NightVisionMode,
   type WhiteLightMode,
 } from '../../lib/api';
@@ -62,6 +64,8 @@ const EMPTY_FORM: CameraInput = {
   password: '',
   detect_objects: [...DEFAULT_OBJECTS],
   exempt_zones: [],
+  include_zones: [],
+  cross_lines: [],
   detect_fps: DEFAULT_DETECT_FPS,
   // Omitted (undefined) so a new camera inherits the global default_mode
   // (Camera-triggered) instead of being pinned to Server. The mode control
@@ -168,6 +172,16 @@ export default function CamerasTab() {
       exempt_zones: (cam.exempt_zones ?? []).map((z) => ({
         name: z.name,
         points: z.points.map((p) => [p[0], p[1]] as [number, number]),
+      })),
+      // Deep-copied for the same reason as exempt_zones above.
+      include_zones: (cam.include_zones ?? []).map((z) => ({
+        name: z.name,
+        points: z.points.map((p) => [p[0], p[1]] as [number, number]),
+      })),
+      cross_lines: (cam.cross_lines ?? []).map((l) => ({
+        name: l.name,
+        start: [l.start[0], l.start[1]] as [number, number],
+        end: [l.end[0], l.end[1]] as [number, number],
       })),
       detect_fps: cam.detect_fps ?? DEFAULT_DETECT_FPS,
       detect_mode: cam.detect_mode ?? 'always',
@@ -562,18 +576,22 @@ export default function CamerasTab() {
             )}
             {editingExisting && (
               <div className="form-span">
-                <span className="control-label">Detection exempt zones</span>
-                <ExemptZonesEditor
+                <span className="control-label">Detection zones &amp; lines</span>
+                <DetectionGeometryEditor
                   cameraName={editingExisting}
-                  value={editing.exempt_zones ?? []}
-                  onChange={(zones) => setEditing({ ...editing, exempt_zones: zones })}
+                  exempt={editing.exempt_zones ?? []}
+                  include={editing.include_zones ?? []}
+                  lines={editing.cross_lines ?? []}
+                  onChange={(next) => setEditing({ ...editing, ...next })}
                 />
                 {/* Explainer sits UNDER the picture — keeps the frame the first
                     thing you see instead of pushing it down behind a paragraph. */}
                 <p className="muted small">
-                  Draw polygons over the live view. Anything whose feet land inside a zone is
-                  ignored for detection — no event, notification or annotation. Click/tap to add
-                  points, then Finish the zone.
+                  Everything is judged by where an object&rsquo;s <strong>feet</strong> land.
+                  &ldquo;Only alert here&rdquo; is an allow-list: draw one and everything outside
+                  it stops producing events — the sharp way to ignore a street. &ldquo;Ignore
+                  here&rdquo; then punches holes in what is left. A crossing line counts objects
+                  passing it in each direction.
                 </p>
               </div>
             )}
@@ -652,28 +670,75 @@ export default function CamerasTab() {
   );
 }
 
-// ---------- Detection exempt (privacy / ignore) zones ----------
-
-const ZONE_COLORS = ['#ef4444', '#f59e0b', '#3b82f6', '#8b5cf6', '#ec4899', '#10b981'];
+// ---------- Detection geometry: exempt zones, include zones, crossing lines ----------
 
 /**
- * Draw/edit per-camera exempt detection zones over a live snapshot. Points are
- * kept NORMALIZED (0..1) so they survive any resolution change; the SVG overlay
- * renders them against the displayed image box. Works with mouse and touch
- * (pointer events).
+ * Three shapes, one picture. Colour carries the meaning so the frame reads at a
+ * glance without consulting the lists: WARM = ignored, COOL = watched, YELLOW =
+ * a boundary. Within a kind the palette cycles so two adjacent zones of the
+ * same kind stay tellable apart.
  */
-function ExemptZonesEditor({
+const EXEMPT_COLORS = ['#ef4444', '#f97316', '#ec4899'];
+const INCLUDE_COLORS = ['#10b981', '#22d3ee', '#3b82f6'];
+const LINE_COLORS = ['#facc15', '#a3e635', '#fb923c'];
+
+type GeometryMode = 'exempt' | 'include' | 'line';
+
+const MODE_LABEL: Record<GeometryMode, string> = {
+  exempt: 'Ignore here',
+  include: 'Only alert here',
+  line: 'Crossing line',
+};
+
+/**
+ * Unit vector pointing to the side a crossing counts as "in".
+ *
+ * MUST match native/zones.py:line_in_normal. Supervision counts a crossing to
+ * the LEFT of the start→end arrow as "in"; in screen coords (y down) that is
+ * `(dy, -dx)`, i.e. upward for a line drawn left-to-right. The editor draws
+ * this arrow so the direction is a visible property of the line rather than a
+ * rule buried in a tooltip.
+ */
+function inNormal(start: [number, number], end: [number, number]): [number, number] {
+  const dx = end[0] - start[0];
+  const dy = end[1] - start[1];
+  const mag = Math.hypot(dx, dy);
+  if (mag === 0) return [0, 0];
+  return [dy / mag, -dx / mag];
+}
+
+/**
+ * Draw/edit a camera's detection geometry over a live snapshot. Everything is
+ * kept NORMALIZED (0..1) so it survives a resolution change; the SVG overlay
+ * renders against the displayed image box. Mouse and touch (pointer events).
+ *
+ * All three kinds are always VISIBLE, but only the active one takes clicks —
+ * an include zone and the exempt zones punched out of it only make sense seen
+ * together, and hiding the others while you draw would make composing them
+ * guesswork.
+ */
+function DetectionGeometryEditor({
   cameraName,
-  value,
+  exempt,
+  include,
+  lines,
   onChange,
 }: {
   cameraName: string;
-  value: ExemptZone[];
-  onChange: (zones: ExemptZone[]) => void;
+  exempt: ExemptZone[];
+  include: IncludeZone[];
+  lines: CrossLine[];
+  onChange: (next: {
+    exempt_zones?: ExemptZone[];
+    include_zones?: IncludeZone[];
+    cross_lines?: CrossLine[];
+  }) => void;
 }) {
   const [snapUrl, setSnapUrl] = useState<string | null>(null);
   const [snapError, setSnapError] = useState<string | null>(null);
+  const [mode, setMode] = useState<GeometryMode>('exempt');
   const [draft, setDraft] = useState<[number, number][]>([]);
+  const [lineStart, setLineStart] = useState<[number, number] | null>(null);
   const frameRef = useRef<HTMLDivElement | null>(null);
 
   // Load an authed snapshot as an object URL; revoke it on cleanup.
@@ -700,29 +765,81 @@ function ExemptZonesEditor({
     };
   }, [cameraName]);
 
-  const addPoint = useCallback((e: ReactPointerEvent<SVGSVGElement>) => {
+  // Switching mode abandons whatever was half-drawn: a polygon and a line are
+  // not the same shape, so carrying points across would produce nonsense.
+  const switchMode = (next: GeometryMode) => {
+    setMode(next);
+    setDraft([]);
+    setLineStart(null);
+  };
+
+  const pointAt = useCallback((e: ReactPointerEvent<SVGSVGElement>): [number, number] | null => {
     const rect = frameRef.current?.getBoundingClientRect();
-    if (!rect || rect.width === 0 || rect.height === 0) return;
+    if (!rect || rect.width === 0 || rect.height === 0) return null;
     const x = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
     const y = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
-    setDraft((d) => [...d, [Number(x.toFixed(4)), Number(y.toFixed(4))]]);
+    return [Number(x.toFixed(4)), Number(y.toFixed(4))];
   }, []);
+
+  const addPoint = useCallback(
+    (e: ReactPointerEvent<SVGSVGElement>) => {
+      const pt = pointAt(e);
+      if (!pt) return;
+      if (mode !== 'line') {
+        setDraft((d) => [...d, pt]);
+        return;
+      }
+      // A line is two clicks: the first plants the start, the second finishes
+      // it. Finishing immediately (rather than needing a Finish button) keeps
+      // the two-click gesture obvious.
+      if (lineStart === null) {
+        setLineStart(pt);
+        return;
+      }
+      if (lineStart[0] === pt[0] && lineStart[1] === pt[1]) return; // zero-length
+      onChange({
+        cross_lines: [...lines, { name: `Line ${lines.length + 1}`, start: lineStart, end: pt }],
+      });
+      setLineStart(null);
+    },
+    [mode, lineStart, lines, onChange, pointAt],
+  );
 
   const finishZone = () => {
     if (draft.length < 3) return;
-    onChange([...value, { name: `Zone ${value.length + 1}`, points: draft }]);
+    if (mode === 'exempt') {
+      onChange({ exempt_zones: [...exempt, { name: `Zone ${exempt.length + 1}`, points: draft }] });
+    } else {
+      onChange({ include_zones: [...include, { name: `Area ${include.length + 1}`, points: draft }] });
+    }
     setDraft([]);
   };
-
-  const removeZone = (idx: number) => onChange(value.filter((_, i) => i !== idx));
-  const renameZone = (idx: number, name: string) =>
-    onChange(value.map((z, i) => (i === idx ? { ...z, name } : z)));
 
   const toPointsAttr = (pts: [number, number][]) =>
     pts.map(([x, y]) => `${x * 1000},${y * 1000}`).join(' ');
 
+  const polygonList = mode === 'exempt' ? exempt : include;
+  const colors = mode === 'exempt' ? EXEMPT_COLORS : INCLUDE_COLORS;
+  const replacePolygons = (next: (ExemptZone | IncludeZone)[]) =>
+    onChange(mode === 'exempt' ? { exempt_zones: next } : { include_zones: next });
+
   return (
     <div className="zone-editor">
+      <div className="geometry-modes" role="tablist" aria-label="Shape to draw">
+        {(['exempt', 'include', 'line'] as GeometryMode[]).map((m) => (
+          <button
+            key={m}
+            type="button"
+            role="tab"
+            aria-selected={mode === m}
+            className={`btn btn-sm${mode === m ? ' btn-primary' : ''}`}
+            onClick={() => switchMode(m)}
+          >
+            {MODE_LABEL[m]}
+          </button>
+        ))}
+      </div>
+
       <div className="zone-frame" ref={frameRef}>
         {snapError ? (
           <div className="zone-frame-empty muted small">Live view unavailable: {snapError}</div>
@@ -738,90 +855,216 @@ function ExemptZonesEditor({
             preserveAspectRatio="none"
             onPointerDown={addPoint}
           >
-            {value.map((z, i) => (
+            {/* Include zones sit UNDER the exempt ones, matching how they
+                compose: the watched area first, then the holes cut out of it. */}
+            {include.map((z, i) => (
               <polygon
-                key={i}
+                key={`inc${i}`}
                 points={toPointsAttr(z.points)}
-                fill={ZONE_COLORS[i % ZONE_COLORS.length]}
-                fillOpacity={0.28}
-                stroke={ZONE_COLORS[i % ZONE_COLORS.length]}
+                fill={INCLUDE_COLORS[i % INCLUDE_COLORS.length]}
+                fillOpacity={mode === 'include' ? 0.28 : 0.14}
+                stroke={INCLUDE_COLORS[i % INCLUDE_COLORS.length]}
                 strokeWidth={2}
                 vectorEffect="non-scaling-stroke"
               />
             ))}
+            {exempt.map((z, i) => (
+              <polygon
+                key={`exc${i}`}
+                points={toPointsAttr(z.points)}
+                fill={EXEMPT_COLORS[i % EXEMPT_COLORS.length]}
+                fillOpacity={mode === 'exempt' ? 0.28 : 0.14}
+                stroke={EXEMPT_COLORS[i % EXEMPT_COLORS.length]}
+                strokeWidth={2}
+                vectorEffect="non-scaling-stroke"
+              />
+            ))}
+            {lines.map((ln, i) => {
+              const color = LINE_COLORS[i % LINE_COLORS.length];
+              const [nx, ny] = inNormal(ln.start, ln.end);
+              const mx = ((ln.start[0] + ln.end[0]) / 2) * 1000;
+              const my = ((ln.start[1] + ln.end[1]) / 2) * 1000;
+              return (
+                <g key={`ln${i}`} opacity={mode === 'line' ? 1 : 0.55}>
+                  <line
+                    x1={ln.start[0] * 1000}
+                    y1={ln.start[1] * 1000}
+                    x2={ln.end[0] * 1000}
+                    y2={ln.end[1] * 1000}
+                    stroke={color}
+                    strokeWidth={3}
+                    vectorEffect="non-scaling-stroke"
+                  />
+                  {/* The "in" arrow: which way a crossing counts as coming IN.
+                      Same normal the backend uses, so what you see is what it
+                      counts. */}
+                  <line
+                    x1={mx}
+                    y1={my}
+                    x2={mx + nx * 70}
+                    y2={my + ny * 70}
+                    stroke={color}
+                    strokeWidth={2}
+                    strokeDasharray="5 3"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                  <circle cx={mx + nx * 70} cy={my + ny * 70} r={7} fill={color} />
+                </g>
+              );
+            })}
             {draft.length > 0 && (
               <polyline
                 points={toPointsAttr(draft)}
                 fill="none"
-                stroke="#22d3ee"
+                stroke="#e2e8f0"
                 strokeWidth={2}
                 strokeDasharray="6 4"
                 vectorEffect="non-scaling-stroke"
               />
             )}
             {draft.map(([x, y], i) => (
-              <circle key={i} cx={x * 1000} cy={y * 1000} r={7} fill="#22d3ee" />
+              <circle key={i} cx={x * 1000} cy={y * 1000} r={7} fill="#e2e8f0" />
             ))}
+            {lineStart && (
+              <circle cx={lineStart[0] * 1000} cy={lineStart[1] * 1000} r={8} fill="#e2e8f0" />
+            )}
           </svg>
         )}
       </div>
 
-      <div className="zone-toolbar">
-        <button
-          type="button"
-          className="btn btn-sm"
-          onClick={finishZone}
-          disabled={draft.length < 3}
-          title={draft.length < 3 ? 'Add at least 3 points first' : 'Save this polygon'}
-        >
-          Finish zone ({draft.length})
-        </button>
-        <button
-          type="button"
-          className="btn btn-sm"
-          onClick={() => setDraft((d) => d.slice(0, -1))}
-          disabled={draft.length === 0}
-        >
-          Undo point
-        </button>
-        <button
-          type="button"
-          className="btn btn-sm"
-          onClick={() => setDraft([])}
-          disabled={draft.length === 0}
-        >
-          Clear draft
-        </button>
-      </div>
-
-      {value.length === 0 ? (
-        <p className="muted small">No exempt zones — the whole frame is watched.</p>
+      {mode === 'line' ? (
+        <>
+          <div className="zone-toolbar">
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => setLineStart(null)}
+              disabled={lineStart === null}
+            >
+              Cancel line
+            </button>
+          </div>
+          <p className="muted small">
+            {lineStart
+              ? 'Click again to place the far end of the line.'
+              : 'Click once to start the line, again to finish it. The dashed arrow shows which way counts as “in” — draw it the other way round to swap in and out.'}
+          </p>
+          {lines.length === 0 ? (
+            <p className="muted small">No crossing lines.</p>
+          ) : (
+            <ul className="zone-list">
+              {lines.map((ln, i) => (
+                <li key={i} className="zone-list-row">
+                  <span
+                    className="zone-swatch"
+                    style={{ background: LINE_COLORS[i % LINE_COLORS.length] }}
+                    aria-hidden
+                  />
+                  <input
+                    aria-label={`Line ${i + 1} name`}
+                    value={ln.name}
+                    placeholder={`Line ${i + 1}`}
+                    onChange={(e) =>
+                      onChange({
+                        cross_lines: lines.map((l, j) =>
+                          j === i ? { ...l, name: e.target.value } : l,
+                        ),
+                      })
+                    }
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    title="Swap which direction counts as in"
+                    onClick={() =>
+                      onChange({
+                        cross_lines: lines.map((l, j) =>
+                          j === i ? { ...l, start: l.end, end: l.start } : l,
+                        ),
+                      })
+                    }
+                  >
+                    Flip
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-danger-ghost"
+                    onClick={() => onChange({ cross_lines: lines.filter((_, j) => j !== i) })}
+                  >
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
       ) : (
-        <ul className="zone-list">
-          {value.map((z, i) => (
-            <li key={i} className="zone-list-row">
-              <span
-                className="zone-swatch"
-                style={{ background: ZONE_COLORS[i % ZONE_COLORS.length] }}
-                aria-hidden
-              />
-              <input
-                aria-label={`Zone ${i + 1} name`}
-                value={z.name}
-                placeholder={`Zone ${i + 1}`}
-                onChange={(e) => renameZone(i, e.target.value)}
-              />
-              <span className="muted small">{z.points.length} pts</span>
-              <button
-                type="button"
-                className="btn btn-sm btn-danger-ghost"
-                onClick={() => removeZone(i)}
-              >
-                Remove
-              </button>
-            </li>
-          ))}
-        </ul>
+        <>
+          <div className="zone-toolbar">
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={finishZone}
+              disabled={draft.length < 3}
+              title={draft.length < 3 ? 'Add at least 3 points first' : 'Save this polygon'}
+            >
+              Finish shape ({draft.length})
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => setDraft((d) => d.slice(0, -1))}
+              disabled={draft.length === 0}
+            >
+              Undo point
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => setDraft([])}
+              disabled={draft.length === 0}
+            >
+              Clear draft
+            </button>
+          </div>
+          {polygonList.length === 0 ? (
+            <p className="muted small">
+              {mode === 'exempt'
+                ? 'No exempt zones — the whole frame is watched.'
+                : 'No include zones — the whole frame is watched. Draw one and everything outside it stops producing events.'}
+            </p>
+          ) : (
+            <ul className="zone-list">
+              {polygonList.map((z, i) => (
+                <li key={i} className="zone-list-row">
+                  <span
+                    className="zone-swatch"
+                    style={{ background: colors[i % colors.length] }}
+                    aria-hidden
+                  />
+                  <input
+                    aria-label={`${MODE_LABEL[mode]} ${i + 1} name`}
+                    value={z.name}
+                    placeholder={`Zone ${i + 1}`}
+                    onChange={(e) =>
+                      replacePolygons(
+                        polygonList.map((p, j) => (j === i ? { ...p, name: e.target.value } : p)),
+                      )
+                    }
+                  />
+                  <span className="muted small">{z.points.length} pts</span>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-danger-ghost"
+                    onClick={() => replacePolygons(polygonList.filter((_, j) => j !== i))}
+                  >
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
       )}
     </div>
   );

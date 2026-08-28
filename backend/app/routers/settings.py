@@ -132,6 +132,11 @@ class NotificationSettings(BaseModel):
     min_score: float = Field(default=0.7, ge=0.0, le=1.0)
     # Draw detection boxes/labels on event snapshots (banner always stays).
     draw_boxes: bool = True
+    # Draw include zones / crossing lines and object traces on event snapshots.
+    # Both are pure annotation — they never change what was detected, only what
+    # the saved picture shows.
+    draw_zones: bool = True
+    draw_traces: bool = True
     # Push a system alert when a camera stops responding. OFF by default: a
     # debounced down is still noisier than most detection alerts, and it fires
     # via the UNCOUPLED push primitive, so it is NOT filtered by the labels /
@@ -278,6 +283,13 @@ class DetectionSettings(BaseModel):
     # not trained on boosted images).
     night_boost: Literal["off", "auto", "always"] = "off"
     night_boost_threshold: int = Field(default=60, ge=0, le=255)
+    # sv.DetectionsSmoother over the tracker's output. Off by default: it trades
+    # box lag and a few frames of ghost track for steadier boxes (see config.py).
+    smoothing: bool = False
+    # Floor of 2 (1 frame is not an average); ceiling of 10 because at 5 fps a
+    # 10-frame window already lags a walking subject by about a metre, and a box
+    # that far behind the subject is worse than a jittery one.
+    smoothing_frames: int = Field(default=3, ge=2, le=10)
 
 
 class AutoRestartSettings(BaseModel):

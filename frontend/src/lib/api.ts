@@ -255,6 +255,33 @@ export interface ExemptZone {
 }
 
 /**
+ * An "only alert here" polygon — the allow-list counterpart of {@link ExemptZone},
+ * in the same normalized 0..1 coords. With none configured the whole frame is
+ * watched; configure one and every detection whose box foot-center falls
+ * OUTSIDE all of them is dropped before an event can open.
+ *
+ * The two compose in that order: include zones decide what is watched, exempt
+ * zones then punch holes in it.
+ */
+export interface IncludeZone {
+  name: string;
+  points: [number, number][];
+}
+
+/**
+ * A boundary whose crossings are counted. `start`/`end` are normalized 0..1.
+ *
+ * Direction matters and is visible in the editor: a crossing to the LEFT of the
+ * start->end arrow counts as "in", the other way as "out". Drawing the line the
+ * other way round swaps the two.
+ */
+export interface CrossLine {
+  name: string;
+  start: [number, number];
+  end: [number, number];
+}
+
+/**
  * Per-camera live-view audio codec preference (PUT /api/cameras/{name}).
  * - `g711a` (DEFAULT): the backend forces the camera's audio encoder to
  *   G.711A. Native G.711/PCMA is WebRTC-legal, so it passes through go2rtc and
@@ -284,6 +311,13 @@ export interface Camera {
   detect_objects: string[];
   /** Privacy/ignore polygons; objects inside are dropped for detection. */
   exempt_zones: ExemptZone[];
+  /**
+   * Allow-list polygons; when non-empty, objects OUTSIDE them all are dropped.
+   * Optional so a backend predating the feature reads as "watch everything".
+   */
+  include_zones?: IncludeZone[];
+  /** Boundaries whose crossings are counted. Optional for the same reason. */
+  cross_lines?: CrossLine[];
   detect: { enabled: boolean };
   record: { enabled: boolean };
   /**
@@ -353,6 +387,13 @@ export interface CameraInput {
    * normalized 0..1; zones with < 3 points are dropped server-side.
    */
   exempt_zones?: ExemptZone[];
+  /**
+   * Include zones and crossing lines. Same contract as `exempt_zones`: omitted
+   * keeps the server value, an explicit `[]` clears them. An include zone with
+   * < 3 points, or a line whose ends coincide, is dropped server-side.
+   */
+  include_zones?: IncludeZone[];
+  cross_lines?: CrossLine[];
   /** Optional per-camera engine toggles; omitted = keep server value. */
   detect_enabled?: boolean;
   record_enabled?: boolean;
@@ -521,6 +562,13 @@ export interface EventsQuery {
  */
 export type DetectionModel = string;
 
+/**
+ * Night contrast boost mode (settings.detection.night_boost). `auto` boosts
+ * only frames measured darker than the threshold; `always` exists so a boost
+ * can be A/B'd against `off` on one camera.
+ */
+export type NightBoostMode = 'off' | 'auto' | 'always';
+
 export interface AppSettings {
   notifications: {
     enabled: boolean;
@@ -533,6 +581,14 @@ export interface AppSettings {
      * it — treat absence as `true` (the historical behavior).
      */
     draw_boxes?: boolean;
+    /**
+     * Draw the camera's include zones and crossing lines on event snapshots,
+     * and each object's recent ground path. Both are pure annotation — they
+     * never change what was detected. Optional: absent on an older backend —
+     * treat absence as `true` (the shipped default).
+     */
+    draw_zones?: boolean;
+    draw_traces?: boolean;
     /**
      * Push a system alert when a camera stops responding (debounced). Optional:
      * absent on a backend that predates it — treat absence as `false` (off).
@@ -619,6 +675,21 @@ export interface AppSettings {
      * as one event or several, and the clip is only cut once the event ends.
      */
     absence_timeout_s: number;
+    /**
+     * Night contrast boost on the DETECTOR's input frame only — never on
+     * recordings, clips, live view or the saved snapshot. `auto` boosts only
+     * frames darker than `night_boost_threshold` (mean luma 0–255).
+     * Optional: absent on a backend that predates it — treat as `"off"`.
+     */
+    night_boost?: NightBoostMode;
+    night_boost_threshold?: number;
+    /**
+     * Average each tracked object's box over the last N frames. Steadier boxes,
+     * at the cost of the box lagging a moving subject and a track lingering a
+     * few frames after it leaves. Optional; absent = off.
+     */
+    smoothing?: boolean;
+    smoothing_frames?: number;
   };
   system: {
     public_url: string;

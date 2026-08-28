@@ -155,6 +155,10 @@ export default function NotificationsTab({ settings, onDraftChange, pending }: T
         ...draft,
         // Absent means "true" (historical behavior) — persist it explicitly.
         draw_boxes: draft.draw_boxes ?? true,
+        // Same "absent means the default" rule as draw_boxes: persist it
+        // explicitly so the stored document stops being ambiguous.
+        draw_zones: draft.draw_zones ?? true,
+        draw_traces: draft.draw_traces ?? true,
         apns: normalizedApns(),
         ntfy: normalizedNtfy(),
       },
@@ -198,6 +202,33 @@ export default function NotificationsTab({ settings, onDraftChange, pending }: T
           />
           Draw detection boxes on snapshots
         </label>
+        <label className="row-label">
+          <input
+            type="checkbox"
+            checked={draft.draw_zones ?? true}
+            disabled={!(draft.draw_boxes ?? true)}
+            onChange={(e) => setDraft({ ...draft, draw_zones: e.target.checked })}
+          />
+          Draw include zones and crossing lines
+        </label>
+        <label className="row-label">
+          <input
+            type="checkbox"
+            checked={draft.draw_traces ?? true}
+            disabled={!(draft.draw_boxes ?? true)}
+            onChange={(e) => setDraft({ ...draft, draw_traces: e.target.checked })}
+          />
+          Draw the path each object walked
+        </label>
+        {/* Both are disabled, not hidden, when boxes are off: "no boxes" means a
+            CLEAN snapshot, so the backend skips these too — better to show them
+            greyed out than to let someone tick a box that does nothing. */}
+        {!(draft.draw_boxes ?? true) && (
+          <p className="muted small">
+            Overlays are off while &ldquo;Draw detection boxes&rdquo; is unchecked — that
+            option keeps the snapshot completely clean.
+          </p>
+        )}
         <label className="row-label">
           <input
             type="checkbox"

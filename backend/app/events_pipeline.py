@@ -12,6 +12,7 @@ the label filter, and carry their own cooldowns.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import time
 from pathlib import Path
@@ -443,16 +444,26 @@ class EventsPipeline:
         # settings.notifications.draw_boxes=false -> clean snapshot (banner
         # only). Legacy-safe: a stored settings blob without the key means True.
         draw_boxes = bool(self._settings.notifications.get("draw_boxes", True))
+        # Include zones / crossing lines and per-object traces. Legacy-safe the
+        # same way draw_boxes is: a settings blob saved before these existed
+        # reads as True, and a doorbell/audio event simply carries no geometry.
+        notif = self._settings.notifications
         annotated = await asyncio.to_thread(
-            annotate.annotate_event_snapshot,
-            jpeg,
-            box,
-            str(after["label"]),
-            score,
-            count,
-            detect_dims,
-            scene,
-            draw_boxes,
+            functools.partial(
+                annotate.annotate_event_snapshot,
+                jpeg,
+                box,
+                str(after["label"]),
+                score,
+                count,
+                detect_dims,
+                scene,
+                draw_boxes,
+                zones=after.get("include_zones") or [],
+                lines=after.get("lines") or [],
+                draw_zones=bool(notif.get("draw_zones", True)),
+                draw_traces=bool(notif.get("draw_traces", True)),
+            )
         )
         data = annotated or jpeg  # never lose the frame over an annotation bug
         path = self._snapshots_dir / f"{state['event_id']}.jpg"

@@ -15,7 +15,7 @@ import aiosqlite
 
 from .config import DEFAULT_DETECT_OBJECTS
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cameras (
@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS cameras (
     password        TEXT NOT NULL,
     detect_objects  TEXT NOT NULL DEFAULT '[]',
     exempt_zones    TEXT NOT NULL DEFAULT '[]',
+    include_zones   TEXT NOT NULL DEFAULT '[]',
+    cross_lines     TEXT NOT NULL DEFAULT '[]',
     detect_width    INTEGER NOT NULL DEFAULT 704,
     detect_height   INTEGER NOT NULL DEFAULT 480,
     detect_fps      INTEGER NOT NULL DEFAULT 5,
@@ -496,6 +498,34 @@ class Database:
                     cur = await self.conn.execute(f"PRAGMA table_info({_tbl})")
                     if _col in [r[1] for r in await cur.fetchall()]:
                         await self.conn.execute(f"ALTER TABLE {_tbl} DROP COLUMN {_col}")
+            if version < 20:
+                # v20: the POSITIVE half of per-camera geometry, mirroring the
+                # v8/exempt_zones pattern exactly.
+                #   * cameras.include_zones — allow-list polygons (normalized
+                #     0..1). [] keeps the existing behavior (watch everything);
+                #     any entry makes the camera drop detections whose feet land
+                #     outside every zone, before an event can open.
+                #   * cameras.cross_lines — {name, start:[x,y], end:[x,y]}
+                #     boundaries counted in/out by sv.LineZone. [] = none.
+                # Both default to '[]' so an upgraded box behaves identically
+                # until the operator draws something. Guarded on the cameras
+                # table existing so a synthetic single-table upgrade fixture (the
+                # pattern the migration tests use) still runs.
+                cur = await self.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cameras'"
+                )
+                if await cur.fetchone() is not None:
+                    existing = [
+                        r[1] for r in await (
+                            await self.conn.execute("PRAGMA table_info(cameras)")
+                        ).fetchall()
+                    ]
+                    for _col in ("include_zones", "cross_lines"):
+                        if _col not in existing:
+                            await self.conn.execute(
+                                f"ALTER TABLE cameras ADD COLUMN {_col} "
+                                "TEXT NOT NULL DEFAULT '[]'"
+                            )
         if version < SCHEMA_VERSION:
             await self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         await self.conn.commit()
@@ -513,6 +543,13 @@ class Database:
             "password": row["password"],
             "detect_objects": json.loads(row["detect_objects"]),
             "exempt_zones": json.loads(row["exempt_zones"]),
+            # INCLUDE zones (native/zones.py): the allow-list counterpart of
+            # exempt_zones. [] (the default) watches the whole frame; any
+            # entry drops every detection whose feet land outside them all.
+            "include_zones": json.loads(row["include_zones"]),
+            # Crossing lines: normalized {name, start:[x,y], end:[x,y]} pairs
+            # counted in/out by sv.LineZone. [] = no crossing detection.
+            "cross_lines": json.loads(row["cross_lines"]),
             "detect_width": row["detect_width"],
             "detect_height": row["detect_height"],
             "detect_fps": row["detect_fps"],
@@ -560,13 +597,15 @@ class Database:
     # never touch position, so edits keep a camera's slot.
     _CAMERA_INSERT_SQL = """
         INSERT INTO cameras (name, friendly_name, model, ip, username, password,
-                             detect_objects, exempt_zones, detect_width, detect_height,
+                             detect_objects, exempt_zones, include_zones, cross_lines,
+                             detect_width, detect_height,
                              detect_fps, audio_events, detect_enabled, record_enabled,
                              capabilities, source, position, main_url, sub_url,
                              ir_state, detect_mode, audio_codec, smart_spotlight,
                              spotlight_hold_seconds, created_at)
         VALUES (:name, :friendly_name, :model, :ip, :username, :password,
-                :detect_objects, :exempt_zones, :detect_width, :detect_height,
+                :detect_objects, :exempt_zones, :include_zones, :cross_lines,
+                :detect_width, :detect_height,
                 :detect_fps, :audio_events, :detect_enabled, :record_enabled,
                 :capabilities, :source,
                 COALESCE(:position, (SELECT COALESCE(MAX(position), 0) + 1 FROM cameras)),
@@ -580,6 +619,8 @@ class Database:
             **cam,
             "detect_objects": json.dumps(cam.get("detect_objects") or []),
             "exempt_zones": json.dumps(cam.get("exempt_zones") or []),
+            "include_zones": json.dumps(cam.get("include_zones") or []),
+            "cross_lines": json.dumps(cam.get("cross_lines") or []),
             "capabilities": json.dumps(cam.get("capabilities") or {}),
             "audio_events": int(cam.get("audio_events", True)),
             "detect_enabled": int(cam.get("detect_enabled", True)),
@@ -617,6 +658,8 @@ class Database:
                 password      = excluded.password,
                 detect_objects= excluded.detect_objects,
                 exempt_zones  = excluded.exempt_zones,
+                include_zones = excluded.include_zones,
+                cross_lines   = excluded.cross_lines,
                 detect_width  = excluded.detect_width,
                 detect_height = excluded.detect_height,
                 detect_fps    = excluded.detect_fps,

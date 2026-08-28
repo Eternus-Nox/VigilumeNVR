@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING, Any, Optional, Sequence
 import cv2
 import numpy as np
 
+from . import zones as zonelib
 from .coco_labels import ID_TO_LABEL
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -286,6 +287,14 @@ def observations_from_supervision(detections: "sv.Detections") -> list[Observati
     out: list[Observation] = []
     if detections is None or detections.tracker_id is None:
         return out
+    if detections.confidence is None:
+        # sv.DetectionsSmoother drops confidence for the whole frame if any
+        # track in its window lacks it. Our detectors always set it, so this is
+        # defence rather than a live path — but zip() over None would raise on
+        # every frame, and a detection worker must not be one None away from
+        # logging an exception 5 times a second.
+        log.warning("detections arrived without confidence — dropping the frame")
+        return out
     for xyxy, conf, class_id, tid in zip(
         detections.xyxy, detections.confidence, detections.class_id, detections.tracker_id
     ):
@@ -319,6 +328,20 @@ class _EventState:
     last_emit_time: float = 0.0
     last_emit_score: float = 0.0
     last_emit_count: int = 0
+    # Include zones this event's objects have stood in, and crossing lines they
+    # have crossed, accumulated over the event's whole life (not just the best
+    # frame). Emitted as the payload's `entered_zones`, which EventsPipeline
+    # already stores on the event row and the web UI already displays.
+    zones: set[str] = field(default_factory=set)
+    # Per-line crossing tally FOR THIS EVENT: {line name: [in, out]}. Deliberately
+    # not the LineZone's own counters, which are cumulative since boot — on an
+    # event snapshot "1 in" means this visit, and a running total since the
+    # backend last restarted would be noise on a piece of evidence.
+    line_counts: dict[str, list[int]] = field(default_factory=dict)
+    # Ground path per tracker_id for the objects in best_scene, captured when
+    # the best frame was adopted so the trace drawn on the snapshot ends where
+    # the boxes are. Refreshed in lockstep with best_frame.
+    best_traces: dict[int, list[tuple[float, float]]] = field(default_factory=dict)
 
 
 @dataclass
@@ -333,6 +356,25 @@ class _CameraState:
     exempt_names: list[str] = field(default_factory=list)
     # Running count of detections dropped by exempt-zone masking (debug/status).
     masked_dropped: int = 0
+    # Detect-space INCLUDE zones (native.zones), precomputed on every row change.
+    # Empty => the whole frame is watched, exactly as before this existed. Any
+    # entry flips the camera to allow-list mode: an object whose foot-center is
+    # outside every one of them is dropped before it can open an event.
+    include_zones: list[tuple[str, Any]] = field(default_factory=list)
+    include_dropped: int = 0
+    # Detect-space CROSSING lines (sv.LineZone), also precomputed per row change.
+    # These are stateful — each holds the per-track history that makes a crossing
+    # detectable — so they are REUSED across frames and only rebuilt when the
+    # camera's geometry actually changes (see reload()).
+    cross_lines: list[tuple[str, Any]] = field(default_factory=list)
+    # The stored (normalized) geometry the current zones/lines were built from,
+    # so reload() can leave the stateful LineZones alone when nothing changed.
+    geometry_key: Any = None
+    # tracker_id -> recent ground positions (detect px), bounded per track.
+    # Collected unconditionally: a trace is a few hundred bytes per live track,
+    # and collecting only when the draw toggle is on would mean turning it on
+    # gives you nothing until the NEXT event.
+    traces: dict[int, deque] = field(default_factory=dict)
     # Detect-space reject-suppression samples, precomputed from
     # detection_suppressions on every reload (NOT per detection):
     # (label, foot_px, foot_py). Empty => no suppression.
@@ -462,6 +504,33 @@ class DetectionEngine:
                     "camera %s: %d exempt detection zone(s) active",
                     row["name"], len(state.exempt_polys),
                 )
+            # Include zones + crossing lines. Rebuilt ONLY when the stored
+            # geometry (or the detect resolution it scales against) actually
+            # changed: a LineZone carries the per-track crossing history, and
+            # rebuilding it on every unrelated reload — a camera rename, a
+            # privacy toggle — would forget which side of the line everyone was
+            # on and silently drop the crossing in progress.
+            geometry_key = (
+                repr(row.get("include_zones") or []),
+                repr(row.get("cross_lines") or []),
+                row.get("detect_width"),
+                row.get("detect_height"),
+            )
+            if state.geometry_key != geometry_key:
+                state.geometry_key = geometry_key
+                state.include_zones = zonelib.include_detect_zones(row)
+                state.cross_lines = zonelib.cross_detect_lines(row)
+                if state.include_zones:
+                    log.info(
+                        "camera %s: %d include zone(s) active — detections outside "
+                        "them are dropped",
+                        row["name"], len(state.include_zones),
+                    )
+                if state.cross_lines:
+                    log.info(
+                        "camera %s: %d crossing line(s) active",
+                        row["name"], len(state.cross_lines),
+                    )
             # Precompute detect-space reject-suppression samples + match radius.
             dw = float(row.get("detect_width") or 0.0)
             dh = float(row.get("detect_height") or 0.0)
@@ -527,6 +596,37 @@ class DetectionEngine:
         wanted = set(cam.row.get("detect_objects") or [])
         obs = [o for o in observations if o.label in wanted]
 
+        # --- include ("only alert here") zone filtering ---
+        # Runs FIRST, so exempt zones below read as holes punched in the
+        # included area. With no include zones configured this is skipped
+        # entirely and the whole frame is watched, exactly as before.
+        #
+        # An object is in a zone when its FOOT-CENTER is (sv.PolygonZone with
+        # BOTTOM_CENTER — the same anchor the exempt rules use). Deliberately a
+        # single rule, unlike the exempt path's three: an include zone decides
+        # what gets ignored, and a filter nobody can predict is a filter nobody
+        # trusts.
+        zone_names: dict[int, list[str]] = {}
+        if cam.include_zones:
+            hits = zonelib.zone_hits(obs, cam.include_zones)
+            kept_i: list[Observation] = []
+            for o, names in zip(obs, hits):
+                if names:
+                    zone_names[o.tracker_id] = names
+                    kept_i.append(o)
+                    continue
+                cam.include_dropped += 1
+                fx, fy = box_foot_center(o.box)
+                # DEBUG, not INFO like the exempt path: an include zone on a
+                # driveway drops every car on the road behind it, several times
+                # a second, all day. The running total is on camera_stats
+                # (include_dropped) for anyone who wants to confirm it is working.
+                log.debug(
+                    "outside include zones: %s at foot=(%.0f,%.0f) on %s",
+                    o.label, fx, fy, camera,
+                )
+            obs = kept_i
+
         # --- exempt (privacy / ignore) zone masking ---
         # Drop any observation whose box foot-center lies inside an exempt
         # polygon (detect-space, precomputed in reload()). Empty polys =>
@@ -578,10 +678,34 @@ class DetectionEngine:
         for o in obs:
             count, _ = cam.hits.get(o.tracker_id, (0, 0.0))
             cam.hits[o.tracker_id] = (count + 1, frame_time)
-        for tid, (_, seen) in list(cam.hits.items()):
-            if frame_time - seen > _TRACK_FORGET_S:
-                del cam.hits[tid]
+        forgotten = [tid for tid, (_, seen) in cam.hits.items() if frame_time - seen > _TRACK_FORGET_S]
+        for tid in forgotten:
+            del cam.hits[tid]
+            cam.traces.pop(tid, None)
+        if forgotten and cam.cross_lines:
+            # sv.LineZone never prunes its own per-track crossing history. Ours
+            # is forgotten here, so theirs is too — otherwise a camera watching
+            # a road accumulates a dict entry per passing car, forever.
+            zonelib.forget_tracks(cam.cross_lines, cam.hits.keys())
         confirmed = [o for o in obs if cam.hits[o.tracker_id][0] >= MIN_HITS]
+
+        # --- traces + line crossings (confirmed objects only) ---
+        # Both are fed from `confirmed`, not `obs`: a crossing is only meaningful
+        # if it belongs to an object real enough to have opened an event, and a
+        # trace drawn from unconfirmed flicker is a path nobody walked.
+        for o in confirmed:
+            zonelib.push_trace(cam.traces, o.tracker_id, o.box)
+        crossed_by_label: dict[str, list[zonelib.Crossing]] = {}
+        if cam.cross_lines:
+            # Triggered on EVERY frame, including empty ones — sv.LineZone
+            # decides a crossing by comparing sides across frames, so a skipped
+            # frame is a hole in the evidence, not a saved cycle.
+            for crossing in zonelib.crossings(confirmed, cam.cross_lines):
+                crossed_by_label.setdefault(crossing.label, []).append(crossing)
+                log.info(
+                    "%s crossed %s (%s) on %s",
+                    crossing.label, crossing.line, crossing.direction, camera,
+                )
 
         # --- per-label event state ---
         by_label: dict[str, list[Observation]] = {}
@@ -602,7 +726,10 @@ class DetectionEngine:
         # The full confirmed set is the "scene" saved with whichever frame each
         # label's event adopts as its best — every counted object, all labels.
         for label, group in by_label.items():
-            await self._observe_label(cam, label, group, frame_time, frame_bgr, confirmed)
+            await self._observe_label(
+                cam, label, group, frame_time, frame_bgr, confirmed,
+                zone_names, crossed_by_label.get(label, ()),
+            )
 
         # --- absence: end open events whose label went quiet ---
         absence_timeout = self._absence_timeout()
@@ -620,6 +747,8 @@ class DetectionEngine:
         frame_time: float,
         frame_bgr: Optional[np.ndarray],
         scene: Sequence[Observation],
+        zone_names: Optional[dict[int, list[str]]] = None,
+        crossed: Sequence["zonelib.Crossing"] = (),
     ) -> None:
         camera = cam.row["name"]
         key = (camera, label)
@@ -637,15 +766,20 @@ class DetectionEngine:
                 last_seen=frame_time,
             )
             self._events[key] = st
-            self._adopt_best(st, best, frame_time, frame_bgr, scene)
+            self._note_geometry(st, group, zone_names, crossed)
+            self._adopt_best(cam, st, best, frame_time, frame_bgr, scene)
             st.count = count
             self._update_count(camera, label, count)
             await self._emit("new", st, frame_time)
             return
 
         st.last_seen = frame_time
+        # Zones and crossings are recorded BEFORE the emit decision below, so a
+        # crossing that happens on a quiet frame — no score improvement, no
+        # count change — still reaches the event row on the next update.
+        self._note_geometry(st, group, zone_names, crossed)
         if best.score > st.best_score:
-            self._adopt_best(st, best, frame_time, frame_bgr, scene)
+            self._adopt_best(cam, st, best, frame_time, frame_bgr, scene)
         count_changed = count != st.count
         st.count = count
         if count_changed:
@@ -654,12 +788,37 @@ class DetectionEngine:
         if (
             st.best_score - st.last_emit_score >= UPDATE_SCORE_DELTA
             or count != st.last_emit_count
+            or crossed  # a line crossing is the sharpest signal here — don't sit
+                        # on it for up to a heartbeat before the row records it
             or frame_time - st.last_emit_time >= UPDATE_HEARTBEAT_S
         ):
             await self._emit("update", st, frame_time)
 
     @staticmethod
+    def _note_geometry(
+        st: _EventState,
+        group: Sequence[Observation],
+        zone_names: Optional[dict[int, list[str]]],
+        crossed: Sequence["zonelib.Crossing"],
+    ) -> None:
+        """Accumulate include-zone names and line crossings onto the event.
+
+        Both accumulate over the event's WHOLE life rather than tracking the
+        current frame: "this person walked up the drive and crossed the front
+        line" stays true for the event even once they have moved on, and that
+        is what the operator wants to read afterwards.
+        """
+        if zone_names:
+            for o in group:
+                st.zones.update(zone_names.get(o.tracker_id, ()))
+        for crossing in crossed:
+            st.zones.add(crossing.line)
+            tally = st.line_counts.setdefault(crossing.line, [0, 0])
+            tally[0 if crossing.direction == "in" else 1] += 1
+
+    @staticmethod
     def _adopt_best(
+        cam: _CameraState,
         st: _EventState,
         best: Observation,
         frame_time: float,
@@ -670,6 +829,12 @@ class DetectionEngine:
         st.best_box = best.box
         # Scene tracks the saved frame: refresh it alongside best_frame.
         st.best_scene = list(scene)
+        # Snapshot the traces as they stand at this instant. Copied, not
+        # referenced: cam.traces keeps mutating as the object walks on, and a
+        # trace drawn on this frame must end where this frame's boxes are.
+        st.best_traces = {
+            o.tracker_id: list(cam.traces.get(o.tracker_id, ())) for o in scene
+        }
         if frame_bgr is not None:
             st.best_frame = frame_bgr.copy()
             st.best_frame_time = frame_time
@@ -692,6 +857,7 @@ class DetectionEngine:
     # ---------- payload synthesis (design doc §4.1) ----------
 
     def _payload(self, etype: str, st: _EventState) -> dict[str, Any]:
+        cam = self._cameras.get(st.camera)
         after: dict[str, Any] = {
             "id": st.fid,
             "camera": st.camera,
@@ -708,7 +874,16 @@ class DetectionEngine:
             # so EventsPipeline can box them all. snapshot.box / box above stay
             # for backward compatibility.
             "scene": [
-                {"box": list(o.box), "label": o.label, "score": o.score}
+                {
+                    "box": list(o.box),
+                    "label": o.label,
+                    "score": o.score,
+                    "tracker_id": o.tracker_id,
+                    # The ground path this object had walked when the frame was
+                    # saved (detect px). Drawn by annotate.py when
+                    # notifications.draw_traces is on; ignored otherwise.
+                    "trace": [list(p) for p in st.best_traces.get(o.tracker_id, ())],
+                }
                 for o in st.best_scene
             ],
             # NEVER assert has_clip optimistically: the clip file does not exist
@@ -717,8 +892,22 @@ class DetectionEngine:
             # written and non-empty — so the API reflects reality, not intent.
             "has_clip": False,
             "has_snapshot": st.best_frame is not None,
-            "entered_zones": [],
+            # Include zones stood in + crossing lines crossed, over the event's
+            # whole life. EventsPipeline already folds this into the event row's
+            # `zones`, which the web UI already shows — nothing downstream had
+            # to change to surface it.
+            "entered_zones": sorted(st.zones),
             "current_zones": [],
+            # Detect-space geometry for the snapshot annotators, carried on the
+            # payload rather than re-read from the camera row at enrichment time:
+            # this is the geometry that actually did the filtering/counting for
+            # THIS event, even if the operator has since redrawn it.
+            "include_zones": zonelib.zone_geometry(cam.include_zones) if cam else [],
+            "lines": [
+                {**line, "in": st.line_counts.get(line["name"], (0, 0))[0],
+                 "out": st.line_counts.get(line["name"], (0, 0))[1]}
+                for line in (zonelib.line_geometry(cam.cross_lines) if cam else [])
+            ],
         }
         if etype == "end":
             after["end_time"] = st.last_seen
@@ -753,7 +942,12 @@ class DetectionEngine:
         a mid-loop settings write could end one event and spare the next on the
         same frame.
         """
-        configured = self._settings.detection.get("absence_timeout_s")
+        # None-safe: an engine can be built without a settings store (every
+        # offline engine test does exactly that), and the absence sweep runs on
+        # EVERY frame — so an unset store must read as "use the default", not
+        # raise 5 times a second per camera.
+        detection = self._settings.detection if self._settings is not None else {}
+        configured = (detection or {}).get("absence_timeout_s")
         return ABSENCE_TIMEOUT_S if configured is None else max(0.5, float(configured))
 
     async def _housekeeping(self) -> None:
@@ -825,6 +1019,16 @@ class DetectionEngine:
                     "last_frame_age_s": round(age, 2) if age is not None else None,
                     # Debug: detections dropped so far by exempt-zone masking.
                     "masked_dropped": cam.masked_dropped,
+                    # Debug: detections dropped for falling OUTSIDE every include
+                    # zone. Zero on a camera with no include zones configured.
+                    "include_dropped": cam.include_dropped,
+                    # Cumulative crossings per line since this camera's lines were
+                    # last (re)built — the dashboard number, as opposed to the
+                    # per-event tally that goes on a snapshot.
+                    "line_counts": {
+                        name: {"in": line.in_count, "out": line.out_count}
+                        for name, line in cam.cross_lines
+                    },
                 }
             )
         return out

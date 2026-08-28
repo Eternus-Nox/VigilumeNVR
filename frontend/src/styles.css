@@ -3129,3 +3129,10 @@ label > select {
 .health-table .dot-up { background: var(--success, #3fbf60); }
 .health-table .dot-down { background: var(--danger, #e5484d); }
 .health-table .dot-unknown { background: var(--text-secondary, #778); }
+
+/* Detection geometry editor: the shape-kind selector above the frame. */
+.geometry-modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
