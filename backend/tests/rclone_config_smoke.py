@@ -195,6 +195,28 @@ def main() -> int:
         authorize_command("dropbox") == 'rclone authorize "dropbox"',
         "the authorize command is quoted so a shell cannot mangle the type",
     )
+    # A refresh token is bound to the app that issued it. If the operator has
+    # their own app, its credentials MUST be on the authorize command, or the
+    # token gets minted by rclone's built-in app while the remote refreshes
+    # with theirs — which fails, hours later, permanently.
+    check(
+        authorize_command("dropbox", "KEY", "SECRET")
+        == 'rclone authorize "dropbox" --client-id "KEY" --client-secret "SECRET"',
+        "an operator's own app credentials ride the authorize command, so the "
+        "token is minted by the same app the remote will refresh with",
+    )
+    check(
+        authorize_command("dropbox", "KEY", "") == 'rclone authorize "dropbox"'
+        and authorize_command("dropbox", "", "SECRET") == 'rclone authorize "dropbox"',
+        "BOTH or NEITHER — half an app would mint a token bound to something "
+        "the remote cannot reproduce, so a partial pair falls back to plain",
+    )
+    check(
+        authorize_command("dropbox", "  KEY  ", "  SECRET  ")
+        == 'rclone authorize "dropbox" --client-id "KEY" --client-secret "SECRET"',
+        "and pasted credentials are trimmed — a trailing space from a console "
+        "copy would otherwise be part of the app key",
+    )
     check(
         all(f.get("label") and f.get("kind") for p in payload for f in p["fields"]),
         "every field is renderable (has a label and a kind)",

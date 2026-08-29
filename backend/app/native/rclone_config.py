@@ -86,12 +86,15 @@ class Provider:
 _CLIENT_FIELDS = (
     Field(
         key="client_id", label="App key", required=False,
-        help="From your own app on the provider's developer site. Needed only "
-             "for browser sign-in.",
+        help="Only if you use your OWN app on the provider's developer site. "
+             "Leave blank to use rclone's built-in app.",
     ),
     Field(
         key="client_secret", label="App secret", kind="secret", required=False,
-        help="Stored so the token can renew itself.",
+        help="Required whenever App key is set — and the SAME app must mint the "
+             "token, because a refresh token can only be renewed by the app that "
+             "issued it. Mismatch them and the sign-in works for hours, then "
+             "fails permanently.",
     ),
 )
 
@@ -253,9 +256,28 @@ def providers_payload() -> list[dict[str, Any]]:
     ]
 
 
-def authorize_command(type_: str) -> str:
-    """The command an operator runs on their OWN desktop to mint a token."""
-    return f'rclone authorize "{type_}"'
+def authorize_command(type_: str, client_id: str = "", client_secret: str = "") -> str:
+    """The command an operator runs on their OWN desktop to mint a token.
+
+    WHEN THE OPERATOR HAS THEIR OWN APP, ITS CREDENTIALS MUST BE ON THIS
+    COMMAND. A refresh token is bound to the app that issued it: one minted by
+    rclone's built-in app cannot be refreshed using someone's own app key, and
+    vice versa. The mismatch is invisible at setup — the access token that came
+    back works for hours — and then every refresh fails forever with
+    `invalid_grant`, which reads as "the sign-in keeps going stale on its own".
+
+    So this takes the same credentials the remote will STORE, and the caller is
+    expected to pass whatever the operator typed. Both empty (the common case)
+    gives the plain command, which pairs with a remote that stores no app of
+    its own and therefore also refreshes against rclone's built-in app.
+    """
+    cmd = f'rclone authorize "{type_}"'
+    client_id, client_secret = (client_id or "").strip(), (client_secret or "").strip()
+    # BOTH or NEITHER: rclone needs the pair, and a half-supplied app would
+    # produce a token bound to something the remote cannot reproduce.
+    if client_id and client_secret:
+        cmd += f' --client-id "{client_id}" --client-secret "{client_secret}"'
+    return cmd
 
 
 # Fragments of rclone/provider error text, mapped to what an operator can

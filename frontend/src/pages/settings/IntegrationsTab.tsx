@@ -165,6 +165,23 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
   const selectedProvider = providers.find((p) => p.type === newType) ?? null;
   const browserAuth = !!selectedProvider?.oauth && authMode === 'browser';
 
+  // BOTH or NEITHER: rclone needs the pair, and a half-supplied app would mint
+  // a token bound to something the remote cannot reproduce.
+  const ownAppComplete =
+    !!newValues.client_id?.trim() && !!newValues.client_secret?.trim();
+  /**
+   * Mirrors rclone_config.authorize_command. Kept in sync deliberately rather
+   * than fetched, because it has to update as the operator types — and the
+   * whole point is that the command shown and the credentials stored are the
+   * same app.
+   */
+  const authorizeCommand = selectedProvider
+    ? `rclone authorize "${selectedProvider.type}"` +
+      (ownAppComplete
+        ? ` --client-id "${newValues.client_id.trim()}" --client-secret "${newValues.client_secret.trim()}"`
+        : '')
+    : '';
+
   // The redirect URI depends on the address THIS browser reached the server on
   // (192.168.1.45:8080, a hostname, a tunnel…), so it is resolved live rather
   // than configured — and it is what the operator registers on the app.
@@ -650,10 +667,19 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
               <>
                 <p>
                   Run this <strong>on your own computer</strong> (it needs rclone installed),
-                  approve the sign-in, and paste what it prints below. No app registration
-                  needed — it uses rclone&rsquo;s own.
+                  approve the sign-in, and paste what it prints below.
                 </p>
-                <pre><code>{selectedProvider.authorize_command}</code></pre>
+                {/* Built from the App key/secret typed BELOW, not fixed, because
+                    the two must match: a refresh token is bound to the app that
+                    issued it. Leave those blank and this stays the plain
+                    command, which pairs with a remote that stores no app and so
+                    also refreshes against rclone's built-in one. */}
+                <pre><code>{authorizeCommand}</code></pre>
+                <p className="muted small">
+                  {ownAppComplete
+                    ? 'Using your own app — the key and secret are on the command because the token must be minted by the same app this remote will refresh with.'
+                    : 'Using rclone\u2019s built-in app — no registration needed. If you have your own Dropbox/Drive app, fill in App key and App secret below and this command will update to match.'}
+                </p>
               </>
             )}
           </div>
@@ -662,10 +688,15 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
         {selectedProvider && (
           <div className="form-grid">
             {selectedProvider.fields
+              // In BROWSER mode only the app credentials are collected (the
+              // token is fetched for you). In TOKEN mode everything shows,
+              // INCLUDING the app credentials — hiding them was the bug: an
+              // operator with their own app had nowhere to put its key, so the
+              // remote stored a token minted by that app while refreshing
+              // against rclone's built-in one. Dropbox answers that with
+              // invalid_grant, hours later, forever.
               .filter((f) =>
-                browserAuth
-                  ? f.key === 'client_id' || f.key === 'client_secret'
-                  : f.key !== 'client_id' && f.key !== 'client_secret',
+                browserAuth ? f.key === 'client_id' || f.key === 'client_secret' : true,
               )
               .map((f) => (
               <label key={f.key}>
