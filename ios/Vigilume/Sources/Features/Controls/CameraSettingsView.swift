@@ -35,6 +35,9 @@ struct CameraSettingsView: View {
     @State private var mainUrl = ""
     @State private var subUrl = ""
     @State private var exemptZones: [ExemptZone] = []
+    @State private var includeZones: [IncludeZone] = []
+    @State private var crossLines: [CrossLine] = []
+    @State private var notifyOnCross = false
     @State private var configSaving = false
 
     // MARK: Credentials
@@ -299,18 +302,21 @@ struct CameraSettingsView: View {
     // MARK: - Exempt zones
 
     private var zonesCard: some View {
-        settingsCard("Detection exempt zones", systemImage: "hand.raised.slash.fill") {
-            ExemptZonesEditorView(
+        settingsCard("Detection zones & lines", systemImage: "hand.raised.slash.fill") {
+            DetectionGeometryEditorView(
                 cameraName: camera.name,
-                zones: $exemptZones,
+                exempt: $exemptZones,
+                include: $includeZones,
+                lines: $crossLines,
+                notifyOnCross: $notifyOnCross,
                 api: session.api
             )
             // Explainer sits UNDER the picture — keeps the frame the first thing
             // you see instead of pushing it down behind a paragraph.
-            Text("Draw polygons over the live view. Anything whose feet land inside a zone is ignored for detection — no event, notification or annotation.")
+            Text("Everything is judged by where an object's FEET land. \"Only alert here\" is an allow-list: draw one and everything outside it stops producing events. \"Ignore here\" then punches holes in what is left. A crossing line counts objects passing it in each direction.")
                 .font(.caption2)
                 .foregroundStyle(Theme.textSecondary)
-            saveButton("Save zones", busy: configSaving) {
+            saveButton("Save zones & lines", busy: configSaving) {
                 Task { await saveCameraConfig() }
             }
         }
@@ -431,6 +437,9 @@ struct CameraSettingsView: View {
         mainUrl = camera.mainUrl
         subUrl = camera.subUrl
         exemptZones = camera.exemptZones ?? []
+        includeZones = camera.includeZones ?? []
+        crossLines = camera.crossLines ?? []
+        notifyOnCross = camera.notifyOnCross ?? false
     }
 
     private func loadDeviceSettings() async {
@@ -471,6 +480,9 @@ struct CameraSettingsView: View {
             ip: ip.trimmingCharacters(in: .whitespaces),
             detectObjects: detectObjects,
             exemptZones: exemptZones,
+            includeZones: includeZones,
+            crossLines: crossLines,
+            notifyOnCross: notifyOnCross,
             detectFps: Int(detectFps),
             detectMode: detectMode.rawValue,
             mainUrl: mainUrl.trimmingCharacters(in: .whitespaces),
@@ -811,23 +823,63 @@ private struct FlowLayout: Layout {
     }
 }
 
-// MARK: - Exempt zones editor
+// MARK: - Detection geometry editor (exempt zones, include zones, crossing lines)
 
-/// Draw / manage per-camera exempt detection zones over a live snapshot. Points
-/// are kept NORMALIZED (0…1) against the displayed frame so they survive any
-/// resolution change (parity with the web ExemptZonesEditor). Tap to add draft
-/// points; Finish commits a polygon (≥3 points); existing zones can be removed.
-private struct ExemptZonesEditorView: View {
+/// Which shape the next tap draws. All three are always VISIBLE — an include
+/// zone and the exempt zones punched out of it only make sense seen together —
+/// but only the active one takes taps.
+private enum GeometryMode: String, CaseIterable, Identifiable {
+    case exempt, include, line
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .exempt: return "Ignore here"
+        case .include: return "Only alert here"
+        case .line: return "Crossing line"
+        }
+    }
+}
+
+/// Draw / manage a camera's detection geometry over a live snapshot. Points are
+/// kept NORMALIZED (0…1) against the displayed frame so they survive any
+/// resolution change (parity with the web DetectionGeometryEditor).
+///
+/// Colour carries the meaning so the frame reads at a glance: WARM = ignored,
+/// COOL = watched, YELLOW = a boundary.
+private struct DetectionGeometryEditorView: View {
     let cameraName: String
-    @Binding var zones: [ExemptZone]
+    @Binding var exempt: [ExemptZone]
+    @Binding var include: [IncludeZone]
+    @Binding var lines: [CrossLine]
+    @Binding var notifyOnCross: Bool
     let api: APIClient?
 
+    @State private var mode: GeometryMode = .exempt
     @State private var draft: [[Double]] = []
+    /// First tap of a two-tap line; nil when no line is in progress.
+    @State private var lineStart: [Double]?
 
-    private let zoneColors: [Color] = [.red, .orange, .blue, .purple, .pink, .green]
+    private let exemptColors: [Color] = [.red, .orange, .pink]
+    private let includeColors: [Color] = [.green, .cyan, .blue]
+    private let lineColors: [Color] = [.yellow, .mint, .orange]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            Picker("Shape", selection: $mode) {
+                ForEach(GeometryMode.allCases) { m in
+                    Text(m.label).tag(m)
+                }
+            }
+            .pickerStyle(.segmented)
+            // Switching mode abandons whatever was half-drawn: a polygon and a
+            // line are not the same shape, so carrying points across would
+            // produce nonsense.
+            .onChange(of: mode) { _, _ in
+                draft.removeAll()
+                lineStart = nil
+            }
+
             GeometryReader { geo in
                 ZStack {
                     Rectangle().fill(Theme.bgDeep)
@@ -846,22 +898,34 @@ private struct ExemptZonesEditorView: View {
                         snapshotUnavailable
                     }
 
-                    zoneOverlay(size: geo.size)
+                    geometryOverlay(size: geo.size)
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .contentShape(Rectangle())
                 .gesture(
                     DragGesture(minimumDistance: 0)
                         .onEnded { value in
-                            addPoint(value.location, in: geo.size)
+                            handleTap(value.location, in: geo.size)
                         }
                 )
             }
             .frame(height: 180)
 
+            if mode == .line {
+                lineControls
+            } else {
+                polygonControls
+            }
+        }
+    }
+
+    // MARK: controls
+
+    private var polygonControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                smallButton("Finish zone (\(draft.count))", disabled: draft.count < 3) {
-                    finishZone()
+                smallButton("Finish shape (\(draft.count))", disabled: draft.count < 3) {
+                    finishPolygon()
                 }
                 smallButton("Undo point", disabled: draft.isEmpty) {
                     if !draft.isEmpty { draft.removeLast() }
@@ -871,34 +935,116 @@ private struct ExemptZonesEditorView: View {
                 }
             }
 
-            if zones.isEmpty {
-                Text("No exempt zones — the whole frame is watched.")
-                    .font(.caption2)
-                    .foregroundStyle(Theme.textSecondary)
+            if mode == .exempt {
+                if exempt.isEmpty {
+                    caption("No exempt zones — the whole frame is watched.")
+                } else {
+                    ForEach(Array(exempt.enumerated()), id: \.offset) { idx, zone in
+                        polygonRow(
+                            color: exemptColors[idx % exemptColors.count],
+                            name: $exempt[idx].name,
+                            placeholder: "Zone \(idx + 1)",
+                            pointCount: zone.points.count
+                        ) { exempt.remove(at: idx) }
+                    }
+                }
             } else {
-                ForEach(Array(zones.enumerated()), id: \.offset) { idx, zone in
+                if include.isEmpty {
+                    caption("No include zones — the whole frame is watched. Draw one and everything outside it stops producing events.")
+                } else {
+                    ForEach(Array(include.enumerated()), id: \.offset) { idx, zone in
+                        polygonRow(
+                            color: includeColors[idx % includeColors.count],
+                            name: $include[idx].name,
+                            placeholder: "Area \(idx + 1)",
+                            pointCount: zone.points.count
+                        ) { include.remove(at: idx) }
+                    }
+                }
+            }
+        }
+    }
+
+    private var lineControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                smallButton("Cancel line", disabled: lineStart == nil) {
+                    lineStart = nil
+                }
+            }
+            caption(lineStart == nil
+                ? "Tap once to start the line, again to finish it. The dashed arrow shows which way counts as \u{201C}in\u{201D} — draw it the other way round to swap in and out."
+                : "Tap again to place the far end of the line.")
+
+            if lines.isEmpty {
+                caption("No crossing lines.")
+            } else {
+                ForEach(Array(lines.enumerated()), id: \.offset) { idx, _ in
                     HStack(spacing: 8) {
                         Circle()
-                            .fill(zoneColors[idx % zoneColors.count])
+                            .fill(lineColors[idx % lineColors.count])
                             .frame(width: 12, height: 12)
-                        // Editable name — committed by the same "Save zones" PUT
-                        // (ExemptZone is Codable, so `name` rides the payload).
-                        TextField("Zone \(idx + 1)", text: $zones[idx].name)
+                        TextField("Line \(idx + 1)", text: $lines[idx].name)
                             .font(.caption)
                             .textInputAutocapitalization(.words)
                             .autocorrectionDisabled()
                             .foregroundStyle(Theme.textPrimary)
-                        Text("\(zone.points.count) pts")
-                            .font(.caption2)
-                            .foregroundStyle(Theme.textSecondary)
-                        Button("Remove") { zones.remove(at: idx) }
+                        Button("Flip") {
+                            let old = lines[idx]
+                            lines[idx] = CrossLine(name: old.name, start: old.end, end: old.start)
+                        }
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Theme.accent)
+                        .buttonStyle(.plain)
+                        Button("Remove") { lines.remove(at: idx) }
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(Theme.dangerSoft)
                             .buttonStyle(.plain)
                     }
                 }
+
+                // Only offered once a line exists. The backend ignores this flag
+                // on a camera with no lines (it fails OPEN rather than muting the
+                // camera), and a toggle that does nothing is a worse way to say
+                // the same thing.
+                Toggle("Only notify me when a line is crossed", isOn: $notifyOnCross)
+                    .font(.caption)
+                    .tint(Theme.accent)
+                caption("A much sharper trigger than \u{201C}a person appeared in frame\u{201D}. The event, its clip and its snapshot are still recorded either way — this only holds back the alert until something actually crosses.")
             }
         }
+    }
+
+    private func polygonRow(
+        color: Color,
+        name: Binding<String>,
+        placeholder: String,
+        pointCount: Int,
+        remove: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 8) {
+            Circle().fill(color).frame(width: 12, height: 12)
+            // Editable name — committed by the same save PUT (the zone types are
+            // Codable, so `name` rides the payload).
+            TextField(placeholder, text: name)
+                .font(.caption)
+                .textInputAutocapitalization(.words)
+                .autocorrectionDisabled()
+                .foregroundStyle(Theme.textPrimary)
+            Text("\(pointCount) pts")
+                .font(.caption2)
+                .foregroundStyle(Theme.textSecondary)
+            Button("Remove", action: remove)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Theme.dangerSoft)
+                .buttonStyle(.plain)
+        }
+    }
+
+    private func caption(_ text: String) -> some View {
+        Text(text)
+            .font(.caption2)
+            .foregroundStyle(Theme.textSecondary)
     }
 
     private var snapshotUnavailable: some View {
@@ -907,13 +1053,27 @@ private struct ExemptZonesEditorView: View {
             .foregroundStyle(Theme.textSecondary)
     }
 
-    private func zoneOverlay(size: CGSize) -> some View {
+    // MARK: overlay
+
+    private func geometryOverlay(size: CGSize) -> some View {
         ZStack {
-            ForEach(Array(zones.enumerated()), id: \.offset) { idx, zone in
+            // Include zones sit UNDER the exempt ones, matching how they
+            // compose: the watched area first, then the holes cut out of it.
+            ForEach(Array(include.enumerated()), id: \.offset) { idx, zone in
+                let color = includeColors[idx % includeColors.count]
                 polygonPath(zone.points, in: size)
-                    .fill(zoneColors[idx % zoneColors.count].opacity(0.28))
+                    .fill(color.opacity(mode == .include ? 0.28 : 0.14))
+                polygonPath(zone.points, in: size).stroke(color, lineWidth: 2)
+            }
+            ForEach(Array(exempt.enumerated()), id: \.offset) { idx, zone in
+                let color = exemptColors[idx % exemptColors.count]
                 polygonPath(zone.points, in: size)
-                    .stroke(zoneColors[idx % zoneColors.count], lineWidth: 2)
+                    .fill(color.opacity(mode == .exempt ? 0.28 : 0.14))
+                polygonPath(zone.points, in: size).stroke(color, lineWidth: 2)
+            }
+            ForEach(Array(lines.enumerated()), id: \.offset) { idx, line in
+                lineOverlay(line, color: lineColors[idx % lineColors.count], size: size)
+                    .opacity(mode == .line ? 1 : 0.55)
             }
             if draft.count >= 2 {
                 draftPath(in: size)
@@ -925,6 +1085,39 @@ private struct ExemptZonesEditorView: View {
                     .frame(width: 8, height: 8)
                     .position(x: pt[0] * size.width, y: pt[1] * size.height)
             }
+            if let start = lineStart {
+                Circle()
+                    .fill(Theme.accent)
+                    .frame(width: 10, height: 10)
+                    .position(x: start[0] * size.width, y: start[1] * size.height)
+            }
+        }
+    }
+
+    private func lineOverlay(_ line: CrossLine, color: Color, size: CGSize) -> some View {
+        let sx = (line.start.first ?? 0) * size.width
+        let sy = (line.start.last ?? 0) * size.height
+        let ex = (line.end.first ?? 0) * size.width
+        let ey = (line.end.last ?? 0) * size.height
+        let mid = CGPoint(x: (sx + ex) / 2, y: (sy + ey) / 2)
+        let n = line.inNormal
+        // 26pt of arrow reads clearly at the 180pt editor height without
+        // covering the subject the line is drawn across.
+        let tip = CGPoint(x: mid.x + n.x * 26, y: mid.y + n.y * 26)
+        return ZStack {
+            Path { p in
+                p.move(to: CGPoint(x: sx, y: sy))
+                p.addLine(to: CGPoint(x: ex, y: ey))
+            }
+            .stroke(color, lineWidth: 3)
+            // The "in" arrow: which way a crossing counts as coming IN. Same
+            // normal the backend uses, so what you see is what it counts.
+            Path { p in
+                p.move(to: mid)
+                p.addLine(to: tip)
+            }
+            .stroke(color, style: StrokeStyle(lineWidth: 2, dash: [4, 3]))
+            Circle().fill(color).frame(width: 7, height: 7).position(tip)
         }
     }
 
@@ -949,16 +1142,37 @@ private struct ExemptZonesEditorView: View {
         }
     }
 
-    private func addPoint(_ location: CGPoint, in size: CGSize) {
+    // MARK: input
+
+    private func handleTap(_ location: CGPoint, in size: CGSize) {
         guard size.width > 0, size.height > 0 else { return }
         let x = min(1, max(0, Double(location.x / size.width)))
         let y = min(1, max(0, Double(location.y / size.height)))
-        draft.append([(x * 10000).rounded() / 10000, (y * 10000).rounded() / 10000])
+        let pt = [(x * 10000).rounded() / 10000, (y * 10000).rounded() / 10000]
+
+        guard mode == .line else {
+            draft.append(pt)
+            return
+        }
+        // A line is two taps: the first plants the start, the second finishes
+        // it. Finishing immediately (rather than needing a Finish button) keeps
+        // the two-tap gesture obvious.
+        guard let start = lineStart else {
+            lineStart = pt
+            return
+        }
+        guard start != pt else { return }  // zero-length: the backend drops it
+        lines.append(CrossLine(name: "Line \(lines.count + 1)", start: start, end: pt))
+        lineStart = nil
     }
 
-    private func finishZone() {
+    private func finishPolygon() {
         guard draft.count >= 3 else { return }
-        zones.append(ExemptZone(name: "Zone \(zones.count + 1)", points: draft))
+        if mode == .exempt {
+            exempt.append(ExemptZone(name: "Zone \(exempt.count + 1)", points: draft))
+        } else {
+            include.append(IncludeZone(name: "Area \(include.count + 1)", points: draft))
+        }
         draft.removeAll()
     }
 

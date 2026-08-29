@@ -61,6 +61,11 @@ struct PhonePushSettingsView: View {
     // above, which is the ntfy channel's own toggle.
     @State private var notificationsEnabled = true
     @State private var drawBoxes = true
+    /// Zone/line and object-path overlays on event snapshots. Both are ignored
+    /// by the backend while `drawBoxes` is off — that option promises a CLEAN
+    /// snapshot — so they are DISABLED rather than hidden when it is.
+    @State private var drawZones = true
+    @State private var drawTraces = true
     @State private var labels: [String] = []
     @State private var cooldownSeconds = 60
     @State private var minScore = 0.7
@@ -152,6 +157,20 @@ struct PhonePushSettingsView: View {
 
             Toggle("Draw detection boxes on snapshots", isOn: $drawBoxes)
                 .tint(Theme.accent)
+
+            Toggle("Draw include zones and crossing lines", isOn: $drawZones)
+                .tint(Theme.accent)
+                .disabled(!drawBoxes)
+
+            Toggle("Draw the path each object walked", isOn: $drawTraces)
+                .tint(Theme.accent)
+                .disabled(!drawBoxes)
+
+            if !drawBoxes {
+                Text("Overlays are off while \"Draw detection boxes\" is off — that option keeps the snapshot completely clean.")
+                    .font(.caption2)
+                    .foregroundStyle(Theme.textSecondary)
+            }
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Which objects notify")
@@ -506,9 +525,15 @@ struct PhonePushSettingsView: View {
         return doc.notifications.drawBoxes != drawBoxes
     }
 
+    private var overlaysDirty: Bool {
+        guard let doc else { return false }
+        return doc.notifications.drawZones != drawZones
+            || doc.notifications.drawTraces != drawTraces
+    }
+
     private var rulesDirty: Bool {
         notificationsEnabledDirty || labelsDirty || cooldownDirty
-            || minScoreDirty || drawBoxesDirty
+            || minScoreDirty || drawBoxesDirty || overlaysDirty
     }
 
     private var dirty: Bool { apnsDirty || ntfyDirty || cameraDownDirty || rulesDirty }
@@ -551,7 +576,9 @@ struct PhonePushSettingsView: View {
                 labels: labelsDirty ? labels : nil,
                 cooldownSeconds: cooldownDirty ? cooldownSeconds : nil,
                 minScore: minScoreDirty ? minScore : nil,
-                drawBoxes: drawBoxesDirty ? drawBoxes : nil
+                drawBoxes: drawBoxesDirty ? drawBoxes : nil,
+                drawZones: overlaysDirty ? drawZones : nil,
+                drawTraces: overlaysDirty ? drawTraces : nil
             )
         )
         do {
@@ -607,6 +634,8 @@ struct PhonePushSettingsView: View {
         cameraDownAlerts = document.notifications.cameraDownAlerts
         notificationsEnabled = document.notifications.enabled
         drawBoxes = document.notifications.drawBoxes
+        drawZones = document.notifications.drawZones
+        drawTraces = document.notifications.drawTraces
         labels = document.notifications.labels
         cooldownSeconds = document.notifications.cooldownSeconds
         minScore = document.notifications.minScore

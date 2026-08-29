@@ -43,6 +43,13 @@ struct RecordingSettingsView: View {
     // Event grouping (detection subtree, edited here because it decides where a
     // clip ends — the web groups it with the clip settings for the same reason)
     @State private var absenceTimeoutS = 5
+    /// Night contrast boost on the DETECTOR's frame only ("off"|"auto"|"always")
+    /// and the mean-luma threshold `auto` treats as night.
+    @State private var nightBoost = "off"
+    @State private var nightBoostThreshold = 60
+    /// sv.DetectionsSmoother over the tracker's output, and its window length.
+    @State private var smoothing = false
+    @State private var smoothingFrames = 3
     @State private var saving = false
     @State private var saveError: String?
 
@@ -88,6 +95,7 @@ struct RecordingSettingsView: View {
             storageLimitsSection
             clipPaddingSection
             eventGroupingSection
+            detectorInputSection
             saveSection
         }
         .scrollContentBackground(.hidden)
@@ -271,6 +279,54 @@ struct RecordingSettingsView: View {
         .listRowBackground(Theme.surface)
     }
 
+    // MARK: - Detector input
+
+    /// `detection.night_boost` + `detection.smoothing`. Two ways to change what
+    /// the model sees BEFORE it looks. Both ship off, and both are genuine
+    /// trades rather than free wins — the footers say so, because a setting
+    /// whose cost is invisible is one people leave on by mistake.
+    private var detectorInputSection: some View {
+        Section {
+            Picker("Night contrast boost", selection: $nightBoost) {
+                Text("Off").tag("off")
+                Text("Auto — dark frames only").tag("auto")
+                Text("Always").tag("always")
+            }
+            .foregroundStyle(Theme.textPrimary)
+
+            if nightBoost == "auto" {
+                valueRow(
+                    "Night below",
+                    value: $nightBoostThreshold,
+                    range: 0...255,
+                    step: 5,
+                    display: { "\($0) brightness" },
+                    hint: "60 sits well under a lit indoor scene and above a genuinely black frame."
+                )
+            }
+
+            Toggle("Smooth detection boxes", isOn: $smoothing)
+                .tint(Theme.accent)
+                .foregroundStyle(Theme.textPrimary)
+
+            if smoothing {
+                valueRow(
+                    "Frames averaged",
+                    value: $smoothingFrames,
+                    range: 2...10,
+                    step: 1,
+                    display: { "\($0) frames" },
+                    hint: "3 frames is a 0.6 s window at the default 5 fps. Higher is steadier and laggier."
+                )
+            }
+        } header: {
+            Text("Detector input")
+        } footer: {
+            Text("The boost lifts local contrast on the frame handed to detection, for a camera run without IR where the scene is dim rather than dark. It never touches recordings, clips, live view or the saved snapshot. It cannot create detail in a frame with no light, and the model was trained on ordinary images — so it can help or hurt depending on the camera. Smoothing steadies boxes across frames, but an averaged box LAGS a moving subject and an object is still reported for a few frames after it leaves. Turn one on, watch a camera you care about for a night, and keep it only if it actually helped.")
+        }
+        .listRowBackground(Theme.surface)
+    }
+
     private func secondsText(_ s: Int) -> String { s == 1 ? "1 second" : "\(s) seconds" }
 
     /// The generalised twin of `dayRow`: a clamped Stepper with a caption, for
@@ -331,6 +387,10 @@ struct RecordingSettingsView: View {
     private var detectionDirty: Bool {
         guard let doc else { return false }
         return absenceTimeoutS != doc.detection.absenceTimeoutS
+            || nightBoost != doc.detection.nightBoost
+            || nightBoostThreshold != doc.detection.nightBoostThreshold
+            || smoothing != doc.detection.smoothing
+            || smoothingFrames != doc.detection.smoothingFrames
     }
 
     private var dirty: Bool { recordingDirty || detectionDirty }
@@ -392,7 +452,15 @@ struct RecordingSettingsView: View {
                     clipDelayS: clipDelayS
                 )
                 : nil,
-            detection: detectionDirty ? .init(absenceTimeoutS: absenceTimeoutS) : nil
+            detection: detectionDirty
+                ? .init(
+                    absenceTimeoutS: absenceTimeoutS,
+                    nightBoost: nightBoost,
+                    nightBoostThreshold: nightBoostThreshold,
+                    smoothing: smoothing,
+                    smoothingFrames: smoothingFrames
+                )
+                : nil
         )
         do {
             apply(try await api.patchSettings(patch))
@@ -431,5 +499,9 @@ struct RecordingSettingsView: View {
         clipPostS = document.recording.clipPostS
         clipDelayS = document.recording.clipDelayS
         absenceTimeoutS = document.detection.absenceTimeoutS
+        nightBoost = document.detection.nightBoost
+        nightBoostThreshold = document.detection.nightBoostThreshold
+        smoothing = document.detection.smoothing
+        smoothingFrames = document.detection.smoothingFrames
     }
 }

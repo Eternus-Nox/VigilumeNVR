@@ -1,3 +1,4 @@
+import CoreGraphics  // CGPoint, for CrossLine.inNormal
 import Foundation
 
 // Typed models mirroring docs/CONTRACTS.md (reference client:
@@ -115,6 +116,53 @@ struct ExemptZone: Codable, Sendable, Hashable, Identifiable {
     }
 }
 
+/// A per-camera INCLUDE zone — the allow-list counterpart of `ExemptZone`, in
+/// the same normalized 0…1 coords. With none configured the whole frame is
+/// watched; configure one and every detection whose FEET land outside all of
+/// them is dropped before an event can open.
+///
+/// The two compose in that order: include zones decide what is watched, exempt
+/// zones then punch holes in it.
+struct IncludeZone: Codable, Sendable, Hashable, Identifiable {
+    var name: String
+    var points: [[Double]]
+
+    var id: String {
+        let head = points.first.map { "\($0.first ?? 0),\($0.last ?? 0)" } ?? "0"
+        return "\(name)|\(points.count)|\(head)"
+    }
+}
+
+/// A boundary whose crossings are counted. `start`/`end` are normalized 0…1.
+///
+/// DIRECTION MATTERS and is visible in the editor: a crossing to the LEFT of
+/// the start→end arrow counts as "in", the other way as "out". Drawing the line
+/// the other way round swaps the two, which is what the Flip button does.
+struct CrossLine: Codable, Sendable, Hashable, Identifiable {
+    var name: String
+    /// [x, y], normalized 0…1.
+    var start: [Double]
+    var end: [Double]
+
+    var id: String {
+        "\(name)|\(start.first ?? 0),\(start.last ?? 0)|\(end.first ?? 0),\(end.last ?? 0)"
+    }
+
+    /// Unit vector pointing to the side a crossing counts as "in".
+    ///
+    /// MUST match native/zones.py:line_in_normal and the web editor. supervision
+    /// counts a crossing to the LEFT of the start→end arrow as "in"; in screen
+    /// coords (y down) that is `(dy, -dx)` — upward for a line drawn left to
+    /// right. Returns (0, 0) for a degenerate line.
+    var inNormal: CGPoint {
+        let dx = (end.first ?? 0) - (start.first ?? 0)
+        let dy = (end.last ?? 0) - (start.last ?? 0)
+        let mag = (dx * dx + dy * dy).squareRoot()
+        guard mag > 0 else { return .zero }
+        return CGPoint(x: dy / mag, y: -dx / mag)
+    }
+}
+
 // Hashable so navigation APIs (navigationDestination(item:)) can route on it.
 struct Camera: Decodable, Identifiable, Sendable, Hashable {
     struct Toggle: Decodable, Sendable, Hashable {
@@ -134,6 +182,17 @@ struct Camera: Decodable, Identifiable, Sendable, Hashable {
     /// Stored exempt (privacy/ignore) detection zones. Absent on a backend that
     /// predates the feature — decode a missing key as `nil` (treated as none).
     let exemptZones: [ExemptZone]?
+    /// Allow-list polygons; when non-empty, objects OUTSIDE them all are
+    /// dropped. Absent on a backend predating the feature -> nil == watch
+    /// everything, which is exactly the old behaviour.
+    let includeZones: [IncludeZone]?
+    /// Boundaries whose crossings are counted. Absent -> nil == none.
+    let crossLines: [CrossLine]?
+    /// Only notify once something crosses one of this camera's lines. Gates the
+    /// ALERT only — the event, its clip and its snapshot are recorded either
+    /// way — and the backend ignores it entirely when no lines are drawn, so it
+    /// can never silently mute a camera. Absent -> false.
+    let notifyOnCross: Bool?
     let detect: Toggle
     let record: Toggle
     let detectFps: Int
@@ -219,6 +278,13 @@ struct CameraUpdatePayload: Encodable, Sendable {
     var password: String = ""
     var detectObjects: [String]?
     var exemptZones: [ExemptZone]?
+    /// Include zones and crossing lines. Same contract as `exemptZones`: nil
+    /// keeps the stored value, an explicit `[]` clears them. An include zone
+    /// with < 3 points, or a line whose ends coincide, is dropped server-side.
+    var includeZones: [IncludeZone]?
+    var crossLines: [CrossLine]?
+    /// Alert only on a line crossing; nil = keep stored.
+    var notifyOnCross: Bool?
     var detectFps: Int?
     /// nil = keep stored; "" = inherit global default; a valid mode = set.
     var detectMode: String?
@@ -616,9 +682,22 @@ struct SettingsDocument: Decodable, Sendable {
         /// but it decides whether a subject that pauses or is briefly hidden is
         /// one event or several, and a clip is only cut once its event ends.
         var absenceTimeoutS: Int
+        /// Night contrast boost on the DETECTOR's input frame only — never on
+        /// recordings, clips, live view or the saved snapshot. "auto" boosts
+        /// only frames darker than `nightBoostThreshold` (mean luma 0…255).
+        /// Absent on a backend predating it -> "off", which is also its default:
+        /// it changes what the model sees, so it is opt-in.
+        var nightBoost: String
+        var nightBoostThreshold: Int
+        /// Average each tracked box over the last N frames. Steadier boxes, at
+        /// the cost of the box LAGGING a moving subject and a track lingering a
+        /// few frames after it leaves. Absent -> off.
+        var smoothing: Bool
+        var smoothingFrames: Int
 
         private enum CodingKeys: String, CodingKey {
             case model, confidence, defaultMode, backend, coralModel, absenceTimeoutS
+            case nightBoost, nightBoostThreshold, smoothing, smoothingFrames
         }
 
         init(from decoder: Decoder) throws {
@@ -632,6 +711,14 @@ struct SettingsDocument: Decodable, Sendable {
             coralModel = try c.decodeIfPresent(String.self, forKey: .coralModel)
                 ?? CoralModelInfo.defaultKey
             absenceTimeoutS = try c.decodeIfPresent(Int.self, forKey: .absenceTimeoutS) ?? 5
+            // An UNKNOWN mode degrades to "off", never to a boost — the same
+            // rule the backend applies (native/enhance.py). A typo must not
+            // silently start altering what the detector sees.
+            let boost = try c.decodeIfPresent(String.self, forKey: .nightBoost) ?? "off"
+            nightBoost = ["off", "auto", "always"].contains(boost) ? boost : "off"
+            nightBoostThreshold = try c.decodeIfPresent(Int.self, forKey: .nightBoostThreshold) ?? 60
+            smoothing = try c.decodeIfPresent(Bool.self, forKey: .smoothing) ?? false
+            smoothingFrames = try c.decodeIfPresent(Int.self, forKey: .smoothingFrames) ?? 3
         }
     }
 
@@ -797,9 +884,17 @@ struct SettingsDocument: Decodable, Sendable {
         var cooldownSeconds: Int
         var minScore: Double
         var drawBoxes: Bool
+        /// Draw the camera's include zones / crossing lines on event snapshots,
+        /// and each object's recent ground path. Pure annotation — they never
+        /// change what was detected. Absent -> true (the shipped default). Both
+        /// are ignored while `drawBoxes` is off: that option promises a CLEAN
+        /// snapshot and the backend honours it for these too.
+        var drawZones: Bool
+        var drawTraces: Bool
 
         private enum CodingKeys: String, CodingKey {
             case apns, ntfy, cameraDownAlerts, enabled, labels, cooldownSeconds, minScore, drawBoxes
+            case drawZones, drawTraces
         }
 
         init(from decoder: Decoder) throws {
@@ -813,6 +908,8 @@ struct SettingsDocument: Decodable, Sendable {
             cooldownSeconds = try c.decodeIfPresent(Int.self, forKey: .cooldownSeconds) ?? 60
             minScore = try c.decodeIfPresent(Double.self, forKey: .minScore) ?? 0.7
             drawBoxes = try c.decodeIfPresent(Bool.self, forKey: .drawBoxes) ?? true
+            drawZones = try c.decodeIfPresent(Bool.self, forKey: .drawZones) ?? true
+            drawTraces = try c.decodeIfPresent(Bool.self, forKey: .drawTraces) ?? true
         }
 
         init() {
@@ -824,6 +921,8 @@ struct SettingsDocument: Decodable, Sendable {
             cooldownSeconds = 60
             minScore = 0.7
             drawBoxes = true
+            drawZones = true
+            drawTraces = true
         }
     }
 
@@ -943,6 +1042,12 @@ struct SettingsPatch: Encodable, Sendable {
         var coralModel: String?
         /// Seconds a label may go unseen before its event ends.
         var absenceTimeoutS: Int?
+        /// Night contrast boost: "off" | "auto" | "always". Backend bounds:
+        /// threshold 0…255, smoothingFrames 2…10.
+        var nightBoost: String?
+        var nightBoostThreshold: Int?
+        var smoothing: Bool?
+        var smoothingFrames: Int?
     }
 
     /// Every field Optional + omitted when nil, per the convention above: a
@@ -1009,6 +1114,8 @@ struct SettingsPatch: Encodable, Sendable {
         var cooldownSeconds: Int?
         var minScore: Double?
         var drawBoxes: Bool?
+        var drawZones: Bool?
+        var drawTraces: Bool?
     }
 
     /// Home Assistant MQTT. Every field Optional (nil omitted) — send only what
