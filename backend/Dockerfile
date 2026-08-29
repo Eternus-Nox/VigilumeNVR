@@ -45,6 +45,28 @@ RUN apt-get update \
 # and the JWT secret already live.
 ENV RCLONE_CONFIG=/data/rclone.conf
 
+# GLIBC ALLOCATOR TUNING — for a slow RSS climb that is NOT a leak.
+#
+# The detect path allocates a ~1 MB BGR frame per camera per frame and frees it
+# almost immediately: eight cameras at 8 fps is ~64 MB/s of large, short-lived
+# allocations. Two glibc behaviours turn that into RSS that only ever goes up:
+#
+#   * the mmap threshold is DYNAMIC. It starts at 128 KB, so 1 MB frames are
+#     mmap'd and returned to the OS on free — but every free of a larger block
+#     ratchets it upward, and once it passes 1 MB those frames start coming
+#     from the heap instead, where free() cannot return them. Pinning it
+#     disables the ratchet, which is the whole point.
+#   * malloc creates up to 8 arenas PER CORE on a threaded process. With
+#     asyncio, the to_thread pool and ORT's own threads on a 16-thread host,
+#     that is a lot of independently-fragmenting heaps.
+#
+# These are inert on a machine that was not fragmenting, so they cost nothing
+# to carry. They do NOT fix a real leak — there is none in the Python — they
+# stop the allocator from hoarding what it has already freed.
+ENV MALLOC_ARENA_MAX=2 \
+    MALLOC_MMAP_THRESHOLD_=131072 \
+    MALLOC_TRIM_THRESHOLD_=131072
+
 WORKDIR /srv
 COPY requirements.txt requirements-cpu.txt ./
 RUN pip install -r requirements.txt -r requirements-cpu.txt
@@ -166,6 +188,28 @@ RUN apt-get update \
 # authorization. Point it at the persistent /data mount instead, where the DB
 # and the JWT secret already live.
 ENV RCLONE_CONFIG=/data/rclone.conf
+
+# GLIBC ALLOCATOR TUNING — for a slow RSS climb that is NOT a leak.
+#
+# The detect path allocates a ~1 MB BGR frame per camera per frame and frees it
+# almost immediately: eight cameras at 8 fps is ~64 MB/s of large, short-lived
+# allocations. Two glibc behaviours turn that into RSS that only ever goes up:
+#
+#   * the mmap threshold is DYNAMIC. It starts at 128 KB, so 1 MB frames are
+#     mmap'd and returned to the OS on free — but every free of a larger block
+#     ratchets it upward, and once it passes 1 MB those frames start coming
+#     from the heap instead, where free() cannot return them. Pinning it
+#     disables the ratchet, which is the whole point.
+#   * malloc creates up to 8 arenas PER CORE on a threaded process. With
+#     asyncio, the to_thread pool and ORT's own threads on a 16-thread host,
+#     that is a lot of independently-fragmenting heaps.
+#
+# These are inert on a machine that was not fragmenting, so they cost nothing
+# to carry. They do NOT fix a real leak — there is none in the Python — they
+# stop the allocator from hoarding what it has already freed.
+ENV MALLOC_ARENA_MAX=2 \
+    MALLOC_MMAP_THRESHOLD_=131072 \
+    MALLOC_TRIM_THRESHOLD_=131072
 
 ENV VIRTUAL_ENV=/opt/venv
 RUN python3.12 -m venv "$VIRTUAL_ENV"

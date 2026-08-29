@@ -43,7 +43,7 @@ import cv2
 import numpy as np
 import supervision as sv
 
-from ..config import env_dual
+from ..config import env_dual, env_dual_bool
 from .coco_labels import set_active_labelmap
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -493,6 +493,23 @@ class OnnxDetector:
             # not oversubscribe the shared host. Tunable; default leaves cores
             # free for ffmpeg while keeping per-frame latency reasonable.
             so.intra_op_num_threads = int(env_dual("ORT_INTRA_THREADS", "4"))
+            # ORT's CPU arena GROWS AND NEVER RETURNS. It is a pooling
+            # allocator: it reserves blocks up front, reuses them across
+            # inferences, and hands nothing back to the OS for the life of the
+            # process. That is the right trade on a dedicated inference box and
+            # the wrong one here, where the same host also runs sixteen ffmpeg
+            # children and an NVR — and it is a large part of why RSS climbs
+            # and plateaus rather than sitting still.
+            #
+            # Left ON by default, because turning it off routes every
+            # activation through malloc and costs per-inference latency that
+            # this build has not measured. VIGILUME_ORT_ARENA=0 turns it off
+            # for anyone trading that latency for a smaller, steadier process.
+            # env_dual takes a SUFFIX — it prepends VIGILUME_ itself, so this
+            # reads VIGILUME_ORT_ARENA, matching ORT_INTRA_THREADS above.
+            if not env_dual_bool("ORT_ARENA", True):
+                so.enable_cpu_mem_arena = False
+                log.info("ONNX CPU memory arena DISABLED (VIGILUME_ORT_ARENA=0)")
         session = ort.InferenceSession(str(path), sess_options=so, providers=providers)
         active = session.get_providers()[0]
         self._input_name = session.get_inputs()[0].name
