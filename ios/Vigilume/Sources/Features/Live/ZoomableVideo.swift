@@ -12,9 +12,12 @@ import SwiftUI
 ///   (unmute on live, dismiss on the clip cover) keeps working. Because drag is
 ///   inert at 1×, that single-tap behavior is unchanged until the user zooms in.
 ///
-/// The gestures live on the zoom layer itself; overlay chrome (close/mute
-/// buttons, state overlay) sits above this view in its ZStack and keeps its own
-/// hit testing, so controls are never blocked.
+/// The gestures live on the zoom layer itself; overlay chrome (the close
+/// button, the talk mic, the state overlay) sits above this view in its ZStack
+/// and keeps its own hit testing, so controls are never blocked.
+///
+/// `onSingleTap` is OPTIONAL and defaults to doing nothing — the fullscreen
+/// player used it for tap-to-unmute and no longer has anything to toggle.
 struct ZoomableVideo<Content: View>: View {
     var onSingleTap: () -> Void = {}
     @ViewBuilder var content: () -> Content

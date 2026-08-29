@@ -16,7 +16,17 @@ import SwiftUI
 ///              used to be missing/unreliable.
 ///   • ✕      = clear the slot (preset_clear).
 /// Saved vs empty is shown explicitly, and each fired action flashes a caption.
-struct PTZControlsView: View {
+/// The pad's empty centre cell when the host supplies nothing for it — the
+/// controls screen's original look.
+struct PTZCenterPlaceholder: View {
+    var body: some View {
+        Image(systemName: "dot.scope")
+            .font(.system(size: 18, weight: .semibold))
+            .foregroundStyle(Theme.textSecondary.opacity(0.4))
+    }
+}
+
+struct PTZControlsView<Center: View>: View {
     let onStep: (PTZDirection) -> Void
     let onPresetGoto: (Int) -> Void
     let onPresetSet: (Int) -> Void
@@ -28,12 +38,48 @@ struct PTZControlsView: View {
     /// Step magnitude (1–8) for the directional pad; bound so the slider writes back.
     @Binding var speed: Double
     let enabled: Bool
+    /// Hide the speed slider and preset row, leaving only the pad. For the
+    /// fullscreen live overlay, where the pad sits ON the video and every extra
+    /// row covers the thing being watched.
+    let compact: Bool
+    /// What occupies the pad's centre cell. The controls screen leaves it as the
+    /// placeholder; fullscreen puts the talk mic there, which is the natural
+    /// home for it — thumb already on the pad, no second control to reach for.
+    let center: Center
+
+    /// Written out rather than synthesized: the centre is a @ViewBuilder
+    /// closure, and an explicit init is the unambiguous way to spell that.
+    init(
+        onStep: @escaping (PTZDirection) -> Void,
+        onPresetGoto: @escaping (Int) -> Void,
+        onPresetSet: @escaping (Int) -> Void,
+        onPresetClear: @escaping (Int) -> Void,
+        savedPresets: Set<Int>,
+        presetBusy: Int?,
+        speed: Binding<Double>,
+        enabled: Bool,
+        compact: Bool = false,
+        @ViewBuilder center: () -> Center
+    ) {
+        self.onStep = onStep
+        self.onPresetGoto = onPresetGoto
+        self.onPresetSet = onPresetSet
+        self.onPresetClear = onPresetClear
+        self.savedPresets = savedPresets
+        self.presetBusy = presetBusy
+        self._speed = speed
+        self.enabled = enabled
+        self.compact = compact
+        self.center = center()
+    }
 
     var body: some View {
         VStack(spacing: 16) {
             directionPad
-            speedSlider
-            presetRow
+            if !compact {
+                speedSlider
+                presetRow
+            }
         }
     }
 
@@ -58,15 +104,13 @@ struct PTZControlsView: View {
                         onStep: { onStep(direction) }
                     )
                 } else {
-                    // Empty centre cell — keeps the arrows on a fixed grid.
+                    // Centre cell — a fixed 60×60 slot whatever it holds, so the
+                    // arrows stay on a rigid grid however big the host's centre
+                    // view wants to be.
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .fill(Color.clear)
                         .frame(width: 60, height: 60)
-                        .overlay(
-                            Image(systemName: "dot.scope")
-                                .font(.system(size: 18, weight: .semibold))
-                                .foregroundStyle(Theme.textSecondary.opacity(0.4))
-                        )
+                        .overlay(center)
                 }
             }
         }
@@ -117,6 +161,35 @@ struct PTZControlsView: View {
 /// self-contained nudge in this direction. No hold, no release edge: this is
 /// what replaced the runaway press-and-hold. A brief press-in scale gives tap
 /// feedback.
+/// Keeps the controls-screen call site unchanged: the same argument list, with
+/// the placeholder centre and the full (non-compact) layout.
+extension PTZControlsView where Center == PTZCenterPlaceholder {
+    init(
+        onStep: @escaping (PTZDirection) -> Void,
+        onPresetGoto: @escaping (Int) -> Void,
+        onPresetSet: @escaping (Int) -> Void,
+        onPresetClear: @escaping (Int) -> Void,
+        savedPresets: Set<Int>,
+        presetBusy: Int?,
+        speed: Binding<Double>,
+        enabled: Bool
+    ) {
+        self.init(
+            onStep: onStep,
+            onPresetGoto: onPresetGoto,
+            onPresetSet: onPresetSet,
+            onPresetClear: onPresetClear,
+            savedPresets: savedPresets,
+            presetBusy: presetBusy,
+            speed: speed,
+            enabled: enabled,
+            compact: false
+        ) {
+            PTZCenterPlaceholder()
+        }
+    }
+}
+
 private struct PTZPadButton: View {
     let direction: PTZDirection
     let enabled: Bool

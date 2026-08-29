@@ -7,8 +7,17 @@ import WebRTC
 /// promotes to the full-res `<name>` stream once measured link quality proves it
 /// can carry it (and demotes again if it can't). Beneath that sits the older HLS
 /// safety net — `<name>` primary with a `<name>_sub` fallback carrying the
-/// "SD (compat)" badge and an HD retry (docs/ios-design.md §2.1.1). Muted by
-/// default — tapping the video (or the pill) unmutes.
+/// "SD (compat)" badge and an HD retry (docs/ios-design.md §2.1.1).
+///
+/// SOUND IS ON from the moment it opens and there is no mute control. Going
+/// fullscreen on one camera is already the deliberate act of paying attention
+/// to it, and a muted-by-default player asks the user to discover a second
+/// gesture before the camera can be heard. The dashboard tiles stay muted —
+/// several of them playing at once is a different situation — so this sets
+/// `isMuted` on its own controller rather than changing the class default.
+///
+/// The only mic here is HOLD TO TALK. On a PTZ camera it sits in the CENTRE of
+/// the directional pad, where the thumb already is.
 ///
 /// Camera controls live on CameraDetailView (the tap-through screen that
 /// presents this cover) — this view is deliberately video-only.
@@ -31,9 +40,12 @@ struct SingleCameraView: View {
     /// drives — mic -> 8 kHz Int16 PCM -> the camera's talk WebSocket.
     @StateObject private var talk = TalkController()
     @ObservedObject private var network = NetworkQuality.shared
-    /// The user's mute state before talk forced the receive audio on, so it can
-    /// be put back afterwards. nil == talk is not currently holding it.
-    @State private var muteBeforeTalk: Bool?
+    /// Step magnitude for the fullscreen pad. Local to this screen — the
+    /// controls screen keeps its own, and a speed slider over live video is the
+    /// kind of chrome fullscreen exists to avoid.
+    @State private var ptzSpeed: Double = 4
+    /// Last PTZ error, surfaced in the same alert talk uses.
+    @State private var ptzError: String?
 
     var body: some View {
         ZStack {
@@ -62,7 +74,7 @@ struct SingleCameraView: View {
                     .ignoresSafeArea()
                 }
 
-                ZoomableVideo(onSingleTap: toggleMute) {
+                ZoomableVideo {
                     LiveVideoLayer(controller: model, videoGravity: .resizeAspect)
                 }
                 .ignoresSafeArea()
@@ -140,6 +152,20 @@ struct SingleCameraView: View {
         } message: {
             Text(talk.alertMessage ?? "")
         }
+        // A SECOND alert rather than one shared with talk: they can fail
+        // independently (holding the mic while stepping the camera), and one
+        // binding would let the later failure silently replace the earlier.
+        .alert(
+            "Camera control",
+            isPresented: Binding(
+                get: { ptzError != nil },
+                set: { if !$0 { ptzError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(ptzError ?? "")
+        }
     }
 
     private var isOnline: Bool {
@@ -169,6 +195,10 @@ struct SingleCameraView: View {
             model.stop()
             return
         }
+        // Sound on, always, for this screen only (see the type docstring).
+        // Set BEFORE play() so the first negotiated track already carries audio
+        // rather than needing a second pass to enable it.
+        model.isMuted = false
         guard let primaryURL else { return }
         // Open on the SMALL rung regardless of the path, then let measured
         // link quality climb to main. Starting full-res on a weak link is what
@@ -235,46 +265,102 @@ struct SingleCameraView: View {
         )
     }
 
-    /// Mute pill and — on a camera with a speaker — the hold-to-talk mic.
+    /// The hold-to-talk mic — the only mic on this screen — and, on a PTZ
+    /// camera, the directional pad it sits in the middle of.
     ///
-    /// Both are capability-gated, and on DIFFERENT capabilities: `mic` is the
-    /// camera's microphone (whether there is anything to hear), `speaker` is
-    /// whether the camera can play what you say. A doorbell has both; plenty of
+    /// Talk is capability-gated on `speaker` (whether the camera can play what
+    /// you say), NOT on `mic` (whether there is anything to hear). Plenty of
     /// cameras have one and not the other, and gating talk on `mic` would offer
     /// a button that could only ever fail.
     ///
     /// Talk is capability-gated ONLY — viewers may talk, matching the backend's
     /// talk WS, which accepts a viewer session token (see CameraDetailView).
     private var bottomBar: some View {
-        VStack(spacing: 14) {
-            if showsTalk {
-                VStack(spacing: 6) {
-                    PushToTalkButton(model: talk, state: \.state, diameter: 76) {
-                        guard let url = session.api?.talkWebSocketURL(camera: camera.name) else {
-                            talk.alertMessage = "Talk connection URL is unavailable."
-                            return
-                        }
-                        talk.start(url: url, protocols: session.api?.wsSubprotocols() ?? [])
-                    } onRelease: {
-                        talk.stop()
+        VStack(spacing: 10) {
+            if showsPTZ {
+                // Mic in the CENTRE of the pad: on a camera you can both drive
+                // and talk through, the thumb is already on the pad, and a
+                // separate mic elsewhere on screen means moving off it mid-shot.
+                // Compact hides the speed slider and presets — those belong on
+                // the controls screen, not over live video.
+                PTZControlsView(
+                    onStep: { direction in Task { await ptzStep(direction) } },
+                    onPresetGoto: { _ in },
+                    onPresetSet: { _ in },
+                    onPresetClear: { _ in },
+                    savedPresets: [],
+                    presetBusy: nil,
+                    speed: $ptzSpeed,
+                    enabled: isOnline,
+                    compact: true
+                ) {
+                    if showsTalk {
+                        talkButton(diameter: 60)
+                    } else {
+                        // A PTZ camera with no speaker has nothing to put here;
+                        // the placeholder keeps the 3x3 grid reading as a grid.
+                        PTZCenterPlaceholder()
                     }
-                    .disabled(!isOnline)
-                    .opacity(isOnline ? 1 : 0.55)
-                    .accessibilityLabel("Hold to talk")
-
-                    Text(talkStatusText)
-                        .font(.caption2.weight(.medium))
-                        .foregroundStyle(talk.state == .live ? Theme.success : Color.white.opacity(0.75))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 3)
-                        .background(Capsule().fill(Color.black.opacity(0.5)))
                 }
+                .padding(12)
+                .background(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(Color.black.opacity(0.42))
+                )
+            } else if showsTalk {
+                talkButton(diameter: 76)
             }
-            if camera.capabilities.mic, !camera.isPrivate {
-                muteButton
+
+            if showsTalk {
+                Text(talkStatusText)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(talk.state == .live ? Theme.success : Color.white.opacity(0.75))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color.black.opacity(0.5)))
             }
         }
         .padding(.bottom, 24)
+    }
+
+    private func talkButton(diameter: CGFloat) -> some View {
+        PushToTalkButton(model: talk, state: \.state, diameter: diameter) {
+            guard let url = session.api?.talkWebSocketURL(camera: camera.name) else {
+                talk.alertMessage = "Talk connection URL is unavailable."
+                return
+            }
+            talk.start(url: url, protocols: session.api?.wsSubprotocols() ?? [])
+        } onRelease: {
+            talk.stop()
+        }
+        .disabled(!isOnline)
+        .opacity(isOnline ? 1 : 0.55)
+        .accessibilityLabel("Hold to talk")
+    }
+
+    /// The pad only appears for a camera that actually has PTZ, and never on a
+    /// private one — a camera capturing nothing should not be drivable from a
+    /// screen showing nothing.
+    private var showsPTZ: Bool {
+        camera.capabilities.ptz && !camera.isPrivate
+    }
+
+    /// One PTZ step. Errors surface through the same alert talk uses rather
+    /// than a silent no-op — a pad that does nothing is indistinguishable from
+    /// a camera that will not move.
+    private func ptzStep(_ direction: PTZDirection) async {
+        guard let api = session.api else { return }
+        do {
+            try await api.ptz(
+                camera: camera.name,
+                action: .step,
+                direction: direction,
+                speed: Int(ptzSpeed.rounded())
+            )
+        } catch {
+            session.handleAPIError(error)
+            ptzError = (error as? ApiError)?.message ?? error.localizedDescription
+        }
     }
 
     /// Talk needs a speaker on the camera, and is pointless on a private one
@@ -292,57 +378,25 @@ struct SingleCameraView: View {
         }
     }
 
-    /// Force the live receive audio on while talking (a one-way shout is not a
-    /// conversation), remembering the prior mute state and restoring it after.
+    /// Talk is only a conversation if the far end is audible. With no mute
+    /// control this is now belt-and-braces rather than a state machine — there
+    /// is nothing that could have muted it — but a talk session that goes
+    /// one-way because some other path silenced playout is a bad failure, and
+    /// re-asserting it costs nothing.
     ///
-    /// Mirrors CameraDetailView.handleTalkAudio, and gates on the same
-    /// capability it does: with no camera mic there is no receive audio to
-    /// unmute, and toggling `isMuted` would reconfigure the audio session for
-    /// nothing mid-talk.
+    /// Gated on the camera having a mic: with no camera microphone there is no
+    /// receive audio to unmute, and touching `isMuted` would reconfigure the
+    /// audio session for nothing mid-talk.
     private func handleTalkAudio(_ talkState: TalkController.State) {
         guard camera.capabilities.mic else { return }
         switch talkState {
         case .connecting, .live:
-            if muteBeforeTalk == nil {
-                muteBeforeTalk = model.isMuted
-            }
-            if model.isMuted {
-                model.isMuted = false
-            }
+            if model.isMuted { model.isMuted = false }
         case .idle:
-            guard let previous = muteBeforeTalk else { return }
-            muteBeforeTalk = nil
-            if model.isMuted != previous {
-                model.isMuted = previous
-            }
+            break
         }
     }
 
-    private var muteButton: some View {
-        Button(action: toggleMute) {
-            HStack(spacing: 7) {
-                Image(systemName: model.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                Text(model.isMuted ? "Tap to unmute" : "Sound on")
-            }
-            .font(.subheadline.weight(.semibold))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 9)
-            .background(Capsule().fill(Color.black.opacity(0.55)))
-            .overlay(Capsule().stroke(Color.white.opacity(0.15), lineWidth: 1))
-        }
-        .buttonStyle(.plain)
-    }
-
-    // MARK: Sound
-
-    private func toggleMute() {
-        // Do NOT force a playback session here. Live view is WebRTC/VPIO and
-        // needs .playAndRecord, which WHEPPlayer applies from isMuted.didSet.
-        // Calling LiveAudioSession.activatePlayback() first set .playback and
-        // silenced it.
-        model.isMuted.toggle()
-    }
 }
 
 /// Shared audio-session helper — activate playout so camera audio is heard even
