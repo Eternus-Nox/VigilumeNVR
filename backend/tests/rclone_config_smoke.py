@@ -130,6 +130,32 @@ def error_hint_checks() -> None:
             'oauth2: "invalid_client" "incorrect client credentials"'),
         "invalid_client points at the app credentials, not the sign-in",
     )
+
+    # The UI shows WHICH app a remote refreshes against, and that only works
+    # because client_id is NOT treated as a secret. Redacting it would replace
+    # the one fact that explains an invalid_grant with eight asterisks.
+    from app.native.rclone_config import REDACTED, redact_remotes
+    dump = (
+        '{"dbx": {"type": "dropbox", "client_id": "abc123", '
+        '"client_secret": "shhh", "token": "{}"}}'
+    )
+    row = redact_remotes(dump)[0]
+    check(
+        row["details"]["client_id"] == "abc123",
+        "client_id survives redaction — it is not a secret, and it is what "
+        "tells an operator which app their remote signs in with",
+    )
+    check(
+        row["details"]["client_secret"] == REDACTED
+        and row["details"]["token"] == REDACTED,
+        "while the secret and the token are still redacted",
+    )
+    bare = redact_remotes('{"dbx": {"type": "dropbox", "token": "{}"}}')[0]
+    check(
+        "client_id" not in bare["details"],
+        "and a remote with no app of its own reports no client_id at all — "
+        "which is what says it uses rclone's built-in app",
+    )
     # Ordering: the OAuth cases must win over the generic 401/403 rule, since a
     # provider often returns BOTH a 401 status and an invalid_grant body.
     both = 'Post "...": 401 Unauthorized: oauth2: "invalid_grant"'

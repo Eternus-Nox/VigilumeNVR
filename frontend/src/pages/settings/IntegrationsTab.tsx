@@ -527,6 +527,22 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
               <div key={r.name} className="row-inline wrap" style={{ gap: '0.5rem' }}>
                 <strong>{r.name}</strong>
                 <span className="pill">{r.label}</span>
+                {/* WHICH APP this remote refreshes its sign-in against. The
+                    backend already sent it (client_id is not a secret and is
+                    not redacted) and nothing showed it — yet it is the single
+                    fact that explains an invalid_grant: a token minted by one
+                    app can never refresh against another, so a remote holding
+                    your app's key needs a token from YOUR app, and one holding
+                    none needs a token from plain `rclone authorize`. */}
+                {r.oauth && (
+                  <span className="pill" title={
+                    r.details.client_id
+                      ? `Signs in with your own app (key ${r.details.client_id}). Re-authorizing must use the SAME app: rclone authorize "${r.type}" --client-id <key> --client-secret <secret>`
+                      : `Signs in with rclone's built-in app. Re-authorize with plain: rclone authorize "${r.type}"`
+                  }>
+                    {r.details.client_id ? 'own app' : "rclone's app"}
+                  </span>
+                )}
                 <button
                   type="button"
                   className="btn btn-sm"
