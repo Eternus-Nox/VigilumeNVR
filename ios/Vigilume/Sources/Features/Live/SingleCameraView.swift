@@ -152,20 +152,6 @@ struct SingleCameraView: View {
         } message: {
             Text(talk.alertMessage ?? "")
         }
-        // A SECOND alert rather than one shared with talk: they can fail
-        // independently (holding the mic while stepping the camera), and one
-        // binding would let the later failure silently replace the earlier.
-        .alert(
-            "Camera control",
-            isPresented: Binding(
-                get: { ptzError != nil },
-                set: { if !$0 { ptzError = nil } }
-            )
-        ) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(ptzError ?? "")
-        }
     }
 
     private var isOnline: Bool {
@@ -321,6 +307,23 @@ struct SingleCameraView: View {
             }
         }
         .padding(.bottom, 24)
+        // Attached HERE, not next to the talk alert on the root view: two
+        // .alert modifiers on the SAME view do not both present — SwiftUI
+        // honours one and the other is silently lost. Hanging this one off a
+        // different view in the hierarchy is what actually keeps a PTZ failure
+        // and a talk failure independent, which matters because you can be
+        // holding the mic while stepping the camera.
+        .alert(
+            "Camera control",
+            isPresented: Binding(
+                get: { ptzError != nil },
+                set: { if !$0 { ptzError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(ptzError ?? "")
+        }
     }
 
     private func talkButton(diameter: CGFloat) -> some View {
