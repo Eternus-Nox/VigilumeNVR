@@ -67,8 +67,83 @@ def rejects(fn, *args, **kw) -> bool:
 TOKEN = json.dumps({"access_token": "abc", "refresh_token": "r", "expiry": "2026-01-01"})
 
 
+def error_hint_checks() -> None:
+    """explain_remote_error — turning rclone's stderr into an action.
+
+    The case that motivated this is REAL: a Dropbox remote whose refresh token
+    had been revoked reported a wall of Go error text whose only advice was to
+    run `rclone config reconnect` in a terminal — the exact thing this UI exists
+    to remove.
+    """
+    print("rclone error hints")
+    from app.native.rclone_config import explain_remote_error
+
+    dropbox = (
+        'error listing: Post "https://api.dropboxapi.com/2/files/list_folder": '
+        "couldn't fetch token - maybe it has expired? - refresh with "
+        '"rclone config reconnect dropbox:": oauth2: "invalid_grant" '
+        '"refresh token is invalid or revoked"'
+    )
+    hint = explain_remote_error(dropbox)
+    check(bool(hint), "the real revoked-Dropbox-token error is recognised")
+    check(
+        "remove this remote and add it again" in hint.lower(),
+        "and the fix it gives is the one available IN THIS UI, not a terminal "
+        "command the operator was trying to avoid",
+    )
+    check(
+        "same name" in hint.lower(),
+        "including that the name must be reused, since archive settings "
+        "reference the remote by name",
+    )
+    check(
+        "rclone config reconnect" not in hint,
+        "the hint never tells them to go back to a terminal",
+    )
+
+    check(
+        explain_remote_error("") == "",
+        "no error text -> no hint (an empty error must not invent an excuse)",
+    )
+    check(
+        explain_remote_error("   \n ") == "",
+        "and neither does whitespace",
+    )
+    check(
+        explain_remote_error("a brand new failure nobody has classified") == "",
+        "an UNRECOGNISED error yields no hint at all — the raw stderr is shown "
+        "on its own rather than being guessed at",
+    )
+
+    check(
+        "network or DNS" in explain_remote_error(
+            "dial tcp: lookup api.dropboxapi.com: no such host"),
+        "a DNS failure is called a network problem, not a credentials problem — "
+        "sending someone to re-authorize over a DNS fault wastes their evening",
+    )
+    check(
+        "normal" in explain_remote_error("directory not found").lower(),
+        "a missing path is explained as normal before the first upload",
+    )
+    check(
+        "app key/secret" in explain_remote_error(
+            'oauth2: "invalid_client" "incorrect client credentials"'),
+        "invalid_client points at the app credentials, not the sign-in",
+    )
+    # Ordering: the OAuth cases must win over the generic 401/403 rule, since a
+    # provider often returns BOTH a 401 status and an invalid_grant body.
+    both = 'Post "...": 401 Unauthorized: oauth2: "invalid_grant"'
+    check(
+        "refresh token" in explain_remote_error(both),
+        "when an error carries both a 401 and invalid_grant, the SPECIFIC "
+        "sign-in explanation wins over the generic credentials one",
+    )
+
+
 def main() -> int:
     print("rclone remote configuration")
+    error_hint_checks()
+    print()
 
     # --- the catalogue ----------------------------------------------------
     payload = providers_payload()

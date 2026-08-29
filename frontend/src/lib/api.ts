@@ -1776,8 +1776,14 @@ export const api = {
     ),
 
   /** List the remote's top level — the cheapest proof the credentials work. */
+  /**
+   * Probe a remote. On failure, `detail` is rclone's raw stderr and `hint` is
+   * an optional plain-English explanation with the fix — additional to
+   * `detail`, never a replacement, so a wrong hint can't hide the real error.
+   * `hint` is absent on a backend predating it.
+   */
   testRcloneRemote: (name: string) =>
-    request<{ ok: boolean; detail: string; folders: string[] }>(
+    request<{ ok: boolean; detail: string; hint?: string; folders: string[] }>(
       `/api/integrations/rclone/remotes/${encodeURIComponent(name)}/test`,
       { method: 'POST' },
     ),

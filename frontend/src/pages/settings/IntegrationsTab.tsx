@@ -93,7 +93,9 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
   const [newName, setNewName] = useState('');
   const [newValues, setNewValues] = useState<Record<string, string>>({});
   const [creating, setCreating] = useState(false);
-  const [setupMsg, setSetupMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [setupMsg, setSetupMsg] = useState<
+    { ok: boolean; text: string; hint?: string } | null
+  >(null);
   const [busyRemote, setBusyRemote] = useState<string | null>(null);
   // OAuth providers offer two routes. 'browser' finishes the sign-in on this
   // server and needs the operator's own app credentials; 'token' is the older
@@ -261,6 +263,7 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
         text: res.ok
           ? `${name}: connected${res.folders.length ? ` — ${res.folders.slice(0, 5).join(', ')}` : ' (no folders yet)'}`
           : `${name}: ${res.detail}`,
+        hint: res.hint,
       });
     } catch (e) {
       setSetupMsg({ ok: false, text: e instanceof Error ? e.message : 'Test failed' });
@@ -733,6 +736,14 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
         {setupMsg && (
           <div className={setupMsg.ok ? 'muted small' : 'form-error'} style={{ marginTop: '0.5rem' }}>
             {setupMsg.text}
+            {/* The explanation sits UNDER the raw error, not instead of it:
+                rclone's own text is the evidence, and a hint that turns out to
+                be wrong must not be the only thing on screen. */}
+            {setupMsg.hint && (
+              <p className="muted small" style={{ marginTop: '0.4rem' }}>
+                {setupMsg.hint}
+              </p>
+            )}
           </div>
         )}
 

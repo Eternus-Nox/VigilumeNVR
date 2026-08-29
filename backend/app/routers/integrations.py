@@ -230,9 +230,20 @@ async def rclone_test_remote(name: str) -> dict[str, Any]:
         rclone_config.build_lsd_args(clean), timeout=_RCLONE_TEST_TIMEOUT_S
     )
     if code != 0:
-        return {"ok": False, "detail": err or "The remote did not answer.", "folders": []}
+        detail = err or "The remote did not answer."
+        # `hint` is ADDITIONAL to `detail`, never a replacement. rclone's own
+        # advice for an expired sign-in is a terminal command, which is exactly
+        # what this page exists to avoid — so the hint names the equivalent
+        # action here, while the raw error stays visible for anything the hint
+        # gets wrong.
+        return {
+            "ok": False,
+            "detail": detail,
+            "hint": rclone_config.explain_remote_error(detail),
+            "folders": [],
+        }
     folders = [line.split(None, 4)[-1] for line in out.splitlines() if line.strip()]
-    return {"ok": True, "detail": "", "folders": folders[:25]}
+    return {"ok": True, "detail": "", "hint": "", "folders": folders[:25]}
 
 
 # ------------------------------------------------------- browser OAuth (cloud)

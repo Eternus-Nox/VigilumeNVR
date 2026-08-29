@@ -258,6 +258,73 @@ def authorize_command(type_: str) -> str:
     return f'rclone authorize "{type_}"'
 
 
+# Fragments of rclone/provider error text, mapped to what an operator can
+# actually DO about it. rclone's own advice is a terminal command
+# (`rclone config reconnect dropbox:`), which is precisely what this UI exists
+# to avoid — so the wording here names the equivalent action in the UI.
+#
+# The raw error is NEVER replaced, only accompanied: an explanation that turns
+# out to be wrong must not hide the evidence that would show it was wrong.
+_ERROR_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("invalid_grant", "refresh token is invalid", "token has expired",
+         "couldn't fetch token"),
+        "This remote's sign-in is no longer valid — the provider rejected the "
+        "stored refresh token. That happens when the account's authorization "
+        "was revoked, or when the app it was issued to was deleted or had its "
+        "secret regenerated. To fix it: remove this remote and add it again "
+        "under the SAME name (the archive settings reference it by name, so "
+        "nothing else needs changing). If you paste a token, the app you run "
+        "`rclone authorize` with must be the same app whose key and secret this "
+        "remote stores — a token minted by one app can never refresh against "
+        "another.",
+    ),
+    (
+        ("invalid_client", "incorrect client credentials"),
+        "The provider rejected this remote's app key/secret. Check them against "
+        "the app in the provider's console — a regenerated secret has to be "
+        "updated here too.",
+    ),
+    (
+        ("401", "403", "accessdenied", "access denied", "signaturedoesnotmatch",
+         "invalid access key"),
+        "The provider refused these credentials. For S3-style remotes that is "
+        "usually a wrong key/secret or a bucket the key cannot reach; for OAuth "
+        "ones, a sign-in that needs redoing.",
+    ),
+    (
+        ("no such host", "dial tcp", "connection refused", "i/o timeout",
+         "network is unreachable", "tls handshake"),
+        "The server could not reach the provider. That is a network or DNS "
+        "problem on the server rather than a credentials problem — check the "
+        "box has internet access and nothing blocks outbound HTTPS.",
+    ),
+    (
+        ("directory not found", "path not found", "404"),
+        "The credentials work, but the path does not exist yet. That is normal "
+        "before the first upload — the archive creates it on its first run.",
+    ),
+)
+
+
+def explain_remote_error(stderr: str) -> str:
+    """An operator-facing explanation for an rclone failure, or "".
+
+    Matching is on lowercased substrings because rclone's messages are prose
+    that varies by backend and version — the STABLE part is the provider's own
+    error token (`invalid_grant`, `invalid_client`), which is what these key on.
+    First match wins, so the specific OAuth cases are listed before the generic
+    401/403 one.
+    """
+    text = (stderr or "").lower()
+    if not text.strip():
+        return ""
+    for needles, hint in _ERROR_HINTS:
+        if any(n in text for n in needles):
+            return hint
+    return ""
+
+
 def validate_name(name: str) -> str:
     name = (name or "").strip()
     if not name:
