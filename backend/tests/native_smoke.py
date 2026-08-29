@@ -1119,11 +1119,20 @@ def ingest_checks() -> None:
             "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin",
             "-rtsp_transport", "tcp", "-timeout", "5000000",
             "-fflags", "nobuffer", "-flags", "low_delay",
+            "-threads", "2",
             "-i", "rtsp://go2rtc:8554/yard_sub",
             "-vf", "fps=5,scale=704:480",
             "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1",
         ],
         "golden ffmpeg ingest argv (design doc §3.1 + byte-exact scale)",
+    )
+    # -threads must precede -i to bound the DECODER. After -i it is an encoder
+    # option and this pipe has no encoder, so it would silently do nothing —
+    # the failure mode is "the fix shipped and changed no memory at all".
+    argv = build_ingest_args("rtsp://x", 5, 704, 480)
+    check(
+        argv.index("-threads") < argv.index("-i"),
+        "-threads is an INPUT option (before -i), so it bounds decode, not encode",
     )
     asyncio.run(_frame_source_cases())
     asyncio.run(_ingest_manager_cases())

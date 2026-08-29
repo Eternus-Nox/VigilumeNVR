@@ -59,6 +59,20 @@ DETECT_TIMEOUT_S = 8.0
 REINIT_SUPERVISOR_S = 5.0
 
 
+# Decode threads per ingest child. ffmpeg's default (`-threads 0`) sizes a
+# thread pool to the HOST's core count — on a 16-thread CPU that is ~16 threads
+# EACH, and this process runs one child per camera. Eight cameras produced 766
+# PIDs in the container, nearly all of them idle decode workers holding per-
+# thread buffers.
+#
+# 2 is not a guess at "enough": these children decode a SUBSTREAM — a few
+# hundred kbit/s at 704x480 — and then throw most frames away, because the
+# single inference worker keeps only the latest. A decoder that spends its time
+# waiting on the network gains nothing from a wide thread pool, and the memory
+# and scheduler cost of one is paid per camera.
+INGEST_DECODE_THREADS = 2
+
+
 def build_ingest_args(input_url: str, detect_fps: int, width: int, height: int) -> list[str]:
     """ffmpeg argv for the rawvideo detect pipe (design doc §3.1).
 
@@ -66,12 +80,18 @@ def build_ingest_args(input_url: str, detect_fps: int, width: int, height: int) 
     ``width*height*3`` per frame even when a camera's substream resolution
     differs from the stored detect dims (boxes are decoded into the same
     detect-pixel space, so geometry stays consistent).
+
+    ``-threads`` is set BEFORE ``-i`` on purpose: as an input option it bounds
+    the DECODER's pool, which is the one that scales with core count. After
+    ``-i`` it would apply to the (nonexistent) encoder instead and change
+    nothing.
     """
     return [
         "ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin",
         "-rtsp_transport", "tcp",
         "-timeout", "5000000",
         "-fflags", "nobuffer", "-flags", "low_delay",
+        "-threads", str(INGEST_DECODE_THREADS),
         "-i", input_url,
         "-vf", f"fps={detect_fps},scale={width}:{height}",
         "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1",
