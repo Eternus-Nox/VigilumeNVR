@@ -201,9 +201,9 @@ def main() -> int:
     # with theirs — which fails, hours later, permanently.
     check(
         authorize_command("dropbox", "KEY", "SECRET")
-        == 'rclone authorize "dropbox" --client-id "KEY" --client-secret "SECRET"',
-        "an operator's own app credentials ride the authorize command, so the "
-        "token is minted by the same app the remote will refresh with",
+        == 'rclone authorize "dropbox" "KEY" "SECRET"',
+        "an operator's own app credentials ride the authorize command POSITIONALLY "
+        "— rclone rejects --client-id as an unknown flag",
     )
     check(
         authorize_command("dropbox", "KEY", "") == 'rclone authorize "dropbox"'
@@ -213,7 +213,7 @@ def main() -> int:
     )
     check(
         authorize_command("dropbox", "  KEY  ", "  SECRET  ")
-        == 'rclone authorize "dropbox" --client-id "KEY" --client-secret "SECRET"',
+        == 'rclone authorize "dropbox" "KEY" "SECRET"',
         "and pasted credentials are trimmed — a trailing space from a console "
         "copy would otherwise be part of the app key",
     )

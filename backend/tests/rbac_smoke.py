@@ -292,6 +292,14 @@ def dynamic_admin_enumeration(client: TestClient, viewer_h: dict) -> None:
         # explicitly further down). It answers 401 rather than 403 to a viewer,
         # which is why it cannot ride the generic admin sweep.
         ("GET", "/api/auth/verify-stream"),
+        # The rclone OAuth callback takes NO auth dependency BY DESIGN: the
+        # provider redirects a bare browser here with no Authorization header.
+        # It is authorized by `state` — 256 unguessable bits, single-use, short
+        # TTL — which is minted ONLY by POST /api/integrations/rclone/oauth/start,
+        # and that IS admin-gated. So a viewer can never hold a valid state, and
+        # without one this answers 400 (unknown/expired), not 403, which is why
+        # it cannot ride the generic admin sweep.
+        ("GET", "/api/integrations/rclone/oauth/callback"),
         ("GET", "/api/cameras"), ("GET", "/api/cameras/{name}/snapshot.jpg"),
         # PTZ is viewer-accessible by product decision: aiming a camera is a
         # live-viewing action, not an admin config change. (The talk WS is the
@@ -311,8 +319,12 @@ def dynamic_admin_enumeration(client: TestClient, viewer_h: dict) -> None:
         ("GET", "/api/recordings/{camera}/playlist.m3u8"),
         ("GET", "/api/recordings/{camera}/seg/{start_ts}.ts"),
         ("GET", "/api/recordings/{camera}/export.mp4"),
-        ("GET", "/api/groups"), ("POST", "/api/groups"), ("PUT", "/api/groups/{group_id}"),
-        ("DELETE", "/api/groups/{group_id}"),
+        # Groups: READING is any-auth (a viewer needs the tabs to navigate the
+        # cameras they may watch). The three MUTATING verbs are deliberately
+        # absent — which cameras are grouped, and under what name, is shared
+        # configuration, and a viewer is view-only. The sweep below asserts 403
+        # on POST/PUT/DELETE.
+        ("GET", "/api/groups"),
         ("GET", "/api/notifications/vapid-public-key"), ("POST", "/api/notifications/subscribe"),
         ("POST", "/api/notifications/unsubscribe"), ("POST", "/api/users/me/password"),
         # APNs push registration: any-auth (viewer phones get pushes too).
@@ -398,16 +410,32 @@ def token_integrity_attacks(client: TestClient, viewer_token: str, viewer_h: dic
               "viewer cannot promote self via PUT /api/users/{id}")
 
 
-def viewer_grouping_and_push(client: TestClient, viewer_h: dict) -> None:
-    # Viewers may create/edit/delete groups (SHARED) and toggle push.
-    resp = client.post("/api/groups", headers=viewer_h, json={"name": "ViewerGroup", "cameras": ["front"]})
-    check(resp.status_code == 201, "viewer can create a camera group")
+def viewer_grouping_and_push(client: TestClient, viewer_h: dict, admin_h: dict) -> None:
+    """Groups are READ-ONLY for a viewer; push is theirs to toggle.
+
+    Groups used to be viewer-writable on the reasoning that they are a
+    navigation convenience. They are not: they are SHARED configuration, so one
+    viewer renaming or deleting a group changes what every other account sees.
+    A viewer is scoped to live view, talk, PTZ, events and the timeline.
+    """
+    check(client.post("/api/groups", headers=viewer_h,
+                      json={"name": "ViewerGroup", "cameras": ["front"]}).status_code == 403,
+          "viewer CANNOT create a camera group (shared config, not navigation)")
+    # Make one as admin so the viewer's edit/delete attempts hit a REAL group —
+    # a 403 against a nonexistent id would pass even if the guard were missing.
+    resp = client.post("/api/groups", headers=admin_h,
+                       json={"name": "AdminGroup", "cameras": ["front"]})
+    check(resp.status_code == 201, "admin can create a camera group")
     gid = resp.json()["id"]
     check(client.put(f"/api/groups/{gid}", headers=viewer_h,
-                     json={"name": "ViewerGroup2"}).status_code == 200,
-          "viewer can rename a group")
-    check(client.delete(f"/api/groups/{gid}", headers=viewer_h).status_code == 204,
-          "viewer can delete a group")
+                     json={"name": "Renamed"}).status_code == 403,
+          "viewer CANNOT rename an existing group")
+    check(client.delete(f"/api/groups/{gid}", headers=viewer_h).status_code == 403,
+          "viewer CANNOT delete an existing group")
+    check(client.get("/api/groups", headers=viewer_h).status_code == 200,
+          "but a viewer still READS groups — they need the tabs to navigate")
+    check(client.delete(f"/api/groups/{gid}", headers=admin_h).status_code == 204,
+          "admin can delete it again")
     sub = {"endpoint": "https://push.example/vw", "keys": {"p256dh": "k", "auth": "a"}}
     check(client.post("/api/notifications/subscribe", headers=viewer_h, json=sub).status_code == 204,
           "viewer can enable push (subscribe)")
@@ -497,15 +525,27 @@ def privacy_mode_is_admin_only(client: TestClient, viewer_h: dict, admin_h: dict
     check("front" in client.get("/api/privacy", headers=admin_h).json()["private_cameras"],
           "after all three viewer attempts the camera is STILL private")
 
-    # ---- an UNRELATED group stays viewer-writable (guard is narrowly scoped) ----
+    # ---- an UNRELATED group is now refused too, but for a DIFFERENT reason ----
+    # This block used to prove the privacy guard was narrowly scoped: a group
+    # Privacy Mode did not reference stayed viewer-writable. Groups are now
+    # admin-only outright, so the outcome is the same 403 either way. The check
+    # is kept because the two guards are still independent — if the blanket
+    # admin gate were ever relaxed, the privacy-specific guard above must still
+    # hold on its own, and this is what would show the difference.
     other = client.post("/api/groups", headers=viewer_h, json={"name": "NotPrivate"})
-    check(other.status_code == 201, "viewer can still create an unrelated group")
-    oid = other.json()["id"]
+    check(other.status_code == 403,
+          "viewer cannot create even a group Privacy Mode does not use "
+          "(groups are admin-only; the privacy guard above is a second, "
+          "independent layer)")
+    oid = client.post("/api/groups", headers=admin_h,
+                      json={"name": "NotPrivate"}).json()["id"]
     check(client.put(f"/api/groups/{oid}", headers=viewer_h,
-                     json={"name": "NotPrivate2"}).status_code == 200,
-          "viewer can still edit a group Privacy Mode does not use")
-    check(client.delete(f"/api/groups/{oid}", headers=viewer_h).status_code == 204,
-          "viewer can still delete a group Privacy Mode does not use")
+                     json={"name": "NotPrivate2"}).status_code == 403,
+          "nor edit one")
+    check(client.delete(f"/api/groups/{oid}", headers=viewer_h).status_code == 403,
+          "nor delete one")
+    check(client.delete(f"/api/groups/{oid}", headers=admin_h).status_code == 204,
+          "admin cleans it up")
 
     # ---- admin retains full control, and clean up ----
     check(client.delete(f"/api/groups/{gid}", headers=admin_h).status_code == 204,
@@ -580,7 +620,7 @@ def main() -> None:
 
         # ---- THE MATRIX ----
         viewer_allowed_on_any_auth_routes(client, viewer_h, admin_h)
-        viewer_grouping_and_push(client, viewer_h)
+        viewer_grouping_and_push(client, viewer_h, admin_h)
         privacy_mode_is_admin_only(client, viewer_h, admin_h)
         viewer_forbidden_on_admin_routes(client, viewer_h)
         dynamic_admin_enumeration(client, viewer_h)

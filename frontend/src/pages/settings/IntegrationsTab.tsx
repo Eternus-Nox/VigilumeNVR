@@ -170,7 +170,8 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
   const ownAppComplete =
     !!newValues.client_id?.trim() && !!newValues.client_secret?.trim();
   /**
-   * Mirrors rclone_config.authorize_command. Kept in sync deliberately rather
+   * Mirrors rclone_config.authorize_command. rclone takes the app
+   * credentials POSITIONALLY — it rejects --client-id as an unknown flag. Kept in sync deliberately rather
    * than fetched, because it has to update as the operator types — and the
    * whole point is that the command shown and the credentials stored are the
    * same app.
@@ -178,7 +179,7 @@ export default function IntegrationsTab({ settings, onDraftChange, pending }: Ta
   const authorizeCommand = selectedProvider
     ? `rclone authorize "${selectedProvider.type}"` +
       (ownAppComplete
-        ? ` --client-id "${newValues.client_id.trim()}" --client-secret "${newValues.client_secret.trim()}"`
+        ? ` "${newValues.client_id.trim()}" "${newValues.client_secret.trim()}"`
         : '')
     : '';
 

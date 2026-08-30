@@ -5,11 +5,16 @@ import SwiftUI
 /// delete the named camera subsets that drive the dashboard's filter chips (see
 /// `CamerasView`) and the web's TV mode.
 ///
-/// NOT admin-only. `/api/groups` is `require_auth`, and the web shows the Groups
-/// tab to viewers as well (it's a viewer's default settings tab), so this screen
-/// sits outside `SettingsHomeView`'s `session.isAdmin` gate. That also means
-/// groups are SHARED — a viewer's edit changes what everyone sees, which the
-/// list footer says out loud.
+/// READ-ONLY FOR A VIEWER. Reading `/api/groups` is any-auth — a viewer needs
+/// the filter chips to navigate the cameras they may watch — but creating,
+/// renaming, re-membering and deleting are admin. Groups are SHARED: one
+/// account's edit changes what every other account sees, so they are
+/// configuration, not a per-user convenience.
+///
+/// This screen therefore stays outside `SettingsHomeView`'s `session.isAdmin`
+/// gate (a viewer still opens it) and hides its own editing controls instead.
+/// The backend enforces the rule; hiding the controls just avoids offering a
+/// viewer buttons that would 403.
 ///
 /// A group's camera list is an ORDER, not a set: it's the order the dashboard
 /// lays the tiles out in, so members are reorderable. The backend tolerates
@@ -52,14 +57,16 @@ struct GroupsView: View {
         .navigationTitle("Camera groups")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    showingAdd = true
-                } label: {
-                    Image(systemName: "plus")
+            if session.isAdmin {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showingAdd = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .accessibilityLabel("Add group")
+                    .disabled(busy)
                 }
-                .accessibilityLabel("Add group")
-                .disabled(busy)
             }
         }
         .sheet(isPresented: $showingAdd) {
@@ -105,9 +112,15 @@ struct GroupsView: View {
                     }
                     .listRowBackground(Theme.surface)
                 }
-                .onDelete(perform: confirmDelete)
+                // No swipe-to-delete for a viewer: the gesture would look
+                // available and every commit would 403.
+                .onDelete(perform: session.isAdmin ? confirmDelete : nil)
             } footer: {
-                Text("Groups are shared with everyone who signs in to this server — they're a property of the NVR, not of your account. They show up as filter chips on the Cameras tab. Swipe a row to delete a group.")
+                Text(
+                    session.isAdmin
+                    ? "Groups are shared with everyone who signs in to this server — they're a property of the NVR, not of your account. They show up as filter chips on the Cameras tab. Swipe a row to delete a group."
+                    : "Groups are shared with everyone who signs in to this server. They show up as filter chips on the Cameras tab. Only an administrator can add, rename or change them."
+                )
             }
         }
         .listStyle(.plain)
@@ -242,7 +255,8 @@ private struct GroupDetailView: View {
                     // Commit on blur/return rather than per keystroke.
                     .onSubmit { Task { await rename() } }
                     .submitLabel(.done)
-                    .disabled(busy)
+                    // A viewer reads the name; renaming is admin (shared config).
+                    .disabled(busy || !session.isAdmin)
             } header: {
                 Text("Name")
             } footer: {
@@ -263,13 +277,15 @@ private struct GroupDetailView: View {
                             Spacer(minLength: 0)
                         }
                     }
-                    .onMove(perform: move)
-                    .onDelete(perform: removeMembers)
+                    .onMove(perform: session.isAdmin ? move : nil)
+                    .onDelete(perform: session.isAdmin ? removeMembers : nil)
                 }
             } header: {
                 Text("Cameras")
             } footer: {
-                if members.count > 1 {
+                if !session.isAdmin {
+                    Text("This is the order the dashboard lays the tiles out in. Only an administrator can change a group.")
+                } else if members.count > 1 {
                     Text("This is the order the dashboard lays the tiles out in — tap Edit to drag, or swipe a row to remove it from the group.")
                 } else if !members.isEmpty {
                     Text("Swipe a row to remove it from the group. The camera itself isn't deleted.")
@@ -277,7 +293,7 @@ private struct GroupDetailView: View {
             }
             .listRowBackground(Theme.surface)
 
-            if !available.isEmpty {
+            if session.isAdmin, !available.isEmpty {
                 Section {
                     ForEach(available) { camera in
                         Button {
@@ -313,13 +329,14 @@ private struct GroupDetailView: View {
             ToolbarItem(placement: .topBarTrailing) {
                 if busy {
                     ProgressView().tint(Theme.accent)
-                } else if !members.isEmpty {
+                } else if session.isAdmin, !members.isEmpty {
                     EditButton()
                 }
             }
         }
-        // A rename typed but never submitted still commits when the screen goes.
-        .onDisappear { Task { await rename() } }
+        // A rename typed but never submitted still commits when the screen goes
+        // — but only for an admin, who is the only one whose field was editable.
+        .onDisappear { if session.isAdmin { Task { await rename() } } }
     }
 
     private func displayName(_ camera: Camera) -> String {

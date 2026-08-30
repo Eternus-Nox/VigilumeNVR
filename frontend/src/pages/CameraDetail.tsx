@@ -332,7 +332,12 @@ export default function CameraDetail() {
           just the live view and the recent-events strip below. The cards are
           stacked in the same order as the iOS camera-detail screen: PTZ, talk,
           the grouped Controls card, then the device-settings cards. */}
-      {isAdmin && (
+      {/* VIEWER-ACCESSIBLE. Aiming a camera and talking through it are
+          live-viewing actions, not configuration — the backend agrees (the PTZ
+          route and the talk WebSocket both take any authenticated session), and
+          these used to sit inside the isAdmin block below, which meant a viewer
+          could not reach either on the web at all. Everything past this point
+          IS configuration and stays admin-only. */}
       <div className="detail-cards">
         {caps?.ptz && (
           <section className="card" aria-label="Pan and tilt">
@@ -384,6 +389,10 @@ export default function CameraDetail() {
             )}
           </section>
         ) : null}
+      </div>
+
+      {isAdmin && (
+      <div className="detail-cards">
 
         {/* Grouped Controls card — mirrors the iOS controlsCard: night vision,
             spotlight (white_light), siren and maintenance/reboot all live in a

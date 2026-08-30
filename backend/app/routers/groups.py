@@ -13,7 +13,7 @@ import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
 
-from ..auth import require_auth, role_from_claims
+from ..auth import require_admin, require_auth, role_from_claims
 from .. import privacy
 
 router = APIRouter(prefix="/api/groups", tags=["groups"], dependencies=[Depends(require_auth)])
@@ -108,6 +108,9 @@ async def _filtered(request: Request, group: dict[str, Any]) -> dict[str, Any]:
     return {**group, "cameras": [n for n in group["cameras"] if n in known]}
 
 
+# READING is any-auth — a viewer needs the group tabs to navigate the cameras
+# they are allowed to watch. WRITING is admin: which cameras are grouped, and
+# under what name, is shared configuration, and a viewer is view-only.
 @router.get("")
 async def list_groups(request: Request) -> list[dict[str, Any]]:
     db = request.app.state.db
@@ -118,7 +121,7 @@ async def list_groups(request: Request) -> list[dict[str, Any]]:
     ]
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, dependencies=[Depends(require_admin)])
 async def create_group(body: GroupCreate, request: Request) -> dict[str, Any]:
     group = await request.app.state.db.create_group(body.name, body.cameras)
     if group is None:
@@ -126,7 +129,7 @@ async def create_group(body: GroupCreate, request: Request) -> dict[str, Any]:
     return await _filtered(request, group)
 
 
-@router.put("/{group_id}")
+@router.put("/{group_id}", dependencies=[Depends(require_admin)])
 async def update_group(group_id: int, body: GroupUpdate, request: Request) -> dict[str, Any]:
     db = request.app.state.db
     if await db.get_group(group_id) is None:
@@ -146,7 +149,9 @@ async def update_group(group_id: int, body: GroupUpdate, request: Request) -> di
     return await _filtered(request, group)
 
 
-@router.delete("/{group_id}", status_code=204)
+@router.delete(
+    "/{group_id}", status_code=204, dependencies=[Depends(require_admin)]
+)
 async def delete_group(group_id: int, request: Request) -> Response:
     await _guard_privacy_group(request, group_id)
     if not await request.app.state.db.delete_group(group_id):

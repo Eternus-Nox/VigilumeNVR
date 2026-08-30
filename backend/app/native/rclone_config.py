@@ -275,8 +275,14 @@ def authorize_command(type_: str, client_id: str = "", client_secret: str = "") 
     client_id, client_secret = (client_id or "").strip(), (client_secret or "").strip()
     # BOTH or NEITHER: rclone needs the pair, and a half-supplied app would
     # produce a token bound to something the remote cannot reproduce.
+    #
+    # POSITIONAL, not flags. `rclone authorize` takes
+    #   rclone authorize <backend> [base64_json_blob | client_id client_secret]
+    # and rejects --client-id outright ("unknown flag"). Verified against a real
+    # rclone by reading back the authorize URL it builds: the positional pair
+    # shows up as client_id=<value> on the provider's authorize endpoint.
     if client_id and client_secret:
-        cmd += f' --client-id "{client_id}" --client-secret "{client_secret}"'
+        cmd += f' "{client_id}" "{client_secret}"'
     return cmd
 
 

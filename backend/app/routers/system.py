@@ -156,7 +156,7 @@ async def health(request: Request) -> dict:
     }
 
 
-@router.get("/camera-health", dependencies=[Depends(require_auth)])
+@router.get("/camera-health", dependencies=[Depends(require_admin)])
 async def camera_health(
     request: Request,
     hours: float = Query(default=24.0, ge=0.25, le=720.0),
@@ -166,8 +166,10 @@ async def camera_health(
     down_count, down_seconds, downs:[{start,end,seconds}]}]}``.
 
     Uptime is RTSP-port reachability (what the prober measures), stated as such
-    in the UI. Any-auth: a viewer sees the same health an admin does. Cameras
-    with no history in the window still appear (uptime null = never observed).
+    in the UI. ADMIN-ONLY: per-camera downtime history is operational diagnostics,
+    not part of watching cameras, and a viewer is scoped to live view, events and
+    the timeline. Cameras with no history in the window still appear (uptime null
+    = never observed).
     """
     state = request.app.state
     now = time.time()

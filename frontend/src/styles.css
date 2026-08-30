@@ -3136,3 +3136,13 @@ label > select {
   flex-wrap: wrap;
   gap: 0.4rem;
 }
+
+/* Viewer's read-only camera list inside a group (no drag handles, no remove). */
+.group-cam-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}

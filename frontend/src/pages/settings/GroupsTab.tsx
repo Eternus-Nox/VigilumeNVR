@@ -21,7 +21,7 @@ function errMsg(e: unknown): string {
 }
 
 export default function GroupsTab() {
-  const { cameras, pushToast } = useAppState();
+  const { cameras, pushToast, isAdmin } = useAppState();
   const [groups, setGroups] = useState<CameraGroup[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -100,13 +100,21 @@ export default function GroupsTab() {
     <div className="settings-section">
       <div className="section-head">
         <h2>Camera groups</h2>
-        <button type="button" className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
-          + New group
-        </button>
+        {/* Groups are SHARED configuration — one account renaming or deleting a
+            group changes what everyone sees — so a viewer reads them and an
+            admin edits them. The backend enforces this; hiding the controls
+            just stops a viewer being offered a button that would 403. */}
+        {isAdmin && (
+          <button type="button" className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
+            + New group
+          </button>
+        )}
       </div>
       <p className="muted small">
-        Groups appear as chips on the dashboard and in TV mode. Drag the handle (or use the
-        arrows) to set each group&rsquo;s display order.
+        Groups appear as chips on the dashboard and in TV mode.
+        {isAdmin
+          ? ' Drag the handle (or use the arrows) to set each group\u2019s display order.'
+          : ' Only an administrator can add, rename or reorder them.'}
       </p>
 
       {loadError ? (
@@ -134,22 +142,35 @@ export default function GroupsTab() {
                 <span className="muted small">
                   {members.length} {pluralize('camera', members.length)}
                 </span>
-                <div className="group-actions">
-                  <button type="button" className="btn btn-sm" onClick={() => setRenaming(group)}>
-                    Rename
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-danger-ghost"
-                    onClick={() => setDeleting(group)}
-                  >
-                    Delete
-                  </button>
-                </div>
+                {isAdmin && (
+                  <div className="group-actions">
+                    <button type="button" className="btn btn-sm" onClick={() => setRenaming(group)}>
+                      Rename
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-danger-ghost"
+                      onClick={() => setDeleting(group)}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                )}
               </div>
 
               {members.length === 0 ? (
                 <p className="muted small">No cameras in this group yet.</p>
+              ) : !isAdmin ? (
+                // Read-only for a viewer. Rendering the ReorderList would offer
+                // drag handles and remove buttons whose every commit 403s — a
+                // control that looks live and cannot work is worse than none.
+                <ul className="group-cam-list">
+                  {members.map((c) => (
+                    <li key={c.name} className="group-cam-row">
+                      <span className="group-cam-name">{camLabel(c)}</span>
+                    </li>
+                  ))}
+                </ul>
               ) : (
                 <ReorderList
                   items={members}
@@ -183,7 +204,7 @@ export default function GroupsTab() {
                 />
               )}
 
-              {available.length > 0 && (
+              {isAdmin && available.length > 0 && (
                 <div className="group-add">
                   <span className="control-label">Add camera</span>
                   <div className="chips">
