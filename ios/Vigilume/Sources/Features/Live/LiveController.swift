@@ -94,6 +94,12 @@ final class LiveController: ObservableObject {
     enum Rung: Equatable { case low, high }
 
     @Published private(set) var rung: Rung = .low
+    /// True once a promotion to the full-res rung has been TRIED and failed —
+    /// the candidate never decoded a frame inside `candidateWindow`. Drives the
+    /// "SD (compat)" badge on the WebRTC path, so a view that is stuck on the
+    /// substream says so instead of just looking soft. Cleared by a successful
+    /// switch, a fresh attach, and the HD retry button.
+    @Published private(set) var highRungUnavailable = false
     private var whepLowURL: URL?
     private var whepHighURL: URL?
     /// False when there is nothing to switch between: no high rung (grid tiles,
@@ -290,6 +296,7 @@ final class LiveController: ObservableObject {
         cleanSince = nil
         promoteWindow = Self.initialPromoteWindow
         hasDemoted = false
+        highRungUnavailable = false
         lastSwitchAt = ProcessInfo.processInfo.systemUptime
     }
 
@@ -309,8 +316,6 @@ final class LiveController: ObservableObject {
     private func evaluateQuality(_ sample: LiveQualitySample) {
         defer { lastSample = sample }
         guard adaptEnabled, mode == .whep, state == .playing, standby == nil else { return }
-        // While unmuted we are pinned to the audio-bearing rung; nothing to decide.
-        guard isMuted else { return }
         guard let previous = lastSample, sample.at > previous.at else { return }
 
         let now = sample.at
@@ -334,7 +339,12 @@ final class LiveController: ObservableObject {
             cleanSince = nil
             let since = degradedSince ?? now
             degradedSince = since
-            guard rung == .high else { return }
+            // DEMOTE only while muted. Unmuted we are pinned to the
+            // audio-bearing rung — `<cam>_sub` carries no audio at all, so
+            // dropping would silence the stream the user unmuted on purpose.
+            // Promotion, below, runs either way: it is the direction that GIVES
+            // you audio, and it is what a fullscreen view needs most.
+            guard rung == .high, isMuted else { return }
             if now - since >= Self.demoteWindow, now - lastSwitchAt >= Self.minSwitchInterval {
                 // This link has now failed at high, so future climbs must earn
                 // it: jump to the cautious window on the first failure, then
@@ -349,6 +359,15 @@ final class LiveController: ObservableObject {
             degradedSince = nil
             let since = cleanSince ?? now
             cleanSince = since
+            // THE RETRY PATH. `handleWHEPState` fires one make-before-break
+            // promotion when the sub rung first paints; if that attempt loses
+            // the race (main's keyframe interval is untouched by
+            // provision_substream_gop, so its first I-frame can arrive after
+            // the 6 s candidate window) this is the only thing that tries
+            // again. It used to be unreachable on the single-camera fullscreen
+            // view, which is unmuted from the moment it opens — so one unlucky
+            // promotion left that view on the 640x480 substream, full-screen,
+            // for as long as it stayed open.
             guard rung == .low, whepHighURL != nil else { return }
             // The rate limiter exists to stop FLAPPING, which can only happen
             // once something has flapped. Before the first demote there is
@@ -372,7 +391,13 @@ final class LiveController: ObservableObject {
         if !force, ProcessInfo.processInfo.systemUptime - lastSwitchAt < Self.minSwitchInterval { return }
 
         let candidate = WHEPPlayer(allowsAudio: allowsAudio)
-        candidate.isMuted = isMuted
+        // ALWAYS muted, even when the view is unmuted. A candidate renders
+        // nowhere until it commits, but an unmuted one would enable its own
+        // remote audio track AND activate the shared RTCAudioSession while the
+        // player on screen still holds both — two sources into one VPIO unit
+        // for the length of the overlap. `commitSwitch` applies the real mute
+        // state at the instant this player becomes the visible one.
+        candidate.isMuted = true
         standby = candidate
         candidate.start(url: url)
 
@@ -388,7 +413,7 @@ final class LiveController: ObservableObject {
                 }
                 if candidate.state == .failed
                     || ProcessInfo.processInfo.systemUptime > deadline {
-                    self.abandonSwitch(candidate)
+                    self.abandonSwitch(candidate, target: target)
                     return
                 }
             }
@@ -409,6 +434,7 @@ final class LiveController: ObservableObject {
         whepTrack = candidate.videoTrack
         state = .playing
         rung = target
+        if target == .high { highRungUnavailable = false }
         whepURL = url(for: target)
         lastSwitchAt = ProcessInfo.processInfo.systemUptime
         degradedSince = nil
@@ -418,7 +444,7 @@ final class LiveController: ObservableObject {
     }
 
     /// Candidate never produced a frame (or failed): drop it and stay put.
-    private func abandonSwitch(_ candidate: WHEPPlayer) {
+    private func abandonSwitch(_ candidate: WHEPPlayer, target: Rung) {
         guard standby === candidate else { return }
         standby = nil
         switchTask = nil
@@ -426,6 +452,23 @@ final class LiveController: ObservableObject {
         // Treat a failed attempt as evidence too, so we don't retry immediately.
         lastSwitchAt = ProcessInfo.processInfo.systemUptime
         cleanSince = nil
+        // A failed CLIMB has to cost what a demote costs, not less. A high rung
+        // that cannot come up at all — a main stream in HEVC, which no WebRTC
+        // decoder on this platform can carry, or a camera with no RTSP session
+        // slot left — fails this way every single time. Leaving `promoteWindow`
+        // at its opening 4 s meant re-dialling main every few seconds for as
+        // long as the view stayed open: a new WHEP session, a new RTSP pull off
+        // the camera, forever, all of it invisible. Charging the cautious
+        // window (then doubling, and switching the rate limiter on) makes a
+        // hopeless rung back off on its own while a merely unlucky one still
+        // recovers. A failed DEMOTE is not evidence about climbing, so it is
+        // charged nothing beyond the rate limit above.
+        guard target == .high else { return }
+        promoteWindow = hasDemoted
+            ? min(promoteWindow * 2, Self.promoteWindowMax)
+            : Self.cautiousPromoteWindow
+        hasDemoted = true
+        highRungUnavailable = true
     }
 
     private func cancelSwitch() {
@@ -442,6 +485,7 @@ final class LiveController: ObservableObject {
         whepLowURL = nil
         whepHighURL = nil
         adaptEnabled = false
+        highRungUnavailable = false
         primaryURL = nil
         fallbackURL = nil
         suspended = false

@@ -232,7 +232,15 @@ struct SingleCameraView: View {
 
             Spacer()
 
-            if model.usingFallback {
+            // `usingFallback` is the HLS leg. `highRungUnavailable` is the
+            // WebRTC one: full res was tried and would not come up, so this
+            // view is on the substream and will look soft at fullscreen size.
+            // That used to show nothing at all — the picture was just blurry
+            // and the app never said why. Tapping HD re-dials main directly,
+            // and falls through to HLS if WebRTC still can't carry it (which
+            // is what rescues an HEVC main stream: AVPlayer decodes it, a
+            // WebRTC decoder cannot).
+            if model.usingFallback || model.highRungUnavailable {
                 SDCompatBadge { model.retryPrimary() }
             }
             if model.state == .playing {
