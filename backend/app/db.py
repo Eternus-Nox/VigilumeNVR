@@ -15,7 +15,7 @@ import aiosqlite
 
 from .config import DEFAULT_DETECT_OBJECTS
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cameras (
@@ -46,6 +46,14 @@ CREATE TABLE IF NOT EXISTS cameras (
     audio_codec     TEXT NOT NULL DEFAULT 'g711a',
     smart_spotlight INTEGER NOT NULL DEFAULT 0,
     spotlight_hold_seconds INTEGER NOT NULL DEFAULT 60,
+    -- Recognition regions of interest, normalized 0..1, same shape as
+    -- include_zones. These do NOT filter detection: they mark the part of the
+    -- frame worth spending a recognition pass on ("faces are readable at the
+    -- door, not across the street"; "plates are readable where the drive meets
+    -- the kerb"). '[]' means the whole frame, which is correct-but-slower, so
+    -- an upgraded box keeps working before anyone draws anything.
+    face_zones      TEXT NOT NULL DEFAULT '[]',
+    plate_zones     TEXT NOT NULL DEFAULT '[]',
     created_at      REAL NOT NULL
 );
 
@@ -129,6 +137,90 @@ CREATE TABLE IF NOT EXISTS users (
     role          TEXT NOT NULL CHECK(role IN ('admin','viewer')),
     created_at    REAL NOT NULL
 );
+
+-- ── Recognition: profiles, enrolled samples, candidates, event matches ──────
+--
+-- A profile is a NAMED IDENTITY the operator curates by hand: a person whose
+-- face should be recognized, or a vehicle known by its plate. Nothing creates
+-- one automatically — an NVR that invents identities on its own is one that
+-- cannot be corrected.
+CREATE TABLE IF NOT EXISTS profiles (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT NOT NULL,                 -- 'person' | 'vehicle'
+    name        TEXT NOT NULL,
+    notes       TEXT NOT NULL DEFAULT '',
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    -- Per-profile match threshold. NULL = inherit the global default for this
+    -- kind. One profile that keeps false-matching gets tightened on its own,
+    -- without making every other profile harder to match.
+    threshold   REAL,
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL,
+    UNIQUE(kind, name)
+);
+
+-- One enrolled reference for a profile. A person's sample carries a face
+-- EMBEDDING; a vehicle's carries a normalized PLATE string. Both may carry a
+-- reference image the operator can look at and delete.
+CREATE TABLE IF NOT EXISTS profile_samples (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id  INTEGER NOT NULL,
+    -- Raw float32 little-endian, `dim` values long. NULL for a plate sample.
+    embedding   BLOB,
+    dim         INTEGER NOT NULL DEFAULT 0,
+    plate       TEXT NOT NULL DEFAULT '',
+    -- WHICH MODEL produced `embedding`. Embeddings are only comparable within
+    -- one model, so storing this is what turns "the operator swapped models and
+    -- every match silently went wrong" into a detectable, repairable state.
+    model_key   TEXT NOT NULL DEFAULT '',
+    image_path  TEXT NOT NULL DEFAULT '',
+    quality     REAL NOT NULL DEFAULT 0,
+    source_fid  TEXT NOT NULL DEFAULT '',
+    created_at  REAL NOT NULL,
+    FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_profile_samples ON profile_samples(profile_id);
+
+-- Crops that did NOT match any profile, kept on a rolling window so a face can
+-- be enrolled AFTER the fact ("who was that on Tuesday?"). Purged by age —
+-- see settings.recognition.candidate_retention_days.
+CREATE TABLE IF NOT EXISTS recognition_candidates (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind            TEXT NOT NULL,
+    camera          TEXT NOT NULL,
+    event_fid       TEXT NOT NULL DEFAULT '',
+    embedding       BLOB,
+    dim             INTEGER NOT NULL DEFAULT 0,
+    plate           TEXT NOT NULL DEFAULT '',
+    model_key       TEXT NOT NULL DEFAULT '',
+    image_path      TEXT NOT NULL DEFAULT '',
+    quality         REAL NOT NULL DEFAULT 0,
+    -- Best similarity against the gallery at capture time, and who it was
+    -- nearest to. Lets the app sort "almost matched Adam" above total
+    -- strangers, which is the list you actually want to enroll from.
+    best_score      REAL NOT NULL DEFAULT 0,
+    best_profile_id INTEGER,
+    created_at      REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_candidates_created ON recognition_candidates(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_candidates_kind    ON recognition_candidates(kind, created_at DESC);
+
+-- What an event actually matched. A row with profile_id NULL means "a face was
+-- read here and it belonged to nobody enrolled" — which is the row an
+-- unknown-person alert is built from, so it is recorded, not discarded.
+CREATE TABLE IF NOT EXISTS event_recognitions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_fid   TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    profile_id  INTEGER,
+    name        TEXT NOT NULL DEFAULT '',
+    plate       TEXT NOT NULL DEFAULT '',
+    score       REAL NOT NULL DEFAULT 0,
+    quality     REAL NOT NULL DEFAULT 0,
+    image_path  TEXT NOT NULL DEFAULT '',
+    created_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_event_recog ON event_recognitions(event_fid);
 
 -- Camera reachability history, stored as TRANSITION intervals (one row per
 -- state, not per poll — 11 cams x 45 s would otherwise be ~21k rows/day). A row
@@ -550,6 +642,35 @@ class Database:
                             "ALTER TABLE cameras ADD COLUMN notify_on_cross "
                             "INTEGER NOT NULL DEFAULT 0"
                         )
+            if version < 22:
+                # v22: recognition — face/plate profiles, their enrolled
+                # samples, the rolling unmatched-candidate store, and per-event
+                # match rows. Plus two more normalized-polygon columns on
+                # cameras (face_zones / plate_zones).
+                #
+                # Purely additive. The four tables are created by _SCHEMA's
+                # CREATE TABLE IF NOT EXISTS on every boot, so this block only
+                # has to carry the ALTERs that an existing cameras table needs;
+                # both default to '[]', which means "whole frame", so an
+                # upgraded box behaves exactly as before until someone draws a
+                # zone. Guarded on the cameras table existing, matching the
+                # v20/v21 pattern so the synthetic single-table upgrade
+                # fixtures still run.
+                cur = await self.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cameras'"
+                )
+                if await cur.fetchone() is not None:
+                    existing = [
+                        r[1] for r in await (
+                            await self.conn.execute("PRAGMA table_info(cameras)")
+                        ).fetchall()
+                    ]
+                    for _col in ("face_zones", "plate_zones"):
+                        if _col not in existing:
+                            await self.conn.execute(
+                                f"ALTER TABLE cameras ADD COLUMN {_col} "
+                                "TEXT NOT NULL DEFAULT '[]'"
+                            )
         if version < SCHEMA_VERSION:
             await self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         await self.conn.commit()
@@ -579,6 +700,13 @@ class Database:
             # its clip and its snapshot are recorded either way — this gates the
             # alert, never the footage.
             "notify_on_cross": bool(row["notify_on_cross"]),
+            # Recognition regions of interest, normalized like include_zones.
+            # They do NOT filter detection — they mark where a face or a plate
+            # is actually readable, so the recognition pass is spent on the
+            # doorstep and the kerb rather than on the whole 4 MP frame.
+            # [] = whole frame (correct, just slower).
+            "face_zones": json.loads(row["face_zones"]),
+            "plate_zones": json.loads(row["plate_zones"]),
             "detect_width": row["detect_width"],
             "detect_height": row["detect_height"],
             "detect_fps": row["detect_fps"],
@@ -627,7 +755,7 @@ class Database:
     _CAMERA_INSERT_SQL = """
         INSERT INTO cameras (name, friendly_name, model, ip, username, password,
                              detect_objects, exempt_zones, include_zones, cross_lines,
-                             notify_on_cross,
+                             notify_on_cross, face_zones, plate_zones,
                              detect_width, detect_height,
                              detect_fps, audio_events, detect_enabled, record_enabled,
                              capabilities, source, position, main_url, sub_url,
@@ -635,7 +763,7 @@ class Database:
                              spotlight_hold_seconds, created_at)
         VALUES (:name, :friendly_name, :model, :ip, :username, :password,
                 :detect_objects, :exempt_zones, :include_zones, :cross_lines,
-                :notify_on_cross,
+                :notify_on_cross, :face_zones, :plate_zones,
                 :detect_width, :detect_height,
                 :detect_fps, :audio_events, :detect_enabled, :record_enabled,
                 :capabilities, :source,
@@ -653,6 +781,8 @@ class Database:
             "include_zones": json.dumps(cam.get("include_zones") or []),
             "cross_lines": json.dumps(cam.get("cross_lines") or []),
             "notify_on_cross": int(cam.get("notify_on_cross") or False),
+            "face_zones": json.dumps(cam.get("face_zones") or []),
+            "plate_zones": json.dumps(cam.get("plate_zones") or []),
             "capabilities": json.dumps(cam.get("capabilities") or {}),
             "audio_events": int(cam.get("audio_events", True)),
             "detect_enabled": int(cam.get("detect_enabled", True)),
@@ -693,6 +823,8 @@ class Database:
                 include_zones = excluded.include_zones,
                 cross_lines   = excluded.cross_lines,
                 notify_on_cross = excluded.notify_on_cross,
+                face_zones    = excluded.face_zones,
+                plate_zones   = excluded.plate_zones,
                 detect_width  = excluded.detect_width,
                 detect_height = excluded.detect_height,
                 detect_fps    = excluded.detect_fps,
