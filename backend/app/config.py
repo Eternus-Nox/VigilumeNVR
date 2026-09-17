@@ -219,6 +219,27 @@ class Config:
     def suppression_thumbs_dir(self) -> Path:
         return self.data_dir / "suppression-thumbs"
 
+    # Recognition imagery. Kept in TWO directories on purpose, because they
+    # have opposite lifetimes and opposite sensitivity:
+    #
+    #   profile_images_dir     — enrolled references. Deliberately curated by a
+    #                            person, kept until that person deletes them,
+    #                            and the only biometric imagery that outlives a
+    #                            retention window.
+    #   candidate_crops_dir    — crops that matched nobody, kept on a rolling
+    #                            window so someone can be enrolled after the
+    #                            fact, then purged.
+    #
+    # Separating them means the purge job can never walk the enrolled set, and
+    # an operator clearing candidates can never lose a reference image.
+    @property
+    def profile_images_dir(self) -> Path:
+        return self.data_dir / "profiles"
+
+    @property
+    def candidate_crops_dir(self) -> Path:
+        return self.data_dir / "candidates"
+
     def seed_cameras(self) -> list[dict]:
         """Read CAM{1..3}_* env vars for first-boot camera seeding."""
         cams: list[dict] = []

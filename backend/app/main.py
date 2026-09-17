@@ -59,6 +59,7 @@ from .routers import suppressions as suppressions_router
 from .routers import integrations as integrations_router
 from .routers import groups as groups_router
 from .routers import notifications as notifications_router
+from .routers import profiles as profiles_router
 from .routers import recordings as recordings_router
 from .routers import privacy as privacy_router
 from .routers import settings as settings_router
@@ -304,6 +305,10 @@ async def lifespan(app: FastAPI):
     config.data_dir.mkdir(parents=True, exist_ok=True)
     config.snapshots_dir.mkdir(parents=True, exist_ok=True)
     config.suppression_thumbs_dir.mkdir(parents=True, exist_ok=True)
+    # Recognition imagery. Two directories, opposite lifetimes: enrolled
+    # references live until deleted, candidate crops roll off. See config.py.
+    config.profile_images_dir.mkdir(parents=True, exist_ok=True)
+    config.candidate_crops_dir.mkdir(parents=True, exist_ok=True)
     config.models_dir.mkdir(parents=True, exist_ok=True)
     config.go2rtc_config_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -641,6 +646,7 @@ app.include_router(notifications_router.push_router)
 app.include_router(settings_router.router)
 app.include_router(privacy_router.router)
 app.include_router(detection_router.router)
+app.include_router(profiles_router.router)
 app.include_router(integrations_router.router)
 # Unauthenticated by necessity: a cloud provider redirects a bare browser
 # here to finish an OAuth sign-in, carrying no Authorization header. The

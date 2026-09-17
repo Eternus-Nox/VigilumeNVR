@@ -195,6 +195,22 @@ ADMIN_ROUTES = [
     ("DELETE", "/api/detection/models/dfine_n", None),
     ("GET", "/api/system/detector", None),
     ("POST", "/api/notifications/test", None),
+    # Recognition. Note these include the READS, which is a deliberate
+    # departure from "a viewer may read, an admin may write": the profile list
+    # is a named register of who visits this address, and the candidate list is
+    # a rolling gallery of every stranger's face the cameras caught. That is
+    # content a viewer account was never agreed to cover, not configuration.
+    ("GET", "/api/recognition/status", None),
+    ("GET", "/api/recognition/profiles", None),
+    ("POST", "/api/recognition/profiles", {"kind": "person", "name": "rbac probe"}),
+    ("GET", "/api/recognition/profiles/999999", None),
+    ("PUT", "/api/recognition/profiles/999999", {"name": "nope"}),
+    ("DELETE", "/api/recognition/profiles/999999", None),
+    ("POST", "/api/recognition/profiles/999999/plate", {"plate": "ABC123"}),
+    ("POST", "/api/recognition/profiles/999999/enroll", {"candidate_ids": [1]}),
+    ("DELETE", "/api/recognition/samples/999999", None),
+    ("GET", "/api/recognition/candidates", None),
+    ("DELETE", "/api/recognition/candidates/999999", None),
     ("GET", "/api/users", None),
     ("POST", "/api/users", {"username": "someviewer2", "password": "password12", "role": "viewer"}),
     ("PUT", "/api/users/999999", {"role": "viewer"}),
@@ -344,7 +360,9 @@ def dynamic_admin_enumeration(client: TestClient, viewer_h: dict) -> None:
         # is neither 403 nor a pass, so the route silently escapes this check.
         for token, val in (("{name}", "front"), ("{event_id}", "1"), ("{camera}", "front"),
                            ("{start_ts}", "1"), ("{group_id}", "1"), ("{user_id}", "999999"),
-                           ("{key}", "dfine_s"), ("{suppression_id}", "1")):
+                           ("{key}", "dfine_s"), ("{suppression_id}", "1"),
+                           ("{profile_id}", "999999"), ("{sample_id}", "999999"),
+                           ("{candidate_id}", "999999")):
             path = path.replace(token, val)
         return path
 
