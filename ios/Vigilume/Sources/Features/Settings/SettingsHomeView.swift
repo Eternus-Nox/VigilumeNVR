@@ -651,6 +651,16 @@ struct SettingsHomeView: View {
                 Label("Excluded objects", systemImage: "eye.slash")
                     .foregroundStyle(Theme.textPrimary)
             }
+            // Admin-only for its CONTENT, not just because it configures
+            // something: the profile list names who visits this address. The
+            // server gates the reads too — this link simply never appears for
+            // a viewer, so the 403 never has to be explained.
+            NavigationLink {
+                RecognitionProfilesView()
+            } label: {
+                Label("Faces & Plates", systemImage: "person.crop.rectangle.stack.fill")
+                    .foregroundStyle(Theme.textPrimary)
+            }
             NavigationLink {
                 RecordingSettingsView()
             } label: {

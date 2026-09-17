@@ -878,6 +878,57 @@ any event/count/notification.
 WebSocket:
 - `WS /api/ws?token=` — server pushes `{type:"event_new"|"event_update"|"event_end"|"doorbell", event:{...}}`, `{type:"camera_status", ...}`, and `{type:"model_status", key, tier, state, progress_pct, active, loaded}` for live UI updates.
 
+### Recognition — faces & plates (`/api/recognition`, schema v22)
+
+**ADMIN-ONLY, INCLUDING THE READS.** This is the one router that departs from
+"a viewer may read, an admin may write", and the reason is content rather than
+configuration: the profile list is a named register of who visits this address
+and the candidate list is a rolling gallery of strangers' faces. Imagery uses
+`require_media_admin` (not `require_media_auth`) because ids are sequential, so
+media scope alone would let any authenticated token walk the biometric store one
+integer at a time.
+
+**There is no training step.** A profile is a nearest-neighbour gallery entry:
+enrolling appends a `profile_samples` row, un-enrolling deletes it, and the model
+on disk never changes. Consequences that drive the UX — enrollment is instant and
+fully reversible; accuracy scales with sample DIVERSITY rather than count; every
+embedding in a gallery must come from the SAME model, which is why `model_key` is
+stored per sample and mismatched samples are dropped from the gallery rather than
+scored.
+
+- `GET /api/recognition/status` → `{model_key, ready, profiles:{kind:n}, candidates:{kind:n}, stale_samples, defaults:{face_threshold, min_margin}}`. `stale_samples` > 0 means some profiles have silently stopped matching after a model change and need re-enrolling.
+- `GET /api/recognition/profiles[?kind=person|vehicle]` → profiles with `sample_count` and `usable_sample_count` (samples the ACTIVE model can still compare).
+- `POST /api/recognition/profiles` `{kind, name, notes?, enabled?, threshold?}` → 201. Duplicate `(kind, name)` → 409. `threshold` outside 0..1 → 422 (refused, not clamped).
+- `GET /api/recognition/profiles/{id}` → profile + its `samples[]`.
+- `PUT /api/recognition/profiles/{id}` — partial. An **omitted** `threshold` means "leave it alone"; an explicit **null** clears the per-profile override back to the server default. An empty patch → 400.
+- `DELETE /api/recognition/profiles/{id}` → 204, and deletes its samples AND their reference images from disk.
+- `POST /api/recognition/profiles/{id}/plate` `{plate}` → 201. Vehicle profiles only (person → 400); the plate is normalized (uppercase, non-alphanumerics stripped).
+- `POST /api/recognition/profiles/{id}/enroll` `{candidate_ids:[...]}` → `{enrolled, sample_ids}`. **Atomic** across the batch, kind-checked (a face candidate into a vehicle profile → 400), and it **MOVES** each crop from the rolling candidate directory into the durable profile directory — copying would leave enrolled references in the directory the retention purge walks.
+- `DELETE /api/recognition/samples/{id}` → 204 (+ unlinks its image).
+- `GET /api/recognition/candidates[?kind=&camera=&limit=]` → unmatched crops **best-quality first**, because this list exists to be enrolled from and the shot worth enrolling is the legible one, not the most recent.
+- `DELETE /api/recognition/candidates/{id}` and `DELETE /api/recognition/candidates[?kind=]` → 204.
+- `GET /api/recognition/{samples,candidates}/{id}/image.jpg` — media-scope **admin** token.
+
+Camera fields `face_zones` / `plate_zones` (normalized polygons, same shape as
+`include_zones`) mark where a face or plate is actually legible. Unlike
+`include_zones` they do **not** filter detection; `[]` means the whole frame.
+
+**Quality is not detector confidence** (`native/bestshot.py`). The engine's
+existing `best_frame` is picked by "is this a person?", which a large, centred,
+motion-blurred subject answers very well and which is precisely what an embedding
+cannot read. Recognition scores crops separately on sharpness, resolution against
+the model input size, exposure measured as CLIPPING (a correctly exposed night
+face is dark — preferring the IR-blown frame would be backwards), and pose from
+5-point landmarks when available. Crops below the model's input size score 0
+outright rather than being carried over the line by a high sharpness term.
+Retained shots must be `MIN_GAP_S` apart, so the buffer holds several distinct
+moments instead of five copies of one stride.
+
+Multi-frame plate voting (`native/recognition.py:vote_plate`) reconciles several
+OCR reads of one plate by weighted per-character vote, deciding string LENGTH
+first (aligning a 6-char read against a 7-char plate corrupts every position
+after the gap). Overall confidence is the weakest character, not the mean.
+
 ## Event & notification pipeline (backend, in-process)
 
 1. The native engine calls `EventsPipeline.handle_event()` with Frigate-shaped payloads

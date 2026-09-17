@@ -423,6 +423,166 @@ struct APIClient: Sendable {
         mediaURL("api/detection/suppressions/\(id)/thumb.jpg")
     }
 
+    // MARK: Recognition (faces & plates)
+    //
+    // EVERY route here is admin-only, INCLUDING the reads — the profile list is
+    // a register of who visits this address and the candidate list is a gallery
+    // of strangers' faces, which is content a viewer account was never meant to
+    // carry. A viewer calling any of these gets 403 by design; the UI hides
+    // them behind `session.isAdmin` so it never comes to that.
+
+    /// ADMIN: GET /api/recognition/status.
+    func recognitionStatus() async throws -> RecognitionStatus {
+        try await get("api/recognition/status")
+    }
+
+    /// ADMIN: GET /api/recognition/profiles — people and vehicles, or one kind.
+    func recognitionProfiles(kind: String? = nil) async throws -> [RecognitionProfile] {
+        try await get(
+            "api/recognition/profiles",
+            query: kind.map { [URLQueryItem(name: "kind", value: $0)] } ?? []
+        )
+    }
+
+    /// ADMIN: GET /api/recognition/profiles/{id} — profile plus its samples.
+    func recognitionProfile(id: Int) async throws -> RecognitionProfileDetail {
+        try await get("api/recognition/profiles/\(id)")
+    }
+
+    /// ADMIN: POST /api/recognition/profiles.
+    func createRecognitionProfile(
+        kind: String, name: String, notes: String = ""
+    ) async throws -> RecognitionProfile {
+        try await sendJSON(
+            "POST", "api/recognition/profiles",
+            body: ["kind": kind, "name": name, "notes": notes]
+        )
+    }
+
+    /// What to do with a profile's threshold on a partial update.
+    ///
+    /// Three states, not two, because "leave it alone" and "put it back to the
+    /// default" are different requests that a plain `Double?` cannot tell
+    /// apart. The server's partial update treats an OMITTED field as "leave it
+    /// alone", and Swift's synthesized `Encodable` omits a nil Optional — so a
+    /// nil-means-clear API would make "reset to Default" silently do nothing.
+    enum ThresholdPatch {
+        /// Don't mention the field at all.
+        case unchanged
+        /// Send an explicit null: inherit the server-wide default again.
+        case useDefault
+        case value(Double)
+    }
+
+    /// ADMIN: PUT /api/recognition/profiles/{id} — partial; omitted fields are
+    /// left alone (an empty patch is a 400, not a silent no-op).
+    func updateRecognitionProfile(
+        id: Int, name: String? = nil, notes: String? = nil,
+        enabled: Bool? = nil, threshold: ThresholdPatch = .unchanged
+    ) async throws -> RecognitionProfileDetail {
+        struct Patch: Encodable {
+            var name: String?
+            var notes: String?
+            var enabled: Bool?
+            var threshold: ThresholdPatch
+
+            enum CodingKeys: String, CodingKey {
+                case name, notes, enabled, threshold
+            }
+
+            // Hand-rolled because the synthesized version cannot express the
+            // difference between "omit" and "send null" (see ThresholdPatch).
+            func encode(to encoder: Encoder) throws {
+                var c = encoder.container(keyedBy: CodingKeys.self)
+                try c.encodeIfPresent(name, forKey: .name)
+                try c.encodeIfPresent(notes, forKey: .notes)
+                try c.encodeIfPresent(enabled, forKey: .enabled)
+                switch threshold {
+                case .unchanged:
+                    break
+                case .useDefault:
+                    try c.encodeNil(forKey: .threshold)
+                case .value(let v):
+                    try c.encode(v, forKey: .threshold)
+                }
+            }
+        }
+        return try await sendJSON(
+            "PUT", "api/recognition/profiles/\(id)",
+            body: Patch(name: name, notes: notes, enabled: enabled, threshold: threshold)
+        )
+    }
+
+    /// ADMIN: DELETE /api/recognition/profiles/{id} — takes its samples and
+    /// their reference images with it.
+    func deleteRecognitionProfile(id: Int) async throws {
+        try await send(try makeRequest("DELETE", "api/recognition/profiles/\(id)"))
+    }
+
+    /// ADMIN: POST /api/recognition/profiles/{id}/plate — enroll a vehicle by
+    /// typing its plate, with no sighting required.
+    func addPlateSample(profileId: Int, plate: String) async throws -> RecognitionSample {
+        try await sendJSON(
+            "POST", "api/recognition/profiles/\(profileId)/plate", body: ["plate": plate]
+        )
+    }
+
+    /// ADMIN: POST /api/recognition/profiles/{id}/enroll — turn candidates into
+    /// enrolled samples.
+    ///
+    /// A LIST, not one id, because the flow is "show me the best shots of this
+    /// face, I'll tick the three that are really them": one user action should
+    /// be one request that either takes or doesn't, rather than three that can
+    /// half-fail.
+    @discardableResult
+    func enrollCandidates(profileId: Int, candidateIds: [Int]) async throws -> Int {
+        struct Result: Decodable { let enrolled: Int }
+        let result: Result = try await sendJSON(
+            "POST", "api/recognition/profiles/\(profileId)/enroll",
+            body: ["candidate_ids": candidateIds]
+        )
+        return result.enrolled
+    }
+
+    /// ADMIN: DELETE /api/recognition/samples/{id} — un-enroll one reference.
+    /// Instant and complete: there is no trained artifact to carry a residue.
+    func deleteRecognitionSample(id: Int) async throws {
+        try await send(try makeRequest("DELETE", "api/recognition/samples/\(id)"))
+    }
+
+    /// ADMIN: GET /api/recognition/candidates — unmatched crops, BEST FIRST.
+    func recognitionCandidates(
+        kind: String? = nil, camera: String? = nil, limit: Int = 100
+    ) async throws -> [RecognitionCandidate] {
+        var query = [URLQueryItem(name: "limit", value: String(limit))]
+        if let kind { query.append(URLQueryItem(name: "kind", value: kind)) }
+        if let camera { query.append(URLQueryItem(name: "camera", value: camera)) }
+        return try await get("api/recognition/candidates", query: query)
+    }
+
+    /// ADMIN: DELETE /api/recognition/candidates/{id}.
+    func deleteRecognitionCandidate(id: Int) async throws {
+        try await send(try makeRequest("DELETE", "api/recognition/candidates/\(id)"))
+    }
+
+    /// ADMIN: DELETE /api/recognition/candidates — "forget the strangers".
+    func clearRecognitionCandidates(kind: String? = nil) async throws {
+        try await send(try makeRequest(
+            "DELETE", "api/recognition/candidates",
+            query: kind.map { [URLQueryItem(name: "kind", value: $0)] } ?? []
+        ))
+    }
+
+    /// Enrolled reference image (Bearer-free media URL for AsyncImage).
+    func recognitionSampleImageURL(id: Int) -> URL {
+        mediaURL("api/recognition/samples/\(id)/image.jpg")
+    }
+
+    /// Candidate crop (Bearer-free media URL for AsyncImage).
+    func recognitionCandidateImageURL(id: Int) -> URL {
+        mediaURL("api/recognition/candidates/\(id)/image.jpg")
+    }
+
     // MARK: Recordings
 
     func recordingCameras() async throws -> [RecordingCamera] {

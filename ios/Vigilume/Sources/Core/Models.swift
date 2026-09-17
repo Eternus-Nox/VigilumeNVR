@@ -422,6 +422,98 @@ struct Suppression: Codable, Identifiable, Sendable {
     let createdAt: Double
 }
 
+// MARK: - Recognition (faces & plates)
+
+/// A named identity the operator curates: a person recognized by face, or a
+/// vehicle known by its plate. Created by hand only — nothing on the server
+/// invents a profile, because an identity you cannot correct is worse than
+/// none.
+struct RecognitionProfile: Codable, Identifiable, Sendable {
+    let id: Int
+    /// "person" | "vehicle".
+    let kind: String
+    let name: String
+    let notes: String
+    let enabled: Bool
+    /// Per-profile match threshold; nil inherits the server default. Tightening
+    /// ONE profile is how a person who keeps false-matching gets fixed without
+    /// making everyone else harder to recognize.
+    let threshold: Double?
+    let sampleCount: Int
+    /// Samples the CURRENTLY ACTIVE model can still compare. When this is 0 but
+    /// `sampleCount` is not, every reference was embedded by a different model
+    /// and this profile has silently stopped matching — the UI surfaces exactly
+    /// that condition rather than leaving it to be discovered.
+    let usableSampleCount: Int
+    let createdAt: Double
+    let updatedAt: Double
+
+    var isPerson: Bool { kind == "person" }
+    /// True when this profile needs re-enrolling after a model change.
+    var needsReenroll: Bool { sampleCount > 0 && usableSampleCount == 0 }
+}
+
+/// One enrolled reference belonging to a profile.
+struct RecognitionSample: Codable, Identifiable, Sendable {
+    let id: Int
+    let profileId: Int
+    let plate: String
+    let modelKey: String
+    let quality: Double
+    let sourceFid: String
+    let createdAt: Double
+    let hasImage: Bool
+}
+
+/// A profile plus its samples (GET /api/recognition/profiles/{id}).
+struct RecognitionProfileDetail: Codable, Sendable {
+    let id: Int
+    let kind: String
+    let name: String
+    let notes: String
+    let enabled: Bool
+    let threshold: Double?
+    let sampleCount: Int
+    let usableSampleCount: Int
+    let createdAt: Double
+    let updatedAt: Double
+    let samples: [RecognitionSample]
+}
+
+/// A crop that matched nobody, held on a rolling window so someone can be
+/// enrolled after the fact. This is the list the "which image should we use"
+/// picker is built from.
+struct RecognitionCandidate: Codable, Identifiable, Sendable {
+    let id: Int
+    /// "face" | "plate".
+    let kind: String
+    let camera: String
+    let eventFid: String
+    let plate: String
+    /// Legibility 0..1 from the server's best-shot scoring — NOT detector
+    /// confidence. Sharpness, size, exposure and pose, i.e. whether the detail
+    /// can actually be read.
+    let quality: Double
+    /// How close this came to an existing profile. Sorting by it puts "almost
+    /// matched Adam" above total strangers, which is the order you want when
+    /// deciding what to enroll.
+    let bestScore: Double
+    let bestProfileId: Int?
+    let createdAt: Double
+    let hasImage: Bool
+}
+
+/// GET /api/recognition/status — what recognition can currently do.
+struct RecognitionStatus: Codable, Sendable {
+    let modelKey: String
+    let ready: Bool
+    let profiles: [String: Int]
+    let candidates: [String: Int]
+    /// Embeddings the active model can no longer compare. Non-zero means some
+    /// profiles have stopped matching and need re-enrolling.
+    let staleSamples: Int
+}
+
 // MARK: - Recordings
 
 struct RecordingCamera: Decodable, Identifiable, Sendable {

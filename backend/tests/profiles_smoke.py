@@ -147,6 +147,19 @@ def profile_checks(client: TestClient, h: dict) -> None:
 
     r = client.put(f"/api/recognition/profiles/{adam['id']}", headers=h, json={})
     check(r.status_code == 400, "an empty update is refused rather than silently no-op")
+
+    # The iOS client depends on this distinction: OMITTING threshold means
+    # "leave it alone", sending an explicit null means "go back to the default".
+    # Without it, dragging the strictness slider back to Default would appear to
+    # work and change nothing.
+    r = client.put(f"/api/recognition/profiles/{adam['id']}", headers=h,
+                   json={"notes": "unchanged-threshold"})
+    check(r.json()["threshold"] == 0.5,
+          "OMITTING threshold leaves the existing override in place")
+    r = client.put(f"/api/recognition/profiles/{adam['id']}", headers=h,
+                   json={"threshold": None})
+    check(r.json()["threshold"] is None,
+          "sending threshold=null CLEARS the override back to the server default")
     r = client.put("/api/recognition/profiles/999999", headers=h, json={"notes": "x"})
     check(r.status_code == 404, "updating a missing profile is 404")
 
