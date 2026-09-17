@@ -144,11 +144,25 @@ def include_detect_zones(row: dict[str, Any]) -> list[tuple[str, sv.PolygonZone]
     must not stop a camera from detecting. A zone with fewer than 3 points is
     not a polygon and is dropped the same way the exempt parser drops it.
     """
+    return polygon_zones(row, "include_zones", "include")
+
+
+def polygon_zones(
+    row: dict[str, Any], field: str, prefix: str
+) -> list[tuple[str, sv.PolygonZone]]:
+    """Parse any normalized-polygon column into detect-space PolygonZones.
+
+    Shared by include_zones (which FILTERS detection) and the recognition ROIs
+    face_zones / plate_zones (which only mark where detail is legible). They
+    have opposite consequences but identical storage and identical failure
+    modes, so they get one parser — and one place where a malformed polygon is
+    skipped rather than raised.
+    """
     dw, dh = _detect_dims(row)
     out: list[tuple[str, sv.PolygonZone]] = []
     if dw <= 0 or dh <= 0:
         return out
-    for i, zone in enumerate(row.get("include_zones") or []):
+    for i, zone in enumerate(row.get(field) or []):
         pts = _points_of(zone)
         if not pts or len(pts) < 3:
             continue
@@ -161,12 +175,12 @@ def include_detect_zones(row: dict[str, Any]) -> list[tuple[str, sv.PolygonZone]
         try:
             out.append(
                 (
-                    _name_of(zone, i, "include"),
+                    _name_of(zone, i, prefix),
                     sv.PolygonZone(polygon=poly, triggering_anchors=(TRIGGER_ANCHOR,)),
                 )
             )
         except Exception:  # noqa: BLE001 — a bad polygon is data, not a crash
-            log.warning("skipping malformed include zone %d on %s", i, row.get("name"))
+            log.warning("skipping malformed %s zone %d on %s", prefix, i, row.get("name"))
     return out
 
 

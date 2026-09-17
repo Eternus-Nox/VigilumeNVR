@@ -929,6 +929,52 @@ OCR reads of one plate by weighted per-character vote, deciding string LENGTH
 first (aligning a 6-char read against a 7-char plate corrupts every position
 after the gap). Overall confidence is the weakest character, not the mean.
 
+#### Face pipeline (`native/recognizer.py`, `native/facepass.py`)
+
+**OFF BY DEFAULT** (`settings.recognition.enabled`). It downloads two more
+models, it retains biometric imagery, and in some jurisdictions running it at
+all is a decision the operator must make knowingly — a camera system that
+quietly began recognizing faces on upgrade would be making that decision for
+them. `settings.recognition.candidate_retention_days` (default 7) is the
+biometric retention window; **0 means keep nothing**, not keep forever.
+
+Models are revision-pinned + SHA-256 verified like every other artifact, and
+both are permissive: **YuNet** (MIT, 233 KB) for detection — it emits the
+5-point landmarks the quality score needs, so pose is measured rather than
+guessed — and **SFace** (Apache-2.0, 37 MB) for 128-d embeddings. They live in
+`recognizer.FACE_MODELS`, deliberately **not** in `detector.MODELS`: they are
+not detector tiers, must never appear in the model picker, and the ModelStore
+keeps no per-key state for them. They reuse `ensure_model`'s download path via
+its `pin=` override. NB the URLs are `media.githubusercontent.com/media/...` —
+plain `raw.githubusercontent.com` serves a 131-byte **git-lfs pointer** for
+these paths, which downloads "successfully" and then fails every hash check.
+
+cv2's own `FaceDetectorYN` / `FaceRecognizerSF` drive them rather than the ONNX
+graphs directly, because both things that are easy to get wrong here are silent
+when wrong: YuNet's per-stride decode needs priors + NMS, and SFace embeddings
+are only comparable after `alignCrop` warps the face to a canonical 112x112 by
+similarity transform from the landmarks. Alignment is applied **exactly once** —
+re-aligning an already-aligned crop measurably moves the embedding (cos 0.85 in
+`facepass_smoke`), so it is a real bug rather than a no-op.
+
+`EMBEDDING_MODEL_KEY` identifies the embedding space and is written to every
+sample. **Bump it whenever the embedding model changes**: that is the only thing
+stopping vectors from two models being compared, which yields meaningless
+numbers in an entirely plausible range. Bumping makes existing samples report as
+stale via `/api/recognition/status`, which is the correct visible outcome.
+
+The per-frame cost model is the design (`facepass.py`): face detection runs on
+the **person crop** rather than the frame (D-FINE already said where the people
+are, and a face found in foliage is not inside a person box); the pass is
+**throttled per track**; and the 128-d embedding is computed **once per track**,
+not per shot — alignment is cheap and needed every pass, embedding is not. The
+answer is written at **track end**, re-identified from the best shot of the whole
+visit, because which shot is best is not knowable until the visit is over.
+
+Unmatched faces are deduplicated by cosine before being stored, so one stranger
+seen twelve times is one row to review. `cameras.face_zones` gates the pass
+entirely — a person outside the ROI gets no face work at all.
+
 ## Event & notification pipeline (backend, in-process)
 
 1. The native engine calls `EventsPipeline.handle_event()` with Frigate-shaped payloads

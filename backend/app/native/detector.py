@@ -89,8 +89,6 @@ MODELS: dict[str, dict[str, Any]] = {
         "sha256": "0f684f409618ee8a822410e754a29caa817d1aa16283ce89cad936d0a48e2f35",
         "labelmap": "coco",
     },
-    # Face recognition models (OpenCV Zoo, permissive licences). NOT detectors —
-    # deliberately absent from TIER_ORDER so the model picker never lists them.
     "dfine_s": {
         "url": (
             "https://huggingface.co/onnx-community/dfine_s_coco-ONNX/resolve/"
@@ -173,6 +171,7 @@ async def ensure_model(
     key: str,
     client: Optional["httpx.AsyncClient"] = None,
     progress: Optional["ProgressFn"] = None,
+    pin: Optional[dict[str, Any]] = None,
 ) -> Path:
     """Ensure the pinned artifact for ``key`` is on disk and hash-verified.
 
@@ -186,8 +185,16 @@ async def ensure_model(
     total_bytes)`` while streaming a fresh download — the ModelStore uses it
     to drive its per-key progress + state machine. It is NOT called for an
     already-present, still-valid file.
+
+    ``pin`` (optional) supplies the {url, bytes, sha256} record instead of
+    looking ``key`` up in ``MODELS``. That exists so the RECOGNITION models
+    (native/recognizer.py) can reuse this one download-and-verify path without
+    being listed as detectors: they are not tiers, must never appear in the
+    model picker, and adding them to ``MODELS`` would let a
+    /api/detection/models/{key}/download call reach a key the ModelStore keeps
+    no state for.
     """
-    pin = MODELS[key]
+    pin = pin if pin is not None else MODELS[key]
     path = model_path(models_dir, key)
     if path.is_file():
         digest = await asyncio.to_thread(sha256_file, path)
@@ -203,7 +210,7 @@ async def ensure_model(
 
     models_dir.mkdir(parents=True, exist_ok=True)
     part = path.with_suffix(".onnx.part")
-    log.info("downloading detector model %s (%d bytes) from %s", key, pin["bytes"], pin["url"])
+    log.info("downloading model %s (%d bytes) from %s", key, pin["bytes"], pin["url"])
     own_client = client is None
     if own_client:
         client = httpx.AsyncClient(timeout=httpx.Timeout(_DOWNLOAD_TIMEOUT_S), follow_redirects=True)

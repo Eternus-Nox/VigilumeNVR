@@ -383,6 +383,11 @@ class _CameraState:
     suppress_radius: float = 0.0
     # Running count of detections dropped by reject-suppression (debug/status).
     suppress_dropped: int = 0
+    # Detect-space FACE regions of interest (native.zones.polygon_zones).
+    # Unlike include_zones these do NOT filter detection — they only mark where
+    # a face is legible enough to be worth a recognition pass. Empty => the
+    # whole frame, which is correct and merely slower.
+    face_zones: list[tuple[str, Any]] = field(default_factory=list)
     # tracker_id -> (hit count, last seen epoch)
     hits: dict[int, tuple[int, float]] = field(default_factory=dict)
     latest_frame: Optional[np.ndarray] = None
@@ -426,6 +431,10 @@ class DetectionEngine:
         # wired by main.py. Notified per frame that carries a confirmed person
         # so it can arm/hold a night spotlight on smart_spotlight cameras.
         self._spotlight: Optional[Any] = None
+        # Face recognition (native.facepass.FacePass). None until enabled —
+        # a box that never turns recognition on pays nothing for it, and every
+        # call site below is guarded rather than assuming it exists.
+        self._face: Optional[Any] = None
         self.running = False
 
     def set_spotlight(self, spotlight: Optional[Any]) -> None:
@@ -440,6 +449,24 @@ class DetectionEngine:
         self._ai_events = ai_events
         if self._ingest is not None:
             self._ingest.set_ai_events(ai_events)
+
+    def set_face_pass(self, face: Optional[Any]) -> None:
+        """Inject the face pass. Safe before or after start()."""
+        self._face = face
+
+    @property
+    def recognition_model_key(self) -> str:
+        """Embedding space currently loaded, or "" — read by /api/recognition."""
+        return self._face.model_key if self._face is not None else ""
+
+    async def reload_gallery(self) -> None:
+        """Rebuild the recognition gallery after a profile/sample change.
+
+        Best-effort: recognition being off is the normal state on a box that
+        never enabled it, and a profile edit must still succeed there.
+        """
+        if self._face is not None:
+            await self._face.reload_gallery()
 
     def set_pipeline(self, pipeline: "EventsPipeline") -> None:
         """Late-bound: the pipeline needs the media provider, which needs
@@ -513,6 +540,7 @@ class DetectionEngine:
             geometry_key = (
                 repr(row.get("include_zones") or []),
                 repr(row.get("cross_lines") or []),
+                repr(row.get("face_zones") or []),
                 row.get("detect_width"),
                 row.get("detect_height"),
             )
@@ -520,6 +548,7 @@ class DetectionEngine:
                 state.geometry_key = geometry_key
                 state.include_zones = zonelib.include_detect_zones(row)
                 state.cross_lines = zonelib.cross_detect_lines(row)
+                state.face_zones = zonelib.polygon_zones(row, "face_zones", "face")
                 if state.include_zones:
                     log.info(
                         "camera %s: %d include zone(s) active — detections outside "
@@ -687,6 +716,14 @@ class DetectionEngine:
             # is forgotten here, so theirs is too — otherwise a camera watching
             # a road accumulates a dict entry per passing car, forever.
             zonelib.forget_tracks(cam.cross_lines, cam.hits.keys())
+        if forgotten and self._face is not None:
+            # A retired track is a finished VISIT, and its best shot is only
+            # knowable now — so this is where the face pass identifies from the
+            # best frame of the whole visit and writes the answer. Awaited
+            # rather than fired-and-forgotten so the write cannot race the next
+            # frame's pass over a reused tracker id.
+            for tid in forgotten:
+                await self._face.finish(camera, tid)
         confirmed = [o for o in obs if cam.hits[o.tracker_id][0] >= MIN_HITS]
 
         # --- traces + line crossings (confirmed objects only) ---
@@ -722,6 +759,19 @@ class DetectionEngine:
                 self._spotlight.notify_person(cam.row)
             except Exception:  # noqa: BLE001
                 log.exception("smart-spotlight notify failed for %s", camera)
+
+        # --- face recognition pass ---
+        # Fed from `confirmed` for the same reason the traces are: a face found
+        # on unconfirmed flicker belongs to nobody. FacePass throttles itself
+        # per track and swallows its own errors — recognition is an enhancement
+        # on top of detection and recording, and must never cost a frame.
+        if self._face is not None and "person" in by_label:
+            open_fid = ""
+            st_person = self._events.get((camera, "person"))
+            if st_person is not None:
+                open_fid = st_person.fid
+            await self._face.observe(cam, by_label["person"], frame_bgr,
+                                     frame_time, open_fid)
 
         # The full confirmed set is the "scene" saved with whichever frame each
         # label's event adopts as its best — every counted object, all labels.

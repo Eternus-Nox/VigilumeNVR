@@ -294,6 +294,18 @@ DEFAULT_CAMERA_TIMEZONE = (
 # audio classifier (roadmap item); settings_store silently strips persisted
 # copies from old /data volumes.
 DEFAULT_SETTINGS: dict = {
+    # Face / plate recognition. OFF by default, deliberately: it downloads two
+    # more models, it keeps biometric imagery, and in some jurisdictions running
+    # it at all is a decision the operator has to make knowingly. A camera
+    # system that quietly started recognizing faces on upgrade would be making
+    # that decision for them.
+    "recognition": {
+        "enabled": False,
+        # How long an unmatched face crop stays in the reviewable candidate
+        # store before it is purged. This is the biometric retention window;
+        # 0 disables the rolling store entirely (matches are still recorded).
+        "candidate_retention_days": 7,
+    },
     "notifications": {
         "enabled": True,
         "labels": ["person", "dog", "cat", "car"],

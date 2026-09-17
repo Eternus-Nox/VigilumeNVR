@@ -42,6 +42,8 @@ from .native.engine import DetectionEngine
 from .native.model_store import ModelStore
 from .native.media import NativeMediaProvider
 from .native.recorder import Recorder
+from .native.facepass import FacePass
+from .native.recognizer import FaceRecognizer
 from .native.spotlight import SpotlightController
 from .native import streams
 from .native.streams import Go2rtcManager
@@ -418,6 +420,14 @@ async def lifespan(app: FastAPI):
     # mirror time_sync/doorbells/ai_events.
     spotlight = SpotlightController(config, cameras_provider=db.list_cameras)
     engine.set_spotlight(spotlight)
+    # Face recognition. Constructed unconditionally (it loads nothing until
+    # asked) but only LOADED when settings.recognition.enabled — the two pinned
+    # models are ~37 MB and a box that never turns this on should never fetch
+    # them. A failed load degrades to ready:false; detection and recording are
+    # untouched either way.
+    face_recognizer = FaceRecognizer(config.models_dir)
+    face_pass = FacePass(face_recognizer, db, config.candidate_crops_dir)
+    engine.set_face_pass(face_pass)
     # Re-assert stored desired IR on doorbells (the AD410 resets IR Mode to Auto
     # whenever RTSP streaming (re)connects). The recorder fires on_connect once
     # per (re)connect cycle; a slow sweep backstops missed reconnects.
@@ -529,6 +539,11 @@ async def lifespan(app: FastAPI):
             # no-op tick when disabled, so it costs nothing on installs that
             # never turn it on.
             asyncio.create_task(archive_loop(archive_runner), name="cloud-archive"),
+            # Loads/releases the face models as settings.recognition.enabled
+            # changes, and purges the rolling candidate store past its
+            # retention window. Off by default, so on most boxes this loop
+            # does nothing but check a flag.
+            asyncio.create_task(face_pass.run(settings), name="recognition"),
         ]
         cams = await db.list_cameras()
         await doorbells.sync(cams)

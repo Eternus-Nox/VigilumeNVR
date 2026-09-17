@@ -490,7 +490,7 @@ def plate_checks() -> None:
         PlateRead("A8C123", confidence=0.9, quality=0.9),
     ]
     v = vote_plate(reads)
-    check(v is not None and v.text == "ABC123", f"per-character vote recovers the true plate")
+    check(v is not None and v.text == "ABC123", "per-character vote recovers the true plate")
     check(v.reads == 3, "all three reads were in the winning cohort")
     check(len(v.agreement) == 6, "agreement is reported per character")
     check(
