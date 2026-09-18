@@ -719,7 +719,7 @@ Settings:
   "mqtt": {
     "enabled": false, "host": "", "port": 1883,
     "username": "", "password": "",
-    "discovery_prefix": "homeassistant", "base_topic": "sentinel"
+    "discovery_prefix": "homeassistant", "base_topic": "vigilume"
   }
 }
 ```
@@ -779,6 +779,22 @@ Settings:
     restart). `discovery_prefix`/`base_topic` are validated as single topic segments
     (no `+`/`#`/spaces, slashes stripped). The stored password is returned by
     `GET /api/settings` (admin-only).
+
+    **`base_topic` is not cosmetic, and its default changed.** It is a component
+    of every published topic AND of every Home Assistant `unique_id` and device
+    identifier, so changing it does not rename entities in Home Assistant — it
+    creates a **second, parallel set**, orphans the originals as unavailable, and
+    breaks every automation naming the old entity IDs. The default was `sentinel`
+    before the product rename and is `vigilume` now.
+
+    An **existing install is not affected by that change**: `SettingsStore` merges
+    the stored document *over* `DEFAULT_SETTINGS` and never writes the defaults
+    back, so a box that had already saved its MQTT settings keeps the
+    `base_topic` it stored. Enabling the publisher at all requires saving
+    settings, so any box that was ever publishing has an explicit stored value.
+    The new default reaches **new installs only**. The case that does bite is
+    pointing an existing Home Assistant at a *fresh* Vigilume install: set
+    `base_topic` back to `sentinel` there, or accept a new set of entity IDs.
   - Legacy blocks persisted by older versions — `detection.audio_events`/
     `audio_labels` (the removed Frigate audio classifier), `notifications.apns.direct`
     (the retired own-Apple-key mode), and `time_sync.auto_ntp`/`ntp_server` (the

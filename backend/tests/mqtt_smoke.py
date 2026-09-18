@@ -235,6 +235,11 @@ class FakeAuth:
 
 
 def base_mqtt(**over):
+    # `base_topic` here is deliberately NOT the shipped default ("vigilume").
+    # Every topic and unique_id assertion below is built from this value, so a
+    # fixture that matched the default would still pass if the publisher ignored
+    # the setting and hardcoded the default instead. A distinct value is what
+    # proves the configured topic is the one actually used.
     cfg = {
         "enabled": True, "host": "192.168.1.10", "port": 1883,
         "username": "homeassistant", "password": "secret",
@@ -360,8 +365,18 @@ def settings_model_checks():
     from app.routers.settings import AppSettings, MqttSettings
 
     m = MqttSettings()
-    check(m.enabled is False and m.port == 1883 and m.base_topic == "sentinel"
+    # "vigilume", not "sentinel" — the product rename reached the code (both
+    # `MqttSettings` and `DEFAULT_SETTINGS`) and this assertion was left behind.
+    # It is worth pinning rather than dropping: base_topic is a component of
+    # every published topic AND of every Home Assistant unique_id, so a silent
+    # change to it re-creates an operator's entities under new IDs and breaks
+    # every automation naming the old ones.
+    check(m.enabled is False and m.port == 1883 and m.base_topic == "vigilume"
           and m.discovery_prefix == "homeassistant", "MqttSettings defaults match the contract")
+    from app.config import DEFAULT_SETTINGS
+    check(DEFAULT_SETTINGS["mqtt"]["base_topic"] == m.base_topic,
+          "DEFAULT_SETTINGS and MqttSettings agree on base_topic — they are "
+          "merged over each other, so a disagreement is a live bug")
 
     rt = MqttSettings(**base_mqtt(base_topic="  home/ ")).model_dump()
     check(rt["base_topic"] == "home", "base_topic trimmed/stripped on validation")

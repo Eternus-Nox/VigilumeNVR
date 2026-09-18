@@ -22,7 +22,7 @@ depend on a broker; if the broker is down Vigilume keeps running normally.
    | `username` | `homeassistant` | Broker user (blank = anonymous) |
    | `password` | `••••` | Broker password |
    | `discovery_prefix` | `homeassistant` | HA discovery prefix (match your MQTT integration) |
-   | `base_topic` | `sentinel` | Root topic for all Vigilume state/command topics |
+   | `base_topic` | `vigilume` | Root topic for all Vigilume state/command topics |
 
 3. Save. The publisher connects immediately (no app restart) and HA discovers the
    entities within a few seconds. **Changing any MQTT field restarts the publisher**
@@ -64,19 +64,32 @@ MQTT connection.
 
 ## Topics & availability
 
-All topics live under your `base_topic` (default `sentinel`):
+All topics live under your `base_topic` (default `vigilume`):
+
+> **Upgrading from a build that defaulted to `sentinel`?** Nothing to do. Your
+> stored setting wins over the default — the settings store merges what you saved
+> *over* the shipped defaults and never writes the defaults back — so a system
+> that was already publishing keeps the `base_topic` it has. `vigilume` is the
+> default for **new** installs only.
+>
+> Changing `base_topic` deliberately is a bigger step than it looks: it is part of
+> every topic *and* of every Home Assistant `unique_id`. Home Assistant will not
+> rename your entities — it will discover a whole second set under the new IDs and
+> leave the old ones behind as unavailable, breaking any automation that names
+> them. If you are pointing an existing Home Assistant at a fresh Vigilume install,
+> set `base_topic` back to `sentinel` to keep your existing entities.
 
 ```
-sentinel/status                       availability (retained; "online" on connect,
+vigilume/status                       availability (retained; "online" on connect,
                                       "offline" via Last-Will on disconnect/crash)
-sentinel/<cam>/<label>/state          per-label binary_sensor  (ON/OFF, retained)
-sentinel/<cam>/connectivity/state     camera reachability      (ON/OFF, retained)
-sentinel/<cam>/last_event/state       last event label         (retained)
-sentinel/<cam>/last_event/attributes  last event JSON attrs    (retained)
-sentinel/<cam>/image/url              annotated snapshot URL   (retained)
-sentinel/<cam>/{ir,spotlight}/state   two-way switch state echo (retained)
-sentinel/<cam>/{ir,spotlight}/set     two-way switch command   (subscribed)
-sentinel/<cam>/siren/set              two-way siren button      (subscribed)
+vigilume/<cam>/<label>/state          per-label binary_sensor  (ON/OFF, retained)
+vigilume/<cam>/connectivity/state     camera reachability      (ON/OFF, retained)
+vigilume/<cam>/last_event/state       last event label         (retained)
+vigilume/<cam>/last_event/attributes  last event JSON attrs    (retained)
+vigilume/<cam>/image/url              annotated snapshot URL   (retained)
+vigilume/<cam>/{ir,spotlight}/state   two-way switch state echo (retained)
+vigilume/<cam>/{ir,spotlight}/set     two-way switch command   (subscribed)
+vigilume/<cam>/siren/set              two-way siren button      (subscribed)
 ```
 
 Discovery config is published (retained) under
