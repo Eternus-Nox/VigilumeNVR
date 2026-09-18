@@ -1169,18 +1169,29 @@ good for rather than by what was easy:
 
 | surface | iOS | web |
 |---|---|---|
-| enable / alert mode / hold / retention | Settings › Faces & Plates | Settings › Recording › **Faces & plates** |
-| enroll people & vehicles, review unknown faces | yes | no |
+| enable / alert mode / hold / retention | Settings › Faces & Plates | Settings › **Recording** › Faces & plates |
+| enroll people & vehicles, review unknown faces | Settings › Faces & Plates | Settings › **Faces & plates** |
 | draw recognition ROIs over the heatmap | yes | no |
 | recognized name on an event | list + detail | card chip + detail |
 
-Enrollment and ROI drawing stay on iOS because both are *look at this image and
-judge it* tasks — picking the legible shot out of five near-identical crops, and
-dragging a polygon over a live frame — that a phone in front of the camera does
-better than a desk browser. Everything an operator needs to **see** and to
-**switch off**, however, is on both: a web-only admin must be able to tell that
-an event was recognized and must be able to turn the feature off without
-installing an app.
+Both clients are **admin-only for recognition, reads included**, and both gate
+the UI as well as the request: iOS never links a viewer to the screen, and the
+web settings shell keeps `faces` out of `VIEWER_TABS` so `/settings/faces`
+redirects. That is defence in depth, not the control — `require_admin` on the
+whole router is.
+
+The one split that remains is ROI drawing, which stays on iOS because it is a
+*look at this frame and judge it* task — dragging a polygon over a live view —
+that a phone in front of the camera does better than a desk browser. Enrollment
+was on that list too and is no longer: picking the legible shot out of several
+crops turns out to be **easier** on a large screen, and a web-only admin had no
+way to name anyone at all.
+
+The two clients deliberately differ in where the enable switch lives. On iOS it
+sits with the profiles because that is one screen; on web the profiles get their
+own tab, and the switch stays on **Recording** with the other detection
+settings, because the web settings shell owns one Save button across its
+settings tabs and the recognition tab does not participate in it (see below).
 
 Two traps the web side has to respect, and does:
 
@@ -1191,6 +1202,11 @@ Two traps the web side has to respect, and does:
   tab dirty by comparing its reported slice against the saved document, so
   reporting a default-filled block against a saved `undefined` compares as an
   edit forever and leaves the Save bar permanently lit.
+- `RecognitionTab` **must never call `onDraftChange`**. Every action on it is an
+  immediate call against `/api/recognition`, not a slice of the settings
+  document, so a reported draft would light the shell's Save bar over edits that
+  were already saved — and pressing Save would then PATCH a `recognition` block
+  the tab does not own. It is excluded from `isSettingsTab` for the same reason.
 
 Known/unknown is carried by **icon and wording** as well as colour on both
 clients. "Unknown person at the door" is precisely the row that must not depend

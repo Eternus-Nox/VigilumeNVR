@@ -18,6 +18,7 @@ import ExcludedObjectsTab from './settings/ExcludedObjectsTab';
 import GroupsTab from './settings/GroupsTab';
 import IntegrationsTab from './settings/IntegrationsTab';
 import NotificationsTab from './settings/NotificationsTab';
+import RecognitionTab from './settings/RecognitionTab';
 import RecordingTab from './settings/RecordingTab';
 import SystemTab from './settings/SystemTab';
 import UsersTab from './settings/UsersTab';
@@ -31,6 +32,7 @@ const ADMIN_TABS = [
   { id: 'groups', label: 'Groups' },
   { id: 'integrations', label: 'Integrations' },
   { id: 'recording', label: 'Recording' },
+  { id: 'faces', label: 'Faces & plates' },
   { id: 'excluded', label: 'Excluded objects' },
   { id: 'users', label: 'Users' },
   { id: 'system', label: 'System' },
@@ -52,6 +54,7 @@ type TabId =
   | 'integrations'
   | 'system'
   | 'excluded'
+  | 'faces'
   | 'users';
 
 export default function Settings() {
@@ -182,6 +185,11 @@ export default function Settings() {
     if (activeTab === 'cameras') return <CamerasTab />;
     if (activeTab === 'users') return <UsersTab />;
     if (activeTab === 'excluded') return <ExcludedObjectsTab />;
+    // Faces & plates talks to /api/recognition directly rather than to the
+    // settings document, so it takes no `shared` props and must NEVER report
+    // a draft — its edits are already saved, and reporting one would light
+    // the shell's Save bar over nothing.
+    if (activeTab === 'faces') return <RecognitionTab />;
 
     // Remaining admin tabs need the settings document.
     if (loadError) {

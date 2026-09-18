@@ -3217,3 +3217,177 @@ label > select {
   flex-wrap: wrap;
   gap: 0.5rem;
 }
+
+/* ── Faces & plates (Settings → Faces & plates) ──────────────────────────────
+   The crops are the content here: a face at 96px is the smallest size at which
+   a person can actually tell two strangers apart, which is the judgement this
+   screen exists to support. */
+.recog-profile-list {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.recog-profile-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border, rgba(148, 163, 184, 0.25));
+  border-radius: 10px;
+  background: rgba(148, 163, 184, 0.04);
+}
+
+.recog-profile-open {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.1rem;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+  min-width: 0;
+}
+
+.recog-profile-name {
+  font-weight: 600;
+}
+
+.recog-profile-actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* Spans both grid columns so the samples get the row's full width. */
+.recog-profile-detail {
+  grid-column: 1 / -1;
+  padding-top: 0.6rem;
+  margin-top: 0.4rem;
+  border-top: 1px solid var(--border, rgba(148, 163, 184, 0.25));
+}
+
+.recog-candidate-grid,
+.recog-sample-grid {
+  list-style: none;
+  margin: 0.6rem 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 0.5rem;
+}
+
+.recog-candidate {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  padding: 0;
+  cursor: pointer;
+  background: var(--surface-alt, rgba(148, 163, 184, 0.08));
+  /* Transparent rather than none, so selecting does not shift the layout. */
+  border: 2px solid transparent;
+  border-radius: 10px;
+  overflow: hidden;
+  color: inherit;
+}
+
+.recog-candidate:hover {
+  border-color: rgba(148, 163, 184, 0.5);
+}
+
+.recog-candidate.is-selected {
+  border-color: var(--accent, #38bdf8);
+}
+
+.recog-candidate img,
+.recog-sample img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  display: block;
+}
+
+.recog-candidate-noimg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 1;
+  font-size: 0.7rem;
+  color: var(--text-secondary, #94a3b8);
+  padding: 0.25rem;
+  text-align: center;
+  word-break: break-all;
+}
+
+.recog-candidate-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.05rem;
+  padding: 0.3rem 0.4rem;
+  font-size: 0.65rem;
+  line-height: 1.3;
+  color: var(--text-secondary, #94a3b8);
+  overflow: hidden;
+}
+
+.recog-candidate-meta > * {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recog-sample {
+  position: relative;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface-alt, rgba(148, 163, 184, 0.08));
+}
+
+.recog-sample-remove {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 0;
+  cursor: pointer;
+  background: rgba(4, 10, 18, 0.75);
+  color: #fff;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.recog-sample-remove:hover:not(:disabled) {
+  background: var(--danger, #ef4444);
+}
+
+.inline-form {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.inline-form input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* A button that reads as a link, for an inline action inside a hint. */
+.linklike {
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  color: var(--accent, #38bdf8);
+  font: inherit;
+  text-decoration: underline;
+}

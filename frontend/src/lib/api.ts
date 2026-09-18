@@ -546,6 +546,82 @@ export function recognitionLabel(r: EventRecognition): string {
   return r.kind === 'face' ? 'Unknown face' : 'Unread plate';
 }
 
+/** A profile names a PERSON or a VEHICLE. The API says "person"/"vehicle". */
+export type ProfileKind = 'person' | 'vehicle';
+/** A candidate crop is a FACE or a PLATE — the sighting, not the identity. */
+export type CandidateKind = 'face' | 'plate';
+
+/**
+ * An enrolled identity. There is NO TRAINING STEP: a profile is a
+ * nearest-neighbour gallery entry, so enrolling appends a sample, un-enrolling
+ * deletes one, and the model on disk never changes. Accuracy scales with sample
+ * DIVERSITY (angles, light, time of day) rather than with count.
+ */
+export interface RecognitionProfile {
+  id: number;
+  kind: ProfileKind;
+  name: string;
+  notes: string;
+  enabled: boolean;
+  /** Per-profile match threshold; null inherits the server default for the kind. */
+  threshold: number | null;
+  sample_count: number;
+  /**
+   * Samples the ACTIVE embedding model can still compare. When this is 0 while
+   * `sample_count` is not, every sample came from a different model and this
+   * profile has SILENTLY STOPPED MATCHING — the one condition worth shouting
+   * about, since nothing else about it looks wrong.
+   */
+  usable_sample_count: number;
+  created_at: number;
+  updated_at: number;
+}
+
+/** One enrolled reference: a face embedding, or a vehicle's plate string. */
+export interface RecognitionSample {
+  id: number;
+  profile_id: number;
+  plate: string;
+  /** Which model produced the embedding. Embeddings only compare within one. */
+  model_key: string;
+  quality: number;
+  source_fid: string;
+  created_at: number;
+  has_image: boolean;
+  image_url: string | null;
+}
+
+export interface RecognitionProfileDetail extends RecognitionProfile {
+  samples: RecognitionSample[];
+}
+
+/** A sighting that matched nobody, kept on a rolling window to enroll from. */
+export interface RecognitionCandidate {
+  id: number;
+  kind: CandidateKind;
+  camera: string;
+  /** The event this crop came from, when it came from one. */
+  event_fid: string;
+  plate: string;
+  quality: number;
+  /** Best similarity against the gallery at capture time, and to whom. */
+  best_score: number;
+  best_profile_id: number | null;
+  created_at: number;
+  has_image: boolean;
+  image_url: string | null;
+}
+
+export interface RecognitionStatus {
+  model_key: string;
+  ready: boolean;
+  profiles: Record<string, number>;
+  candidates: Record<string, number>;
+  /** >0 means some profiles need re-enrolling after a model change. */
+  stale_samples: number;
+  defaults: { face_threshold: number; min_margin: number };
+}
+
 export interface NvrEvent {
   id: number | string;
   camera: string;
@@ -1760,6 +1836,83 @@ export const api = {
    */
   patchSettings: (patch: SettingsPatch) =>
     request<AppSettings>('/api/settings', { method: 'PATCH', body: JSON.stringify(patch) }),
+
+  // Recognition (faces & plates)
+  //
+  // ADMIN-ONLY INCLUDING THE READS — the one router that departs from "a viewer
+  // may read, an admin may write". What is gated is the content, not the
+  // configuration: the profile list is a named register of who visits this
+  // address, and the candidate list is a rolling gallery of strangers' faces.
+  // The UI never links here for a viewer, so the 403 never has to be explained.
+  recognitionStatus: () => request<RecognitionStatus>('/api/recognition/status'),
+  recognitionProfiles: (kind?: ProfileKind) =>
+    request<RecognitionProfile[]>(
+      `/api/recognition/profiles${kind ? `?kind=${kind}` : ''}`,
+    ),
+  recognitionProfile: (id: number) =>
+    request<RecognitionProfileDetail>(`/api/recognition/profiles/${id}`),
+  createRecognitionProfile: (body: {
+    kind: ProfileKind;
+    name: string;
+    notes?: string;
+    enabled?: boolean;
+  }) =>
+    request<RecognitionProfile>('/api/recognition/profiles', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /**
+   * Partial update. An OMITTED `threshold` means "leave it alone"; an explicit
+   * `null` clears the per-profile override back to the server default. Those
+   * are different requests, so callers that want to reset must send null
+   * rather than dropping the key.
+   */
+  updateRecognitionProfile: (
+    id: number,
+    body: { name?: string; notes?: string; enabled?: boolean; threshold?: number | null },
+  ) =>
+    request<RecognitionProfile>(`/api/recognition/profiles/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  deleteRecognitionProfile: (id: number) =>
+    request<void>(`/api/recognition/profiles/${id}`, { method: 'DELETE' }),
+  /** Vehicles only — enroll by typing the plate, no sighting needed. */
+  addRecognitionPlate: (id: number, plate: string) =>
+    request<RecognitionSample>(`/api/recognition/profiles/${id}/plate`, {
+      method: 'POST',
+      body: JSON.stringify({ plate }),
+    }),
+  /**
+   * Enroll candidates into a profile. ATOMIC across the batch and kind-checked
+   * server-side, and it MOVES each crop out of the rolling candidate store into
+   * durable storage — so an enrolled reference is not swept up by the retention
+   * purge. One request for the whole selection, never one per shot.
+   */
+  enrollRecognitionCandidates: (id: number, candidateIds: number[]) =>
+    request<{ enrolled: number; sample_ids: number[] }>(
+      `/api/recognition/profiles/${id}/enroll`,
+      { method: 'POST', body: JSON.stringify({ candidate_ids: candidateIds }) },
+    ),
+  deleteRecognitionSample: (id: number) =>
+    request<void>(`/api/recognition/samples/${id}`, { method: 'DELETE' }),
+  /** Unmatched crops, BEST-QUALITY first — this list exists to be enrolled from. */
+  recognitionCandidates: (params: { kind?: CandidateKind; camera?: string; limit?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (params.kind) q.set('kind', params.kind);
+    if (params.camera) q.set('camera', params.camera);
+    if (params.limit) q.set('limit', String(params.limit));
+    const qs = q.toString();
+    return request<RecognitionCandidate[]>(
+      `/api/recognition/candidates${qs ? `?${qs}` : ''}`,
+    );
+  },
+  deleteRecognitionCandidate: (id: number) =>
+    request<void>(`/api/recognition/candidates/${id}`, { method: 'DELETE' }),
+  clearRecognitionCandidates: (kind?: CandidateKind) =>
+    request<void>(`/api/recognition/candidates${kind ? `?kind=${kind}` : ''}`, {
+      method: 'DELETE',
+    }),
 
   // Integrations
   /**
