@@ -1146,6 +1146,40 @@ places, which is why a position outside 0..1 is DROPPED rather than clamped.
 (back to whole frame). Unlike `include_zones`, an empty or degenerate recognition
 ROI is harmless — it means "search the whole frame", not "match nothing".
 
+#### Which client surfaces what
+
+The two clients are deliberately NOT at parity, and the split is by what each is
+good for rather than by what was easy:
+
+| surface | iOS | web |
+|---|---|---|
+| enable / alert mode / hold / retention | Settings › Faces & Plates | Settings › Recording › **Faces & plates** |
+| enroll people & vehicles, review unknown faces | yes | no |
+| draw recognition ROIs over the heatmap | yes | no |
+| recognized name on an event | list + detail | card chip + detail |
+
+Enrollment and ROI drawing stay on iOS because both are *look at this image and
+judge it* tasks — picking the legible shot out of five near-identical crops, and
+dragging a polygon over a live frame — that a phone in front of the camera does
+better than a desk browser. Everything an operator needs to **see** and to
+**switch off**, however, is on both: a web-only admin must be able to tell that
+an event was recognized and must be able to turn the feature off without
+installing an app.
+
+Two traps the web side has to respect, and does:
+
+- `recognitions` is **absent** on a backend predating the feature and `[]` on a
+  box that never enabled it. Both mean "nothing to say"; neither prints a header.
+- The settings card is gated on the saved `recognition` block EXISTING, and the
+  tab omits the slice from its draft when it does not. The settings shell marks a
+  tab dirty by comparing its reported slice against the saved document, so
+  reporting a default-filled block against a saved `undefined` compares as an
+  edit forever and leaves the Save bar permanently lit.
+
+Known/unknown is carried by **icon and wording** as well as colour on both
+clients. "Unknown person at the door" is precisely the row that must not depend
+on colour perception.
+
 ## Event & notification pipeline (backend, in-process)
 
 1. The native engine calls `EventsPipeline.handle_event()` with Frigate-shaped payloads
