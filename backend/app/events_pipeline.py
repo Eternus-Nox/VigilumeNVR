@@ -505,6 +505,7 @@ class EventsPipeline:
                 lines=after.get("lines") or [],
                 draw_zones=bool(notif.get("draw_zones", True)),
                 draw_traces=bool(notif.get("draw_traces", True)),
+                recognitions=list(state.get("recognitions") or []),
             )
         )
         data = annotated or jpeg  # never lose the frame over an annotation bug
@@ -570,6 +571,14 @@ class EventsPipeline:
             "plate": plate,
             "score": float(score),
         })
+        if state.get("snap_time") is not None and not state.get("enriching"):
+            # The snapshot was written before this recognition arrived, so it
+            # carries no name. Redraw it: the push notification's image is
+            # fetched by the phone when the alert is opened, which is after
+            # this, so the picture the user actually sees gains the caption.
+            last = state.get("last_after")
+            if last:
+                self._spawn(self._enrich_and_notify(fid, last))
         if not state.get("notified"):
             # The hold exists to wait for exactly this. Re-check now rather than
             # on the next frame's update, so a named alert is not delayed by a

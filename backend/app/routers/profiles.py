@@ -654,9 +654,31 @@ async def recognition_status(request: Request) -> dict[str, Any]:
             (active,),
         )
     ).fetchone()
+    engine = getattr(request.app.state, "engine", None)
+    face = getattr(engine, "_face", None) if engine is not None else None
+    plates = getattr(engine, "_plates", None) if engine is not None else None
     return {
         "model_key": active,
         "ready": bool(active),
+        # WHERE recognition runs, so "is my GPU being used?" is answerable from
+        # the app instead of by reading source.
+        #
+        # It is CPU by design, and measured rather than assumed: a YuNet pass on
+        # a person crop is ~4-9 ms and runs at most once per 0.6 s per tracked
+        # person, so eight cameras each holding a person continuously cost about
+        # an eighth of one core. Moving that to the GPU would take VRAM and
+        # scheduling slots from D-FINE — the model that genuinely needs the card
+        # — to save single-digit milliseconds. The plate OCR is a 128x64 input
+        # where transfer overhead would likely exceed the 2.9 ms it takes on CPU.
+        "devices": {
+            "face_detect": "cpu",
+            "face_embed": "cpu",
+            "plate_localize": "cpu",
+            "plate_ocr": "cpu",
+            "note": "Recognition runs on CPU by design; the GPU stays with object detection.",
+        },
+        "face": face.status() if hasattr(face, "status") else None,
+        "plates": plates.status() if hasattr(plates, "status") else None,
         "profiles": {r["kind"]: r["n"] for r in counts},
         "candidates": {r["kind"]: r["n"] for r in cand},
         # Samples that can no longer be compared because the embedding model

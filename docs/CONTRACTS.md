@@ -975,6 +975,36 @@ Unmatched faces are deduplicated by cosine before being stored, so one stranger
 seen twelve times is one row to review. `cameras.face_zones` gates the pass
 entirely — a person outside the ROI gets no face work at all.
 
+#### Where recognition runs (it is CPU, by design)
+
+Object detection (D-FINE) uses the NVIDIA card via onnxruntime's CUDA provider,
+unchanged. **Recognition does not, deliberately** — and `GET
+/api/recognition/status` reports this under `devices` so the question is
+answerable from the app rather than from source.
+
+Measured on this codebase rather than assumed:
+
+| stage | where | cost |
+|---|---|---|
+| YuNet face detect | CPU (OpenCV DNN) | ~4 ms on a person crop, ~9 ms on 512x512 |
+| `alignCrop` | CPU (pure geometry) | <0.1 ms |
+| SFace embed 112x112 | CPU (OpenCV DNN) | ~9 ms, **once per track** |
+| plate localize | CPU (classical CV) | ~1.6 ms |
+| plate OCR 128x64 | CPU (onnxruntime) | ~2.9 ms |
+
+A face pass is throttled to once per 0.6 s per tracked person, so one person
+continuously in frame costs **~1.5% of one core**; eight cameras each holding a
+person costs **~12% of one core**. Moving that to the GPU would take VRAM and
+scheduling slots from D-FINE — the model that actually needs the card — to save
+single-digit milliseconds, and for a 128x64 OCR input the host/device transfer
+would likely exceed the inference itself.
+
+Two further constraints make this the only honest option today: the pip OpenCV
+wheel is **not built with CUDA** (`cv2.cuda.getCudaEnabledDeviceCount() == 0`),
+so YuNet and SFace cannot reach the card without a custom OpenCV build; and
+`alignCrop`, which the embeddings depend on, is geometry rather than a DNN and
+gains nothing from one.
+
 #### Recognition on events and alerts
 
 `GET /api/events` and `GET /api/events/{id}` carry `recognitions[]`:

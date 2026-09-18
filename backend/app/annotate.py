@@ -81,6 +81,43 @@ def _scene_banner(scene: Sequence[Any]) -> str:
     return ", ".join(plural_label(label, count) for label, count in ordered)
 
 
+def recognition_banner(recognitions: Optional[Sequence[Any]]) -> str:
+    """'Adam' / 'Adam, 7ABC123' / 'Unknown face' — what recognition read.
+
+    This leads the banner rather than trailing it, because the banner is what
+    lands on a phone's lock screen next to the push: a name is the most useful
+    thing the picture can be captioned with, and the tail is what gets cropped.
+
+    A face that matched NOBODY is captioned explicitly rather than omitted. An
+    uncaptioned snapshot is ambiguous between "nobody was identified" and
+    "recognition never ran", and those mean very different things to whoever is
+    looking at it.
+    """
+    if not recognitions:
+        return ""
+    names: list[str] = []
+    plates: list[str] = []
+    unknown_face = False
+    for r in recognitions:
+        if not isinstance(r, dict):
+            continue
+        name = str(r.get("name") or "").strip()
+        plate = str(r.get("plate") or "").strip()
+        known = r.get("profile_id") is not None
+        if known and name:
+            if name not in names:
+                names.append(name)
+        elif plate:
+            if plate not in plates:
+                plates.append(plate)
+        elif str(r.get("kind")) == "face":
+            unknown_face = True
+    parts = names + plates
+    if not parts and unknown_face:
+        return "Unknown face"
+    return ", ".join(parts)
+
+
 def _draw_banner(image: np.ndarray, text: str) -> np.ndarray:
     """Render a dark banner strip above the frame with the count text."""
     h, w = image.shape[:2]
@@ -285,6 +322,7 @@ def annotate_event_snapshot(
     lines: Optional[Sequence[dict[str, Any]]] = None,
     draw_zones: bool = False,
     draw_traces: bool = False,
+    recognitions: Optional[Sequence[dict[str, Any]]] = None,
 ) -> Optional[bytes]:
     """Draw a box + '{label} {score}%' for EVERY detected/counted object plus a
     count banner. Returns annotated JPEG bytes, or None if the input can't be
@@ -380,6 +418,12 @@ def annotate_event_snapshot(
     banner = _scene_banner(scene) if scene else ""
     if not banner:  # empty/absent scene -> legacy single-label banner
         banner = plural_label(label, max(count, 1))
+    # Recognition LEADS the banner. This image is what a push notification puts
+    # on a lock screen, where the tail is what gets cropped — so "Adam · 1
+    # person" survives the crop and "1 person · Adam" does not.
+    who = recognition_banner(recognitions)
+    if who:
+        banner = f"{who} · {banner}" if banner else who
     image = _draw_banner(image, banner)
     ok, buf = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     if not ok:

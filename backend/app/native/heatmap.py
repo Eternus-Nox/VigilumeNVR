@@ -54,7 +54,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import defaultdict
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 
 log = logging.getLogger(__name__)
 
