@@ -400,10 +400,38 @@ class TimeSyncSettings(BaseModel):
         return v
 
 
+class RecognitionSettings(BaseModel):
+    """Face / plate recognition (native/facepass.py, native/platepass.py).
+
+    MUST be on AppSettings below. Anything absent from that model is silently
+    DROPPED by validation, and since PATCH validates the merged document and
+    stores the result, a missing block here would not merely make recognition
+    unreachable — every unrelated settings save would wipe it back to defaults.
+    """
+
+    # Off by default: it downloads two more models, retains biometric imagery,
+    # and in some jurisdictions running it at all is a decision the operator
+    # has to make knowingly.
+    enabled: bool = False
+    # The biometric retention window for unmatched crops, in days. 0 means keep
+    # NOTHING (the passes read it literally), so it is a real "off", not
+    # "forever".
+    candidate_retention_days: int = Field(default=7, ge=0, le=365)
+    # How long a person/vehicle alert is held while recognition decides who it
+    # is. Capped well below the notification cooldown: a hold longer than that
+    # would let one event's deferral swallow the next event's alert.
+    notify_grace_seconds: float = Field(default=4.0, ge=0.0, le=30.0)
+    # "all" names a known subject in the alert; "unknown_only" stays silent for
+    # enrolled people and vehicles. A Literal, so a typo is a 422 rather than a
+    # value that silently behaves as "all" and floods the phone.
+    notify_mode: Literal["all", "unknown_only"] = "all"
+
+
 class AppSettings(BaseModel):
     notifications: NotificationSettings = Field(default_factory=NotificationSettings)
     recording: RecordingSettings = Field(default_factory=RecordingSettings)
     detection: DetectionSettings = Field(default_factory=DetectionSettings)
+    recognition: RecognitionSettings = Field(default_factory=RecognitionSettings)
     system: SystemSettings = Field(default_factory=SystemSettings)
     mqtt: MqttSettings = Field(default_factory=MqttSettings)
     time_sync: TimeSyncSettings = Field(default_factory=TimeSyncSettings)

@@ -1020,6 +1020,12 @@ name beside one event whose snapshot already shows that person's face to the
 same viewer. Withholding the label while serving the photograph would protect
 nothing.
 
+`settings.recognition` is a first-class block on `AppSettings` — it **must**
+stay there. `AppSettings` drops anything it does not model, and PATCH validates
+the merged document and stores the result, so a missing model would not merely
+make recognition unreachable: every unrelated settings save would silently wipe
+it back to defaults. `profiles_smoke` pins both halves.
+
 **The notification gate** (`EventsPipeline._recognition_gate`). Recognition
 finishes a few frames after an object is confirmed — after the event has already
 opened — so an alert sent immediately can never name anyone. Two settings:

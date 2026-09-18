@@ -465,6 +465,49 @@ def event_recognition_checks(client: TestClient, h: dict) -> None:
               "...while the profile register itself stays 403 for them")
 
 
+def settings_checks(client: TestClient, h: dict) -> None:
+    """The recognition block must SURVIVE the settings round trip.
+
+    AppSettings drops anything it does not model, and PATCH validates the merged
+    document and stores the result — so a missing `recognition` model did not
+    merely make the feature unreachable, it meant every unrelated settings save
+    silently wiped recognition back to defaults. Both halves are pinned here.
+    """
+    print("\nrecognition settings round-trip")
+    r = client.get("/api/settings", headers=h)
+    check(r.status_code == 200 and "recognition" in r.json(),
+          "the settings document exposes a recognition block")
+    check(r.json()["recognition"]["enabled"] is False,
+          "...off by default (it downloads models and retains biometric imagery)")
+
+    r = client.patch("/api/settings", headers=h, json={
+        "recognition": {"enabled": True, "notify_mode": "unknown_only",
+                        "notify_grace_seconds": 6}})
+    check(r.status_code == 200, f"recognition can be enabled (got {r.status_code})")
+    rec = r.json()["recognition"]
+    check(rec["enabled"] is True and rec["notify_mode"] == "unknown_only",
+          "...and the values persist")
+    check(rec["notify_grace_seconds"] == 6, "...including the hold")
+    check(rec["candidate_retention_days"] == 7,
+          "a field the patch omitted keeps its stored value")
+
+    # THE REGRESSION THAT MATTERS: an unrelated save must not wipe it.
+    r = client.patch("/api/settings", headers=h, json={"recording": {"event_days": 21}})
+    check(r.status_code == 200, "an unrelated settings save succeeds")
+    rec = r.json()["recognition"]
+    check(rec["enabled"] is True and rec["notify_mode"] == "unknown_only",
+          "...and recognition SURVIVES it — the bug this test exists for")
+
+    r = client.patch("/api/settings", headers=h,
+                     json={"recognition": {"notify_mode": "nonsense"}})
+    check(r.status_code == 422, "an unknown notify_mode is a 422, not a silent 'all'")
+    r = client.patch("/api/settings", headers=h,
+                     json={"recognition": {"candidate_retention_days": -1}})
+    check(r.status_code == 422, "a negative retention is refused")
+
+    client.patch("/api/settings", headers=h, json={"recognition": {"enabled": False}})
+
+
 def status_checks(client: TestClient, h: dict) -> None:
     print("\nstatus")
     r = client.get("/api/recognition/status", headers=h)
@@ -486,6 +529,7 @@ def main() -> int:
         traversal_checks(client, h)
         roi_zone_checks(client, h)
         event_recognition_checks(client, h)
+        settings_checks(client, h)
         status_checks(client, h)
     print(f"\nALL {PASS} CHECKS PASSED (recognition profiles API)")
     return 0

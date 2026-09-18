@@ -1163,8 +1163,39 @@ struct SettingsDocument: Decodable, Sendable {
         init() { autoSync = true; timezone = "" }
     }
 
+    /// Face / plate recognition. Absent on a backend predating it -> defaults
+    /// (off), so the screen renders and simply offers to turn it on.
+    struct Recognition: Decodable, Sendable {
+        var enabled: Bool
+        var candidateRetentionDays: Int
+        var notifyGraceSeconds: Double
+        /// "all" | "unknown_only".
+        var notifyMode: String
+
+        private enum CodingKeys: String, CodingKey {
+            case enabled, candidateRetentionDays, notifyGraceSeconds, notifyMode
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            // Per-field fallbacks match config.py DEFAULT_SETTINGS, so a backend
+            // that omits a key decodes to what it is actually enforcing.
+            enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+            candidateRetentionDays =
+                try c.decodeIfPresent(Int.self, forKey: .candidateRetentionDays) ?? 7
+            notifyGraceSeconds =
+                try c.decodeIfPresent(Double.self, forKey: .notifyGraceSeconds) ?? 4
+            notifyMode = try c.decodeIfPresent(String.self, forKey: .notifyMode) ?? "all"
+        }
+        init() {
+            enabled = false; candidateRetentionDays = 7
+            notifyGraceSeconds = 4; notifyMode = "all"
+        }
+    }
+
     var recording: Recording
     var detection: Detection
+    var recognition: Recognition
     var system: System
     /// Absent on an older backend -> defaults, so the screen still renders.
     var notifications: Notifications
@@ -1174,13 +1205,15 @@ struct SettingsDocument: Decodable, Sendable {
     var archive: Archive
 
     private enum CodingKeys: String, CodingKey {
-        case recording, detection, system, notifications, mqtt, timeSync, archive
+        case recording, detection, recognition, system, notifications, mqtt, timeSync, archive
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         recording = try c.decode(Recording.self, forKey: .recording)
         detection = try c.decode(Detection.self, forKey: .detection)
+        recognition = try c.decodeIfPresent(Recognition.self, forKey: .recognition)
+            ?? Recognition()
         system = try c.decode(System.self, forKey: .system)
         notifications = try c.decodeIfPresent(Notifications.self, forKey: .notifications)
             ?? Notifications()
@@ -1330,8 +1363,19 @@ struct SettingsPatch: Encodable, Sendable {
         var timezone: String?
     }
 
+    /// Recognition. Every field optional for the same reason the subtrees are:
+    /// the synthesized encoder omits a nil, so a screen editing only the toggle
+    /// cannot reset the retention window or the alert mode.
+    struct Recognition: Encodable, Sendable {
+        var enabled: Bool?
+        var candidateRetentionDays: Int?
+        var notifyGraceSeconds: Double?
+        var notifyMode: String?
+    }
+
     var recording: Recording?
     var detection: Detection?
+    var recognition: Recognition?
     var system: System?
     var notifications: Notifications?
     var mqtt: Mqtt?

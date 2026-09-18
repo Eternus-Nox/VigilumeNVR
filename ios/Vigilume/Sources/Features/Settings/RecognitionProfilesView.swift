@@ -16,6 +16,8 @@ struct RecognitionProfilesView: View {
 
     @State private var profiles: [RecognitionProfile] = []
     @State private var status: RecognitionStatus?
+    @State private var settings: SettingsDocument.Recognition?
+    @State private var savingSettings = false
     @State private var kind = "person"
     @State private var loading = true
     @State private var newName = ""
@@ -61,18 +63,52 @@ struct RecognitionProfilesView: View {
                 .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
             }
 
-            if let status, !status.ready {
+            if let settings {
+                Section {
+                    Toggle("Recognize faces & plates", isOn: Binding(
+                        get: { settings.enabled },
+                        set: { Task { await setEnabled($0) } }
+                    ))
+                    .tint(Theme.accent)
+                    .disabled(savingSettings)
+                    .listRowBackground(Theme.surface)
+
+                    if settings.enabled {
+                        Picker("Alert me about", selection: Binding(
+                            get: { settings.notifyMode },
+                            set: { Task { await setNotifyMode($0) } }
+                        )) {
+                            Text("Everyone").tag("all")
+                            Text("Only unrecognized").tag("unknown_only")
+                        }
+                        .disabled(savingSettings)
+                        .listRowBackground(Theme.surface)
+                    }
+                } header: {
+                    Text("Recognition")
+                } footer: {
+                    if settings.enabled {
+                        Text(settings.notifyMode == "unknown_only"
+                             ? "Enrolled people and vehicles arrive silently; anyone else still alerts — including someone nobody could identify. Alerts are held about \(Int(settings.notifyGraceSeconds))s while recognition decides."
+                             : "Alerts name a recognized person or vehicle. Held about \(Int(settings.notifyGraceSeconds))s while recognition decides, then sent either way.")
+                    } else {
+                        Text("Off. Turning this on downloads two extra models (~41 MB) and keeps face images on the server for \(settings.candidateRetentionDays) days so you can enroll people afterwards. Profiles can be set up either way — they start matching once this is on.")
+                    }
+                }
+            }
+
+            if let status, let settings, settings.enabled, !status.ready {
                 Section {
                     Label {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Recognition is not running")
+                            Text("Models still loading")
                                 .foregroundStyle(Theme.textPrimary)
-                            Text("Profiles can still be set up — they start matching once the recognition model is loaded on the server.")
+                            Text("The server is fetching the recognition models. This takes a moment on first use, and recognition starts by itself once they are ready.")
                                 .font(.caption)
                                 .foregroundStyle(Theme.textSecondary)
                         }
                     } icon: {
-                        Image(systemName: "exclamationmark.triangle.fill")
+                        Image(systemName: "arrow.down.circle")
                             .foregroundStyle(Theme.warning)
                     }
                     .listRowBackground(Theme.surface)
@@ -239,8 +275,39 @@ struct RecognitionProfilesView: View {
             async let stat = api.recognitionStatus()
             profiles = try await list
             status = try await stat
+            // Separate do/catch: an older backend without a settings document
+            // must not blank the profile list it just returned successfully.
+            settings = try? await api.settingsDocument().recognition
         } catch {
             activeAlert = .error((error as? ApiError)?.message ?? error.localizedDescription)
+        }
+    }
+
+    private func setEnabled(_ on: Bool) async {
+        await patchRecognition(.init(enabled: on))
+    }
+
+    private func setNotifyMode(_ mode: String) async {
+        await patchRecognition(.init(notifyMode: mode))
+    }
+
+    /// Send ONLY the field that changed. Every field on the patch is optional
+    /// and nil is omitted, so flipping the toggle cannot reset the retention
+    /// window or the alert mode.
+    private func patchRecognition(_ patch: SettingsPatch.Recognition) async {
+        guard let api = session.api else { return }
+        savingSettings = true
+        defer { savingSettings = false }
+        do {
+            var body = SettingsPatch()
+            body.recognition = patch
+            settings = try await api.patchSettings(body).recognition
+            // The server loads or releases the models on its own schedule, so
+            // re-read status rather than assuming the toggle took effect now.
+            status = try? await api.recognitionStatus()
+        } catch {
+            activeAlert = .error((error as? ApiError)?.message ?? error.localizedDescription)
+            settings = try? await api.settingsDocument().recognition
         }
     }
 
