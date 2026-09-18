@@ -505,6 +505,47 @@ export interface ProbeResult {
   detail: string | null;
 }
 
+/**
+ * One thing recognition read on an event: a face matched to a person, a plate
+ * read off a vehicle, or either having matched NOBODY.
+ *
+ * `known: false` is an ANSWER, not a missing one — a face was read and nobody
+ * enrolled matches it, which is the row an unknown-subject alert is built from.
+ */
+export interface EventRecognition {
+  /** "face" | "plate". */
+  kind: string;
+  profile_id: number | null;
+  name: string;
+  plate: string;
+  score: number;
+  quality: number;
+  known: boolean;
+}
+
+/**
+ * The one recognition worth a single line: a named person first (the most
+ * informative thing an event can say), then a plate, then an explicit unknown.
+ * `null` when recognition read nothing.
+ */
+export function headlineRecognition(
+  recognitions: EventRecognition[] | undefined,
+): EventRecognition | null {
+  if (!recognitions || recognitions.length === 0) return null;
+  return (
+    recognitions.find((r) => r.known && r.name) ??
+    recognitions.find((r) => r.plate) ??
+    recognitions[0]
+  );
+}
+
+/** Label for a recognition row. Never empty, so callers need no fallback. */
+export function recognitionLabel(r: EventRecognition): string {
+  if (r.known && r.name) return r.name;
+  if (r.plate) return r.plate;
+  return r.kind === 'face' ? 'Unknown face' : 'Unread plate';
+}
+
 export interface NvrEvent {
   id: number | string;
   camera: string;
@@ -523,6 +564,11 @@ export interface NvrEvent {
   has_clip: boolean;
   has_snapshot: boolean;
   zones: string[];
+  /**
+   * What recognition read here. Absent on a backend predating the feature and
+   * `[]` on a box that never enabled it, so callers treat both as "nothing".
+   */
+  recognitions?: EventRecognition[];
 }
 
 /**
@@ -651,6 +697,28 @@ export interface AppSettings {
      */
     clip_delay_s: number;
   };
+  /**
+   * Face / plate recognition. OFF by default: it downloads two more models and
+   * retains biometric imagery. Optional here because a backend predating the
+   * feature omits the block entirely.
+   */
+  recognition?: {
+    enabled: boolean;
+    /** Biometric retention for unmatched crops, in days. 0 keeps NOTHING. */
+    candidate_retention_days: number;
+    /**
+     * How long a person/vehicle alert is HELD while recognition decides who it
+     * is — recognition finishes a few frames after the event opens, so an alert
+     * sent immediately can never name anyone. 0 disables the hold.
+     */
+    notify_grace_seconds: number;
+    /**
+     * "all" names a recognized subject in the alert; "unknown_only" stays
+     * silent for enrolled people and vehicles — the setting that stops your own
+     * household setting the phone off every evening.
+     */
+    notify_mode: 'all' | 'unknown_only';
+  };
   detection: {
     model: DetectionModel;
     /**
@@ -759,6 +827,7 @@ export type SettingsPatch = {
   notifications?: Partial<AppSettings['notifications']>;
   recording?: Partial<AppSettings['recording']>;
   detection?: Partial<AppSettings['detection']>;
+  recognition?: Partial<NonNullable<AppSettings['recognition']>>;
   system?: Partial<AppSettings['system']>;
   mqtt?: Partial<MqttSettings>;
   archive?: Partial<ArchiveSettings>;

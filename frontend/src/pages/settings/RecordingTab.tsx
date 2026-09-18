@@ -61,6 +61,22 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
   const [smoothingFrames, setSmoothingFrames] = useState<number>(
     pending.detection?.smoothing_frames ?? settings.detection.smoothing_frames ?? 3,
   );
+  // Face / plate recognition. A backend predating the feature omits the block
+  // entirely, and `hasRecognition` is what keeps that case honest: the card is
+  // hidden AND the slice is left out of the draft. Reporting a default-filled
+  // `recognition` against a saved `undefined` would read as an edit forever and
+  // leave the Save bar permanently lit on a box that cannot even do this.
+  const savedRecognition = settings.recognition;
+  const hasRecognition = savedRecognition !== undefined;
+  const [recognition, setRecognition] = useState({
+    enabled: false,
+    candidate_retention_days: 14,
+    notify_grace_seconds: 4,
+    notify_mode: 'all' as 'all' | 'unknown_only',
+    ...(savedRecognition ?? {}),
+    ...(pending.recognition ?? {}),
+  });
+
   // No `modelKey` mirror here any more. It existed solely so this form's PUT
   // could re-send the current model instead of clobbering a fresh activation
   // from <DetectionModels>. The patch names only `confidence` and
@@ -78,6 +94,11 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
   useAdoptSaved(settings.detection.night_boost_threshold ?? 60, setNightBoostThreshold);
   useAdoptSaved(settings.detection.smoothing ?? false, setSmoothing);
   useAdoptSaved(settings.detection.smoothing_frames ?? 3, setSmoothingFrames);
+  // Guarded: on a backend without the block the saved value is `undefined`, and
+  // adopting that would blank the draft this form is bound to.
+  useAdoptSaved(savedRecognition, (v) => {
+    if (v) setRecognition(v);
+  });
 
   // Report this tab's slice up on every edit; the shell's single Save button
   // persists it together with every other tab's pending changes.
@@ -90,10 +111,12 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
         night_boost: nightBoost, night_boost_threshold: nightBoostThreshold,
         smoothing, smoothing_frames: smoothingFrames,
       },
+      ...(hasRecognition ? { recognition } : {}),
     });
   }, [
     recording, confidence, defaultMode, backend, coralModel, absenceTimeout,
-    nightBoost, nightBoostThreshold, smoothing, smoothingFrames, onDraftChange,
+    nightBoost, nightBoostThreshold, smoothing, smoothingFrames,
+    hasRecognition, recognition, onDraftChange,
   ]);
 
   const dayInput = (
@@ -439,6 +462,105 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
           </label>
         </div>
       </section>
+
+      {hasRecognition && (
+        <section className="card">
+          <h2>Faces &amp; plates</h2>
+          <p className="muted small">
+            Reads faces and vehicle plates on top of ordinary detection, and names the
+            person or vehicle in the alert when it recognizes one. Off by default: it
+            downloads two further models (~41&nbsp;MB) and keeps cropped face images on the
+            server so you can enroll people from real sightings afterwards. People and
+            vehicles are enrolled in the Vigilume iOS app, under Settings →&nbsp;Faces
+            &amp;&nbsp;Plates.
+          </p>
+          <div className="form-stack">
+            <label className="row-label">
+              <input
+                type="checkbox"
+                checked={recognition.enabled}
+                onChange={(e) => setRecognition({ ...recognition, enabled: e.target.checked })}
+              />
+              Recognize faces and license plates
+            </label>
+            {recognition.enabled && (
+              <>
+                <label>
+                  Alert me about
+                  <select
+                    value={recognition.notify_mode}
+                    onChange={(e) =>
+                      setRecognition({
+                        ...recognition,
+                        notify_mode: e.target.value === 'unknown_only' ? 'unknown_only' : 'all',
+                      })
+                    }
+                  >
+                    <option value="all">Everyone, named where recognized</option>
+                    <option value="unknown_only">Only people and vehicles I have not enrolled</option>
+                  </select>
+                  <span className="control-hint">
+                    {recognition.notify_mode === 'unknown_only'
+                      ? 'Enrolled people and vehicles arrive silently. Anyone else still alerts — including a face nobody could identify, which is the case most worth hearing about.'
+                      : 'Every alert still sends; a recognized person or vehicle is named in it.'}
+                  </span>
+                </label>
+                <label>
+                  Hold alerts for (seconds)
+                  <input
+                    type="number"
+                    min={0}
+                    max={30}
+                    step={1}
+                    value={recognition.notify_grace_seconds}
+                    onChange={(e) =>
+                      setRecognition({
+                        ...recognition,
+                        notify_grace_seconds: Math.min(
+                          30,
+                          Math.max(0, Math.floor(Number(e.target.value) || 0)),
+                        ),
+                      })
+                    }
+                  />
+                  <span className="control-hint">
+                    Recognition finishes a few frames after an event opens, so an alert sent
+                    the instant it opens can never carry a name. A held alert is only
+                    <em> delayed</em>, never dropped — it sends either way once the hold is
+                    up. 0 disables the wait.
+                  </span>
+                </label>
+                <label>
+                  Keep unmatched face images for (days)
+                  <input
+                    type="number"
+                    min={0}
+                    max={365}
+                    step={1}
+                    value={recognition.candidate_retention_days}
+                    onChange={(e) =>
+                      setRecognition({
+                        ...recognition,
+                        candidate_retention_days: Math.min(
+                          365,
+                          Math.max(0, Math.floor(Number(e.target.value) || 0)),
+                        ),
+                      })
+                    }
+                  />
+                  <span className="control-hint">
+                    How long a face that matched nobody stays on disk so you can enroll it
+                    later. This is biometric imagery of people who have not been identified
+                    — keep the window no longer than you need. 0 keeps nothing, which also
+                    means there is nothing to enroll from. Faces already enrolled against a
+                    person are kept until you delete that person.
+                  </span>
+                </label>
+              </>
+            )}
+          </div>
+        </section>
+      )}
 
       <section className="card">
         <h2>Event grouping</h2>

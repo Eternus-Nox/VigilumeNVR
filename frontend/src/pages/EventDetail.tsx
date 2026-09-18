@@ -7,9 +7,10 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api, type NvrEventDetail } from '../lib/api';
+import { api, headlineRecognition, type NvrEventDetail } from '../lib/api';
 import { downloadAttachment } from '../lib/download';
 import AuthImage from '../components/AuthImage';
+import RecognitionChip from '../components/RecognitionChip';
 import AuthVideo from '../components/AuthVideo';
 import { ConfirmDialog } from '../components/Modal';
 import { useAppState } from '../state/AppState';
@@ -189,6 +190,10 @@ export default function EventDetail() {
     event.count > 0 ? `${event.count} ${pluralize(event.label, event.count)} in frame` : null;
   // Multi-object events list every detected class; older events only `label`.
   const eventLabels = event.labels && event.labels.length > 0 ? event.labels : [event.label];
+  // Absent on a backend predating recognition, `[]` on a box that never turned
+  // it on — both mean "nothing to say", and neither should print a header.
+  const recognitions = event.recognitions ?? [];
+  const headline = headlineRecognition(recognitions);
   const clipReady = event.clip_state === 'ready' && event.has_clip;
 
   return (
@@ -199,7 +204,14 @@ export default function EventDetail() {
             {titleCase(event.label)}
             {event.count > 1 ? ` ×${event.count}` : ''} · {titleCase(event.camera)}
           </h1>
-          <p className="muted">{formatDateTime(event.start_time)}</p>
+          {/* Who, up beside the timestamp — not only in the meta grid below
+              the media. "Adam" or "nobody I know" is the first thing someone
+              opening a push notification is trying to find out, and the grid
+              is a scroll away on a phone. */}
+          <p className="muted event-head-line">
+            {formatDateTime(event.start_time)}
+            {headline && <RecognitionChip recognition={headline} />}
+          </p>
         </div>
         <div className="event-actions">
           {clipReady && (
@@ -306,6 +318,19 @@ export default function EventDetail() {
           <dt>{eventLabels.length > 1 ? 'Labels' : 'Label'}</dt>
           <dd>{eventLabels.map(titleCase).join(', ')}</dd>
         </div>
+        {recognitions.length > 0 && (
+          <div>
+            {/* All of them here, not just the headline the card shows: two
+                people at a door, or a plate on a car with a face behind the
+                wheel, is exactly the event whose second row matters. */}
+            <dt>Recognized</dt>
+            <dd className="recog-list">
+              {recognitions.map((r, i) => (
+                <RecognitionChip key={`${r.kind}-${r.profile_id ?? 'x'}-${r.plate}-${i}`} recognition={r} />
+              ))}
+            </dd>
+          </div>
+        )}
         {countText && (
           <div>
             <dt>Count</dt>

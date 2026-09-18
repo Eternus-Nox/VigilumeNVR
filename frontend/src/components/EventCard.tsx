@@ -2,7 +2,8 @@
 import { memo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { NvrEvent } from '../lib/api';
-import { api } from '../lib/api';
+import { api, headlineRecognition } from '../lib/api';
+import RecognitionChip from './RecognitionChip';
 import { downloadAttachment } from '../lib/download';
 import { useAppState } from '../state/AppState';
 import { formatDateTime, formatScore, titleCase } from '../lib/format';
@@ -61,6 +62,11 @@ function EventCard({
   );
   const labelText = labels.join(', ');
 
+  // At most one recognition on the thumbnail: the card has room for a single
+  // line, and a stack of chips over a 160px image would bury the image the
+  // card exists to show. The rest are on the detail page.
+  const headline = headlineRecognition(event.recognitions);
+
   return (
     <>
       <Link to={`/events/${event.id}`} className={`event-card ${compact ? 'event-card-compact' : ''}`}>
@@ -74,6 +80,7 @@ function EventCard({
             {labelText}
             {event.count > 1 ? ` ×${event.count}` : ''}
           </span>
+          {headline && <RecognitionChip recognition={headline} className="event-recog-chip" />}
           {kind && (
             <button
               type="button"

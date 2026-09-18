@@ -3146,3 +3146,74 @@ label > select {
   flex-direction: column;
   gap: 0.35rem;
 }
+
+/* ── Recognition badge (faces & plates) ──────────────────────────────────────
+   Shown on event cards and the event detail. A KNOWN subject reads as a
+   positive identification and an unknown one as a caution — but the
+   distinction is carried by the ICON and the WORDING as much as the colour,
+   because "unknown person at the door" is exactly the row that must not depend
+   on colour perception. */
+.recog-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  font-size: 0.68rem;
+  font-weight: 650;
+  padding: 0.12rem 0.45rem;
+  border-radius: 999px;
+  letter-spacing: 0.02em;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The tint rides on an OPAQUE dark base rather than being translucent on its
+   own: this chip sits over a photograph on the event card, and a 14% wash over
+   a bright doorway is unreadable exactly when it matters most. Two background
+   layers keep one rule working on the card and on the detail panel alike. */
+.recog-chip-known {
+  background:
+    linear-gradient(rgba(52, 211, 153, 0.16), rgba(52, 211, 153, 0.16)),
+    rgba(4, 10, 18, 0.82);
+  border: 1px solid rgba(52, 211, 153, 0.5);
+  color: var(--success, #34d399);
+}
+
+.recog-chip-unknown {
+  background:
+    linear-gradient(rgba(251, 191, 36, 0.16), rgba(251, 191, 36, 0.16)),
+    rgba(4, 10, 18, 0.82);
+  border: 1px solid rgba(251, 191, 36, 0.5);
+  color: var(--warning, #fbbf24);
+}
+
+/* A plate is a string of ambiguous glyphs; a monospaced face is what keeps
+   0 apart from O at this size. */
+.recog-chip-plate {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.04em;
+}
+
+/* On a card thumbnail the chip sits above the label chip rather than beside
+   it — side by side, the longer of the two truncates the other. */
+.event-recog-chip {
+  position: absolute;
+  left: 6px;
+  bottom: 28px;
+  max-width: calc(100% - 12px);
+}
+
+.recog-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+/* The detail page's timestamp line, which also carries the headline chip. */
+.event-head-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
