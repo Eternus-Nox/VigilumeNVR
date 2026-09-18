@@ -43,6 +43,8 @@ from .native.model_store import ModelStore
 from .native.media import NativeMediaProvider
 from .native.recorder import Recorder
 from .native.facepass import FacePass
+from .native.platepass import PlatePass
+from .native.plates import PlateReader
 from .native.recognizer import FaceRecognizer
 from .native.spotlight import SpotlightController
 from .native import streams
@@ -428,6 +430,14 @@ async def lifespan(app: FastAPI):
     face_recognizer = FaceRecognizer(config.models_dir)
     face_pass = FacePass(face_recognizer, db, config.candidate_crops_dir)
     engine.set_face_pass(face_pass)
+    # Plates. No learned detector ships (see native/plates.py on the licensing);
+    # localization is classical CV over D-FINE's vehicle box and only the OCR is
+    # a model. Shares the face pass's heatmap accumulator so one flush covers
+    # both kinds.
+    plate_reader = PlateReader(config.models_dir)
+    plate_pass = PlatePass(plate_reader, db, config.candidate_crops_dir,
+                           heatmap=face_pass.heatmap)
+    engine.set_plate_pass(plate_pass)
     # Re-assert stored desired IR on doorbells (the AD410 resets IR Mode to Auto
     # whenever RTSP streaming (re)connects). The recorder fires on_connect once
     # per (re)connect cycle; a slow sweep backstops missed reconnects.
@@ -544,6 +554,7 @@ async def lifespan(app: FastAPI):
             # retention window. Off by default, so on most boxes this loop
             # does nothing but check a flag.
             asyncio.create_task(face_pass.run(settings), name="recognition"),
+            asyncio.create_task(plate_pass.run(settings), name="recognition-plates"),
         ]
         cams = await db.list_cameras()
         await doorbells.sync(cams)

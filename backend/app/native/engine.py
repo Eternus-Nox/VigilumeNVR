@@ -388,6 +388,8 @@ class _CameraState:
     # a face is legible enough to be worth a recognition pass. Empty => the
     # whole frame, which is correct and merely slower.
     face_zones: list[tuple[str, Any]] = field(default_factory=list)
+    # Detect-space PLATE regions of interest. Same contract as face_zones.
+    plate_zones: list[tuple[str, Any]] = field(default_factory=list)
     # tracker_id -> (hit count, last seen epoch)
     hits: dict[int, tuple[int, float]] = field(default_factory=dict)
     latest_frame: Optional[np.ndarray] = None
@@ -435,6 +437,9 @@ class DetectionEngine:
         # a box that never turns recognition on pays nothing for it, and every
         # call site below is guarded rather than assuming it exists.
         self._face: Optional[Any] = None
+        # Plate reading (native.platepass.PlatePass). Same contract as _face:
+        # None until enabled, every call site guarded.
+        self._plates: Optional[Any] = None
         self.running = False
 
     def set_spotlight(self, spotlight: Optional[Any]) -> None:
@@ -454,6 +459,10 @@ class DetectionEngine:
         """Inject the face pass. Safe before or after start()."""
         self._face = face
 
+    def set_plate_pass(self, plates: Optional[Any]) -> None:
+        """Inject the plate pass. Safe before or after start()."""
+        self._plates = plates
+
     @property
     def recognition_model_key(self) -> str:
         """Embedding space currently loaded, or "" — read by /api/recognition."""
@@ -467,6 +476,8 @@ class DetectionEngine:
         """
         if self._face is not None:
             await self._face.reload_gallery()
+        if self._plates is not None:
+            await self._plates.reload_gallery()
 
     def set_pipeline(self, pipeline: "EventsPipeline") -> None:
         """Late-bound: the pipeline needs the media provider, which needs
@@ -541,6 +552,7 @@ class DetectionEngine:
                 repr(row.get("include_zones") or []),
                 repr(row.get("cross_lines") or []),
                 repr(row.get("face_zones") or []),
+                repr(row.get("plate_zones") or []),
                 row.get("detect_width"),
                 row.get("detect_height"),
             )
@@ -549,6 +561,7 @@ class DetectionEngine:
                 state.include_zones = zonelib.include_detect_zones(row)
                 state.cross_lines = zonelib.cross_detect_lines(row)
                 state.face_zones = zonelib.polygon_zones(row, "face_zones", "face")
+                state.plate_zones = zonelib.polygon_zones(row, "plate_zones", "plate")
                 if state.include_zones:
                     log.info(
                         "camera %s: %d include zone(s) active — detections outside "
@@ -724,6 +737,9 @@ class DetectionEngine:
             # frame's pass over a reused tracker id.
             for tid in forgotten:
                 await self._face.finish(camera, tid)
+        if forgotten and self._plates is not None:
+            for tid in forgotten:
+                await self._plates.finish(camera, tid)
         confirmed = [o for o in obs if cam.hits[o.tracker_id][0] >= MIN_HITS]
 
         # --- traces + line crossings (confirmed objects only) ---
@@ -772,6 +788,19 @@ class DetectionEngine:
                 open_fid = st_person.fid
             await self._face.observe(cam, by_label["person"], frame_bgr,
                                      frame_time, open_fid)
+
+        # --- plate reading pass ---
+        # Fed the vehicle labels the camera is actually tracking. PlatePass
+        # picks its own out of the set and throttles per track, so handing it
+        # the whole confirmed scene costs nothing when there is no vehicle.
+        if self._plates is not None and confirmed:
+            vehicle_fid = ""
+            for label in ("car", "truck", "bus"):
+                st_v = self._events.get((camera, label))
+                if st_v is not None:
+                    vehicle_fid = st_v.fid
+                    break
+            await self._plates.observe(cam, confirmed, frame_bgr, frame_time, vehicle_fid)
 
         # The full confirmed set is the "scene" saved with whichever frame each
         # label's event adopts as its best — every counted object, all labels.

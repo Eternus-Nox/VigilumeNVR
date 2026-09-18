@@ -227,6 +227,26 @@ def enroll_checks(client: TestClient, h: dict, adam: dict, truck: dict) -> None:
                     json={"candidate_ids": []})
     check(r.status_code == 422, "an empty enroll list is refused")
 
+    print("\nenrollment: a PLATE candidate enrolls into a vehicle profile")
+    # The plate pipeline produces these, and they are shaped differently from a
+    # face candidate: a string and no embedding. The gallery keeps a sample that
+    # has a plate OR a vector, so a plate-only sample must survive the trip.
+    pc = seed_candidate(client, kind="plate", plate="XYZ789", quality=0.7)
+    r = client.post(f"/api/recognition/profiles/{truck['id']}/enroll", headers=h,
+                    json={"candidate_ids": [pc]})
+    check(r.status_code == 201, f"a plate candidate enrolls into a vehicle "
+                                f"(got {r.status_code}: {r.text[:160]})")
+    detail = client.get(f"/api/recognition/profiles/{truck['id']}", headers=h).json()
+    plates = [s["plate"] for s in detail["samples"]]
+    check("XYZ789" in plates, f"the plate text became a sample (got {plates})")
+    check(detail["usable_sample_count"] == detail["sample_count"],
+          "plate samples are ALWAYS usable — unlike a face embedding they do not "
+          "depend on which model is loaded")
+
+    r = client.post(f"/api/recognition/profiles/{adam['id']}/enroll", headers=h,
+                    json={"candidate_ids": [seed_candidate(client, kind='plate', plate='AAA111')]})
+    check(r.status_code == 400, "...and a plate candidate is refused by a PERSON profile")
+
     print("\nenrollment: imagery is served and deleted")
     sid = sample_ids[0]
     r = client.get(f"/api/recognition/samples/{sid}/image.jpg", headers=h)
@@ -252,14 +272,26 @@ def enroll_checks(client: TestClient, h: dict, adam: dict, truck: dict) -> None:
           "...and the profile is a 404 afterwards")
 
     print("\ncandidates: clearing")
-    seed_candidate(client, kind="plate", plate="XYZ789", quality=0.6)
+    seed_candidate(client, kind="plate", plate="QQQ222", quality=0.6)
+    seed_candidate(client, kind="face", quality=0.55)
+    # Asserted by KIND rather than by an absolute count: earlier sections of
+    # this suite leave candidates behind, and a count here would break whenever
+    # one of them changed.
     r = client.get("/api/recognition/candidates", headers=h, params={"kind": "plate"})
-    check(len(r.json()) == 1, "candidates filter by kind")
+    plates = r.json()
+    check(plates and all(c["kind"] == "plate" for c in plates),
+          "filtering by kind returns only that kind")
+    check(any(c["plate"] == "QQQ222" for c in plates), "...including the one just seeded")
+    faces_before = client.get("/api/recognition/candidates", headers=h,
+                              params={"kind": "face"}).json()
+    check(len(faces_before) >= 1, "and there are face candidates to contrast with")
+
     r = client.delete("/api/recognition/candidates", headers=h, params={"kind": "face"})
     check(r.status_code == 204, "clearing one kind succeeds")
-    r = client.get("/api/recognition/candidates", headers=h)
-    check(len(r.json()) == 1 and r.json()[0]["kind"] == "plate",
-          "...and left the other kind alone")
+    remaining = client.get("/api/recognition/candidates", headers=h).json()
+    check(all(c["kind"] == "plate" for c in remaining),
+          "...every face candidate is gone")
+    check(len(remaining) == len(plates), "...and the plate candidates are untouched")
     client.delete("/api/recognition/candidates", headers=h)
     check(len(client.get("/api/recognition/candidates", headers=h).json()) == 0,
           "clearing with no filter empties the store")

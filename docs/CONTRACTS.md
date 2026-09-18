@@ -975,6 +975,53 @@ Unmatched faces are deduplicated by cosine before being stored, so one stranger
 seen twelve times is one row to review. `cameras.face_zones` gates the pass
 entirely — a person outside the ROI gets no face work at all.
 
+#### Plate pipeline (`native/plates.py`, `native/platepass.py`)
+
+**NO LEARNED PLATE DETECTOR SHIPS, deliberately.** Every accurate license-plate
+detector available descends from a GPL-3.0 (YOLOv9) or AGPL-3.0 (Ultralytics)
+training codebase; AGPL in particular would oblige VigilumeNVR to offer its own
+source to anyone using it over a network. So plates are localized *without* a
+dedicated model:
+
+    D-FINE already found the vehicle  ->  crop its lower 55%
+    classical CV (blackhat/tophat + Sobel-x + morphological close + contours)
+      proposes plate-shaped strips
+    a permissively-licensed OCR reads each strip
+    multi-frame voting reconciles the reads
+
+This is the pre-deep-learning ANPR pipeline and it is honest about the trade: it
+reads a plate on a driveway well and one across the street badly. Only
+`plates.candidate_regions` would need replacing if the licence position changes
+— everything downstream takes boxes.
+
+**Why a crude localizer is acceptable.** The OCR discriminates on its own: fed
+noise the pinned model returns an EMPTY string at zero confidence rather than
+inventing characters (pinned in `plates_smoke`). So the localizer can be
+GENEROUS — propose four regions per vehicle and let OCR confidence, the
+aspect-ratio veto and voting discard the duds. A precise localizer would need
+the model we are deliberately not shipping; an *inclusive* one does not.
+
+The localizer bounds the plate's **text row** (~5–7:1), not its border (~2:1).
+Filtering those with the whole-plate aspect band silently rejected a clean,
+legible plate during development — hence the wide band plus `_expand_to_plate`,
+which grows a text row back to plate proportions before OCR (which was trained
+on plates, not bare text rows).
+
+OCR model: `cct_xs_v2_global` from fast-plate-ocr (**MIT**, 3.3 MB, a Keras-
+trained Compact Convolutional Transformer — nothing in its lineage touches
+YOLO). 128x64 RGB uint8 in, 10 slots x 37 classes out, covering Latin-alphabet
+regions including the United States. Pinned + SHA-256 verified, re-verified on
+load.
+
+Unlike the face pass, which embeds once per track, `PlatePass` OCRs **every
+retained shot** (≤ `KEEP_SHOTS`) and votes — several independent looks beating
+one good one is the entire accuracy argument, and 3.3 MB over a 128x64 input
+makes five reads per vehicle negligible. A vote whose weakest character falls
+below `MIN_VOTE_CONFIDENCE` is **discarded, not recorded**: a wrong plate on an
+event is worse than no plate. Plate candidates dedupe by the plate STRING
+rather than by similarity — two reads of the same plate are the same vehicle by
+definition.
+
 #### Recognition heatmap (`native/heatmap.py`, schema v23)
 
 - `GET /api/recognition/heatmap/{camera}?kind=face|plate` → `{cols, rows, counts[], quality[], samples, peak, updated_at, suggested_zone}`. Two flat grids of `cols * rows`: `counts` normalized 0..1 against the busiest cell, `quality` the MEAN bestshot score in that cell.
