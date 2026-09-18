@@ -17,6 +17,138 @@ from .config import DEFAULT_DETECT_OBJECTS
 
 SCHEMA_VERSION = 23
 
+#: The recognition tables, SEPARATE from _SCHEMA and run on EVERY boot.
+#:
+#: They live here rather than inside _SCHEMA because of how _migrate works:
+#: _SCHEMA is executed ONLY for a brand-new database (``if version < 1``), and
+#: an existing one takes the incremental-ALTER branch instead. Recognition
+#: shipped as v22/v23 migrations that created no tables, on the mistaken belief
+#: that _SCHEMA's CREATE TABLE IF NOT EXISTS ran every time — so an upgraded box
+#: got the version stamp and none of the tables, and then could not self-heal,
+#: because the stamp made the migration skip. The visible result was every
+#: GET /api/events returning 500 (no such table: event_recognitions) and the
+#: candidate purge failing on a loop.
+#:
+#: Executed unconditionally on each boot instead of from a version branch. It is
+#: entirely CREATE ... IF NOT EXISTS, so it is idempotent and costs a handful of
+#: no-op statements at startup — and that is precisely what repairs a database
+#: already stamped v23 with the tables missing. Add a recognition table HERE,
+#: never to _SCHEMA.
+_RECOGNITION_SCHEMA = """
+-- ── Recognition: profiles, enrolled samples, candidates, event matches ──────
+--
+-- A profile is a NAMED IDENTITY the operator curates by hand: a person whose
+-- face should be recognized, or a vehicle known by its plate. Nothing creates
+-- one automatically — an NVR that invents identities on its own is one that
+-- cannot be corrected.
+CREATE TABLE IF NOT EXISTS profiles (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind        TEXT NOT NULL,                 -- 'person' | 'vehicle'
+    name        TEXT NOT NULL,
+    notes       TEXT NOT NULL DEFAULT '',
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    -- Per-profile match threshold. NULL = inherit the global default for this
+    -- kind. One profile that keeps false-matching gets tightened on its own,
+    -- without making every other profile harder to match.
+    threshold   REAL,
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL,
+    UNIQUE(kind, name)
+);
+
+-- One enrolled reference for a profile. A person's sample carries a face
+-- EMBEDDING; a vehicle's carries a normalized PLATE string. Both may carry a
+-- reference image the operator can look at and delete.
+CREATE TABLE IF NOT EXISTS profile_samples (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id  INTEGER NOT NULL,
+    -- Raw float32 little-endian, `dim` values long. NULL for a plate sample.
+    embedding   BLOB,
+    dim         INTEGER NOT NULL DEFAULT 0,
+    plate       TEXT NOT NULL DEFAULT '',
+    -- WHICH MODEL produced `embedding`. Embeddings are only comparable within
+    -- one model, so storing this is what turns "the operator swapped models and
+    -- every match silently went wrong" into a detectable, repairable state.
+    model_key   TEXT NOT NULL DEFAULT '',
+    image_path  TEXT NOT NULL DEFAULT '',
+    quality     REAL NOT NULL DEFAULT 0,
+    source_fid  TEXT NOT NULL DEFAULT '',
+    created_at  REAL NOT NULL,
+    FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_profile_samples ON profile_samples(profile_id);
+
+-- Crops that did NOT match any profile, kept on a rolling window so a face can
+-- be enrolled AFTER the fact ("who was that on Tuesday?"). Purged by age —
+-- see settings.recognition.candidate_retention_days.
+CREATE TABLE IF NOT EXISTS recognition_candidates (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind            TEXT NOT NULL,
+    camera          TEXT NOT NULL,
+    event_fid       TEXT NOT NULL DEFAULT '',
+    embedding       BLOB,
+    dim             INTEGER NOT NULL DEFAULT 0,
+    plate           TEXT NOT NULL DEFAULT '',
+    model_key       TEXT NOT NULL DEFAULT '',
+    image_path      TEXT NOT NULL DEFAULT '',
+    quality         REAL NOT NULL DEFAULT 0,
+    -- Best similarity against the gallery at capture time, and who it was
+    -- nearest to. Lets the app sort "almost matched Adam" above total
+    -- strangers, which is the list you actually want to enroll from.
+    best_score      REAL NOT NULL DEFAULT 0,
+    best_profile_id INTEGER,
+    created_at      REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_candidates_created ON recognition_candidates(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_candidates_kind    ON recognition_candidates(kind, created_at DESC);
+
+-- What an event actually matched. A row with profile_id NULL means "a face was
+-- read here and it belonged to nobody enrolled" — which is the row an
+-- unknown-person alert is built from, so it is recorded, not discarded.
+CREATE TABLE IF NOT EXISTS event_recognitions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_fid   TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    profile_id  INTEGER,
+    name        TEXT NOT NULL DEFAULT '',
+    plate       TEXT NOT NULL DEFAULT '',
+    score       REAL NOT NULL DEFAULT 0,
+    quality     REAL NOT NULL DEFAULT 0,
+    image_path  TEXT NOT NULL DEFAULT '',
+    created_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_event_recog ON event_recognitions(event_fid);
+
+-- WHERE recognition actually works on each camera, as a coarse grid.
+--
+-- This exists to answer the question the ROI editor otherwise leaves to guesswork:
+-- "where should I draw the face zone?". Drawing it where people WALK is the
+-- obvious guess and frequently the wrong one — the useful region is where a face
+-- is actually LEGIBLE, which depends on range, lens, and where the light is. So
+-- each cell accumulates both:
+--
+--   count       how many times a face/plate was seen centred in this cell
+--   quality_sum sum of bestshot quality for those sightings
+--
+-- count alone would draw a map of footfall; quality_sum/count is the part that
+-- says whether anything readable ever came from there. The UI renders density as
+-- opacity and mean quality as hue, so a busy-but-unreadable region looks visibly
+-- different from a quiet-but-sharp one.
+--
+-- Deliberately coarse and bounded: HEATMAP_COLS x HEATMAP_ROWS cells per
+-- (camera, kind), so a camera costs at most a few hundred tiny rows no matter
+-- how long it runs.
+CREATE TABLE IF NOT EXISTS recognition_heatmap (
+    camera      TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    cell        INTEGER NOT NULL,
+    count       INTEGER NOT NULL DEFAULT 0,
+    quality_sum REAL NOT NULL DEFAULT 0,
+    updated_at  REAL NOT NULL,
+    PRIMARY KEY (camera, kind, cell)
+);
+"""
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cameras (
     name            TEXT PRIMARY KEY,
@@ -138,118 +270,6 @@ CREATE TABLE IF NOT EXISTS users (
     created_at    REAL NOT NULL
 );
 
--- ── Recognition: profiles, enrolled samples, candidates, event matches ──────
---
--- A profile is a NAMED IDENTITY the operator curates by hand: a person whose
--- face should be recognized, or a vehicle known by its plate. Nothing creates
--- one automatically — an NVR that invents identities on its own is one that
--- cannot be corrected.
-CREATE TABLE IF NOT EXISTS profiles (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind        TEXT NOT NULL,                 -- 'person' | 'vehicle'
-    name        TEXT NOT NULL,
-    notes       TEXT NOT NULL DEFAULT '',
-    enabled     INTEGER NOT NULL DEFAULT 1,
-    -- Per-profile match threshold. NULL = inherit the global default for this
-    -- kind. One profile that keeps false-matching gets tightened on its own,
-    -- without making every other profile harder to match.
-    threshold   REAL,
-    created_at  REAL NOT NULL,
-    updated_at  REAL NOT NULL,
-    UNIQUE(kind, name)
-);
-
--- One enrolled reference for a profile. A person's sample carries a face
--- EMBEDDING; a vehicle's carries a normalized PLATE string. Both may carry a
--- reference image the operator can look at and delete.
-CREATE TABLE IF NOT EXISTS profile_samples (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    profile_id  INTEGER NOT NULL,
-    -- Raw float32 little-endian, `dim` values long. NULL for a plate sample.
-    embedding   BLOB,
-    dim         INTEGER NOT NULL DEFAULT 0,
-    plate       TEXT NOT NULL DEFAULT '',
-    -- WHICH MODEL produced `embedding`. Embeddings are only comparable within
-    -- one model, so storing this is what turns "the operator swapped models and
-    -- every match silently went wrong" into a detectable, repairable state.
-    model_key   TEXT NOT NULL DEFAULT '',
-    image_path  TEXT NOT NULL DEFAULT '',
-    quality     REAL NOT NULL DEFAULT 0,
-    source_fid  TEXT NOT NULL DEFAULT '',
-    created_at  REAL NOT NULL,
-    FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_profile_samples ON profile_samples(profile_id);
-
--- Crops that did NOT match any profile, kept on a rolling window so a face can
--- be enrolled AFTER the fact ("who was that on Tuesday?"). Purged by age —
--- see settings.recognition.candidate_retention_days.
-CREATE TABLE IF NOT EXISTS recognition_candidates (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind            TEXT NOT NULL,
-    camera          TEXT NOT NULL,
-    event_fid       TEXT NOT NULL DEFAULT '',
-    embedding       BLOB,
-    dim             INTEGER NOT NULL DEFAULT 0,
-    plate           TEXT NOT NULL DEFAULT '',
-    model_key       TEXT NOT NULL DEFAULT '',
-    image_path      TEXT NOT NULL DEFAULT '',
-    quality         REAL NOT NULL DEFAULT 0,
-    -- Best similarity against the gallery at capture time, and who it was
-    -- nearest to. Lets the app sort "almost matched Adam" above total
-    -- strangers, which is the list you actually want to enroll from.
-    best_score      REAL NOT NULL DEFAULT 0,
-    best_profile_id INTEGER,
-    created_at      REAL NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_candidates_created ON recognition_candidates(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_candidates_kind    ON recognition_candidates(kind, created_at DESC);
-
--- What an event actually matched. A row with profile_id NULL means "a face was
--- read here and it belonged to nobody enrolled" — which is the row an
--- unknown-person alert is built from, so it is recorded, not discarded.
-CREATE TABLE IF NOT EXISTS event_recognitions (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_fid   TEXT NOT NULL,
-    kind        TEXT NOT NULL,
-    profile_id  INTEGER,
-    name        TEXT NOT NULL DEFAULT '',
-    plate       TEXT NOT NULL DEFAULT '',
-    score       REAL NOT NULL DEFAULT 0,
-    quality     REAL NOT NULL DEFAULT 0,
-    image_path  TEXT NOT NULL DEFAULT '',
-    created_at  REAL NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_event_recog ON event_recognitions(event_fid);
-
--- WHERE recognition actually works on each camera, as a coarse grid.
---
--- This exists to answer the question the ROI editor otherwise leaves to guesswork:
--- "where should I draw the face zone?". Drawing it where people WALK is the
--- obvious guess and frequently the wrong one — the useful region is where a face
--- is actually LEGIBLE, which depends on range, lens, and where the light is. So
--- each cell accumulates both:
---
---   count       how many times a face/plate was seen centred in this cell
---   quality_sum sum of bestshot quality for those sightings
---
--- count alone would draw a map of footfall; quality_sum/count is the part that
--- says whether anything readable ever came from there. The UI renders density as
--- opacity and mean quality as hue, so a busy-but-unreadable region looks visibly
--- different from a quiet-but-sharp one.
---
--- Deliberately coarse and bounded: HEATMAP_COLS x HEATMAP_ROWS cells per
--- (camera, kind), so a camera costs at most a few hundred tiny rows no matter
--- how long it runs.
-CREATE TABLE IF NOT EXISTS recognition_heatmap (
-    camera      TEXT NOT NULL,
-    kind        TEXT NOT NULL,
-    cell        INTEGER NOT NULL,
-    count       INTEGER NOT NULL DEFAULT 0,
-    quality_sum REAL NOT NULL DEFAULT 0,
-    updated_at  REAL NOT NULL,
-    PRIMARY KEY (camera, kind, cell)
-);
 
 -- Camera reachability history, stored as TRANSITION intervals (one row per
 -- state, not per poll — 11 cams x 45 s would otherwise be ~21k rows/day). A row
@@ -311,6 +331,11 @@ class Database:
         cur = await self.conn.execute("PRAGMA user_version")
         row = await cur.fetchone()
         version = row[0] if row else 0
+        # Recognition tables FIRST, and unconditionally — before the version
+        # branch, not inside it. On a fresh DB this is what creates them; on an
+        # existing one it is what repairs a box that took the broken v22/v23
+        # migrations and got stamped without them. See _RECOGNITION_SCHEMA.
+        await self.conn.executescript(_RECOGNITION_SCHEMA)
         if version < 1:
             await self.conn.executescript(_SCHEMA)
         else:
@@ -677,14 +702,21 @@ class Database:
                 # match rows. Plus two more normalized-polygon columns on
                 # cameras (face_zones / plate_zones).
                 #
-                # Purely additive. The four tables are created by _SCHEMA's
-                # CREATE TABLE IF NOT EXISTS on every boot, so this block only
-                # has to carry the ALTERs that an existing cameras table needs;
-                # both default to '[]', which means "whole frame", so an
-                # upgraded box behaves exactly as before until someone draws a
-                # zone. Guarded on the cameras table existing, matching the
-                # v20/v21 pattern so the synthetic single-table upgrade
-                # fixtures still run.
+                # The four tables come from _RECOGNITION_SCHEMA, executed
+                # unconditionally at the top of this method, so this block only
+                # carries the ALTERs an existing cameras table needs; both
+                # default to '[]', which means "whole frame", so an upgraded box
+                # behaves exactly as before until someone draws a zone. Guarded
+                # on the cameras table existing, matching the v20/v21 pattern so
+                # the synthetic single-table upgrade fixtures still run.
+                #
+                # This block ORIGINALLY claimed _SCHEMA created those tables on
+                # every boot. It does not — _SCHEMA runs only for a brand-new
+                # database — so upgraded boxes were stamped v22/v23 with no
+                # recognition tables at all and no way back, since the stamp
+                # made the migration skip on every later boot. Never assume
+                # _SCHEMA has run here; anything an EXISTING database needs must
+                # be created by this method explicitly.
                 cur = await self.conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cameras'"
                 )
@@ -702,10 +734,13 @@ class Database:
                             )
             if version < 23:
                 # v23: recognition_heatmap — where faces/plates were actually
-                # seen, and how legible they were. Created by _SCHEMA's
-                # CREATE TABLE IF NOT EXISTS on every boot, so there is nothing
-                # to ALTER; the version bump is what records that an upgraded
-                # box now has it.
+                # seen, and how legible they were. Created by
+                # _RECOGNITION_SCHEMA at the top of this method, so there is
+                # nothing to do here; the version bump only records the step.
+                #
+                # As shipped this was a `pass` resting on the same false premise
+                # as v22 — that _SCHEMA runs every boot — which is why the table
+                # was missing on every upgraded box. See _RECOGNITION_SCHEMA.
                 pass
         if version < SCHEMA_VERSION:
             await self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
