@@ -25,6 +25,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   api,
+  type Camera,
   type CandidateKind,
   type ProfileKind,
   type RecognitionCandidate,
@@ -49,6 +50,7 @@ export default function RecognitionTab() {
   const [profiles, setProfiles] = useState<RecognitionProfile[]>([]);
   const [status, setStatus] = useState<RecognitionStatus | null>(null);
   const [candidates, setCandidates] = useState<RecognitionCandidate[]>([]);
+  const [cameras, setCameras] = useState<Camera[]>([]);
   const [openProfile, setOpenProfile] = useState<RecognitionProfileDetail | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(true);
@@ -73,14 +75,16 @@ export default function RecognitionTab() {
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      const [p, s, c] = await Promise.all([
+      const [p, s, c, cams] = await Promise.all([
         api.recognitionProfiles(kind),
         api.recognitionStatus(),
         api.recognitionCandidates({ kind: CANDIDATE_OF[kind], limit: 120 }),
+        api.cameras(),
       ]);
       setProfiles(p);
       setStatus(s);
       setCandidates(c);
+      setCameras(cams);
       // Drop selections for crops that no longer exist, or the enroll bar
       // could name rows that have since been enrolled or purged.
       setSelected((prev) => {
@@ -149,6 +153,40 @@ export default function RecognitionTab() {
       await Promise.all([reload(), refreshOpen(profileId)]);
     } catch (e) {
       fail(e, 'Could not add the plate');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Turn recognition on or off for ONE camera.
+   *
+   * `PUT /api/cameras/{name}` is a full-body update, so the identity fields have
+   * to be resent — but every OPTIONAL field left out is kept server-side, and
+   * empty credentials mean "keep the stored ones". So this names the identity
+   * plus the single flag and touches nothing else: it cannot clobber a zone, an
+   * RTSP override or a detect toggle set from another screen.
+   */
+  const toggleCamera = async (cam: Camera, field: 'face' | 'plate') => {
+    const key = field === 'face' ? 'face_recognition' : 'plate_recognition';
+    const next = !(cam[key] ?? true);
+    setBusy(true);
+    try {
+      await api.updateCamera(cam.name, {
+        name: cam.name,
+        friendly_name: cam.friendly_name,
+        model: cam.model,
+        ip: cam.ip,
+        username: '',
+        password: '',
+        [key]: next,
+      });
+      setCameras((prev) =>
+        prev.map((c) => (c.name === cam.name ? { ...c, [key]: next } : c)),
+      );
+    } catch (e) {
+      fail(e, 'Could not update the camera');
+      await reload();
     } finally {
       setBusy(false);
     }
@@ -263,6 +301,61 @@ export default function RecognitionTab() {
             compared, so the profiles holding them have quietly stopped matching.
           </p>
         )}
+      </section>
+
+      <section className="card">
+        <h2>Which cameras</h2>
+        <p className="muted small">
+          Recognition runs on the cameras ticked here and nowhere else. This is worth
+          pruning: a camera watching a driveway at 30&nbsp;m cannot produce a legible
+          face, so every pass spent there is wasted — and the only crops it does produce
+          are marginal ones, which is exactly where a <em>wrong name</em> comes from.
+          Faces and plates are independent, so a gate camera can read plates without ever
+          being asked for a face.
+        </p>
+        {cameras.length === 0 ? (
+          <p className="empty-state">{loading ? 'Loading…' : 'No cameras.'}</p>
+        ) : (
+          <table className="recog-camera-table">
+            <thead>
+              <tr>
+                <th scope="col">Camera</th>
+                <th scope="col">Faces</th>
+                <th scope="col">Plates</th>
+              </tr>
+            </thead>
+            <tbody>
+              {cameras.map((c) => (
+                <tr key={c.name}>
+                  <td>{c.friendly_name || titleCase(c.name)}</td>
+                  <td>
+                    <input
+                      type="checkbox"
+                      checked={c.face_recognition ?? true}
+                      disabled={busy}
+                      aria-label={`Recognize faces on ${c.friendly_name || c.name}`}
+                      onChange={() => void toggleCamera(c, 'face')}
+                    />
+                  </td>
+                  <td>
+                    <input
+                      type="checkbox"
+                      checked={c.plate_recognition ?? true}
+                      disabled={busy}
+                      aria-label={`Read plates on ${c.friendly_name || c.name}`}
+                      onChange={() => void toggleCamera(c, 'plate')}
+                    />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <p className="control-hint">
+          These say <em>whether</em> a camera recognizes. <strong>Where</strong> it looks
+          is a region you draw in the iOS app under Settings › Cameras › Recognition areas,
+          which shows a heatmap of where readable faces have actually come from.
+        </p>
       </section>
 
       <section className="card">

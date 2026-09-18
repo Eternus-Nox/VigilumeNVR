@@ -151,6 +151,13 @@ class CameraInput(BaseModel):
     # degenerate one here cannot blind anything.
     face_zones: Optional[list[IncludeZone]] = None
     plate_zones: Optional[list[IncludeZone]] = None
+    # WHETHER this camera recognizes, as opposed to where it looks. The
+    # zones above cannot express "off" — [] means whole frame — so without
+    # these, enabling recognition ran a face pass on every camera. None
+    # (omitted) keeps stored on update and defaults to ON at create, which
+    # matches the column default and keeps an upgrade a no-op.
+    face_recognition: Optional[bool] = None
+    plate_recognition: Optional[bool] = None
     # "Only alert me when something crosses a line on this camera." None
     # (omitted) = keep stored on update / off on create. Gates the NOTIFICATION
     # only — the event, its clip and its snapshot are recorded either way — and
@@ -469,6 +476,8 @@ def _camera_response(
         # Recognition ROIs, verbatim. [] means the whole frame.
         "face_zones": list(cam.get("face_zones") or []),
         "plate_zones": list(cam.get("plate_zones") or []),
+        "face_recognition": bool(cam.get("face_recognition", True)),
+        "plate_recognition": bool(cam.get("plate_recognition", True)),
         "notify_on_cross": bool(cam.get("notify_on_cross") or False),
         "detect": {"enabled": bool(cam.get("detect_enabled", True))},
         "record": {"enabled": bool(cam.get("record_enabled", True))},
@@ -653,6 +662,8 @@ async def add_camera(body: CameraInput, request: Request) -> dict[str, Any]:
         "cross_lines": _lines_to_stored(body.cross_lines),
         "face_zones": _include_to_stored(body.face_zones),
         "plate_zones": _include_to_stored(body.plate_zones),
+        "face_recognition": True if body.face_recognition is None else body.face_recognition,
+        "plate_recognition": True if body.plate_recognition is None else body.plate_recognition,
         "notify_on_cross": bool(body.notify_on_cross),
         "detect_width": width,
         "detect_height": height,
@@ -765,6 +776,10 @@ async def update_camera(name: str, body: CameraUpdate, request: Request) -> dict
         cam["face_zones"] = _include_to_stored(body.face_zones)
     if body.plate_zones is not None:
         cam["plate_zones"] = _include_to_stored(body.plate_zones)
+    if body.face_recognition is not None:
+        cam["face_recognition"] = body.face_recognition
+    if body.plate_recognition is not None:
+        cam["plate_recognition"] = body.plate_recognition
     if body.notify_on_cross is not None:
         cam["notify_on_cross"] = body.notify_on_cross
     if body.detect_enabled is not None:

@@ -325,6 +325,15 @@ export interface Camera {
    * never silently mute a camera.
    */
   notify_on_cross?: boolean;
+  /**
+   * WHETHER this camera runs face / plate recognition, as opposed to
+   * `face_zones` / `plate_zones` which say WHERE it looks. The zones cannot
+   * express "off" — [] means whole frame — so these are what keep a
+   * recognition pass off the ten cameras that watch a driveway at 30 m.
+   * Absent on an older backend; treat a missing value as ON.
+   */
+  face_recognition?: boolean;
+  plate_recognition?: boolean;
   detect: { enabled: boolean };
   record: { enabled: boolean };
   /**
@@ -403,6 +412,9 @@ export interface CameraInput {
   cross_lines?: CrossLine[];
   /** Alert only on a line crossing; omitted = keep server value. */
   notify_on_cross?: boolean;
+  /** Run face / plate recognition here; omitted = keep server value. */
+  face_recognition?: boolean;
+  plate_recognition?: boolean;
   /** Optional per-camera engine toggles; omitted = keep server value. */
   detect_enabled?: boolean;
   record_enabled?: boolean;
@@ -809,6 +821,22 @@ export interface AppSettings {
      * household setting the phone off every evening.
      */
     notify_mode: 'all' | 'unknown_only';
+    /**
+     * How many distinct shots of one face/vehicle are collected before the best
+     * is chosen, and the minimum gap between two of them. These are the real
+     * defence against a WRONG name: a false match comes from scoring a marginal
+     * crop, and the cure is having a better crop available. The gap matters as
+     * much as the count — without it the buffer fills with neighbouring frames
+     * of one stride, which is one look, not five.
+     */
+    shots_per_track: number;
+    shot_min_gap_seconds: number;
+    /** Seconds between face passes on one tracked object. Lower looks harder. */
+    pass_interval_seconds: number;
+    /** Look for a face on vehicles too — the driver through a windscreen. */
+    face_on_vehicles: boolean;
+    /** Crop quality required before an embedding is computed. Lower is riskier. */
+    identify_quality: number;
   };
   detection: {
     model: DetectionModel;

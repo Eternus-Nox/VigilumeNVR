@@ -425,6 +425,39 @@ class RecognitionSettings(BaseModel):
     # enrolled people and vehicles. A Literal, so a typo is a 422 rather than a
     # value that silently behaves as "all" and floods the phone.
     notify_mode: Literal["all", "unknown_only"] = "all"
+    # How many distinct shots of one face/vehicle are kept to choose the best
+    # from. More shots means a better chance one of them is legible, which is
+    # what actually suppresses false matches: a marginal crop scored against the
+    # gallery is where a wrong name comes from, and the fix is to have a better
+    # crop available rather than to raise the threshold.
+    #
+    # The cost is bounded and small — each shot is a cropped JPEG held in memory
+    # for the length of one track — but it is not free, and past ~10 the shots
+    # stop being distinct moments and start being neighbouring frames. Only
+    # cameras with recognition switched ON pay it at all.
+    shots_per_track: int = Field(default=5, ge=1, le=12)
+    # Minimum seconds between two retained shots. This is what makes the buffer
+    # hold DIFFERENT MOMENTS rather than five copies of one stride — the single
+    # most important knob for getting a usable face out of a walk-past, and the
+    # reason raising shots_per_track alone does not help much.
+    shot_min_gap_seconds: float = Field(default=0.4, ge=0.05, le=5.0)
+    # Seconds between face passes on ONE tracked object. Lower looks harder: at
+    # 0.2 a person crossing a doorway is sampled every frame of a 5 fps detect
+    # stream instead of every third, which is how a brief side-on glance still
+    # yields one usable shot. The cost is linear in passes and paid only on
+    # cameras with recognition on.
+    pass_interval_seconds: float = Field(default=0.6, ge=0.1, le=5.0)
+    # Look for a face on VEHICLES too, not just people — a driver through a
+    # windscreen. Off by default because it is a real cost on a busy road for a
+    # crop that is usually glare, and because a plate is the better identifier
+    # for a car. Worth turning on for a driveway or a gate.
+    face_on_vehicles: bool = False
+    # Quality a crop must reach before an embedding is computed from it.
+    # LOWERING THIS IS NOT FREE and is not "more accurate": a marginal crop
+    # produces a marginal vector, which is precisely where a WRONG NAME comes
+    # from. It is exposed so an operator who is missing people entirely can
+    # trade the other way knowingly, not as a general accuracy dial.
+    identify_quality: float = Field(default=0.45, ge=0.15, le=0.9)
 
 
 class AppSettings(BaseModel):

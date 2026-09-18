@@ -326,6 +326,35 @@ DEFAULT_SETTINGS: dict = {
         #                    and I could not tell who" is the case you most want
         #                    to hear about.
         "notify_mode": "all",
+        # How many distinct shots of one face/vehicle are collected before the
+        # best is chosen, and the minimum gap between two of them.
+        #
+        # These two are the real defence against a WRONG NAME. A false match
+        # comes from scoring a marginal crop against the gallery, and the cure
+        # is having a better crop to score — not a higher threshold, which only
+        # trades wrong names for missed ones. The gap matters as much as the
+        # count: without it the buffer fills with five neighbouring frames of
+        # one stride, which is one look, not five.
+        #
+        # Paid only by cameras with recognition switched on (cameras.
+        # face_recognition / plate_recognition), which is why per-camera
+        # selection and these two numbers are one feature and not two.
+        "shots_per_track": 5,
+        "shot_min_gap_seconds": 0.4,
+        # Seconds between face passes on one tracked object. Lower looks harder
+        # and costs proportionally more; 0.2 samples every frame of a 5 fps
+        # detect stream, which is what catches a brief side-on glance.
+        "pass_interval_seconds": 0.6,
+        # Look for a face on VEHICLES as well as people — the driver through the
+        # windscreen. Off by default: on a busy road it is a real cost for a crop
+        # that is usually glare, and a plate identifies a car better anyway. It
+        # earns its keep on a driveway or at a gate.
+        "face_on_vehicles": False,
+        # Quality a crop must reach before it is worth embedding. Lowering it is
+        # NOT a general accuracy win — a marginal crop yields a marginal vector,
+        # which is exactly where a wrong name comes from. Exposed so an operator
+        # missing people entirely can make that trade knowingly.
+        "identify_quality": 0.45,
     },
     "notifications": {
         "enabled": True,

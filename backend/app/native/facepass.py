@@ -68,7 +68,10 @@ from typing import Any, Optional, Sequence
 import numpy as np
 
 from . import zones as zonelib
-from .bestshot import BestShotBuffer, Shot, score_face
+from .bestshot import (
+    KEEP_SHOTS, MIN_GAP_S, BestShotBuffer, Shot, clamp_setting, score_face,
+    shot_params,
+)
 from .recognition import Gallery, Match, to_blob
 from .heatmap import HeatmapAccumulator
 from .recognizer import FaceRecognizer, crop_with_origin
@@ -93,8 +96,15 @@ REIDENTIFY_IMPROVEMENT = 0.15
 #: can clip the top of the head, and YuNet wants a little context.
 PERSON_CROP_PAD = 0.08
 
-#: Only these labels get a face pass.
+#: Labels that always get a face pass.
 FACE_LABELS = ("person",)
+
+#: Labels that get one only when settings.recognition.face_on_vehicles is
+#: set — the driver through a windscreen. Kept separate from FACE_LABELS
+#: because it is a genuinely different trade: on a road-facing camera most
+#: windscreens are glare, and a plate identifies a car better than a face
+#: does. On a driveway or at a gate it is the only way to get the driver.
+VEHICLE_FACE_LABELS = ("car", "truck", "bus", "motorcycle")
 
 #: Hard cap on the rolling candidate store. Age-based purging is the primary
 #: control (settings.recognition.candidate_retention_days); this is the backstop
@@ -147,6 +157,19 @@ class FacePass:
         self._db = db
         self._images_dir = Path(images_dir)
         self._tracks: dict[tuple[str, int], _TrackState] = {}
+        # Shot-buffer shape, refreshed from settings on the maintenance
+        # tick. Held here rather than read per-frame because a settings
+        # lookup in the per-observation path would cost more than the crop
+        # it is sizing. Applied to tracks STARTED after a change; a track
+        # already in flight keeps the buffer it was built with, which is
+        # correct — resizing mid-visit would discard shots already chosen.
+        self._shots = KEEP_SHOTS
+        self._shot_gap = MIN_GAP_S
+        self._pass_interval = PASS_INTERVAL_S
+        self._identify_quality = IDENTIFY_QUALITY
+        # Which labels this pass looks at. Recomputed on the tick so that
+        # turning face_on_vehicles on takes effect without a restart.
+        self._labels: tuple[str, ...] = FACE_LABELS
         # Where faces are actually legible on each camera — the map the ROI
         # editor draws over the live frame. Accumulated in memory and flushed
         # on the maintenance tick.
@@ -208,9 +231,16 @@ class FacePass:
         """
         if frame_bgr is None or not self._recognizer.ready:
             return
+        # Per-camera opt-out, checked BEFORE any work. This is the cheapest
+        # possible exit and the point of the switch: a camera watching a
+        # driveway at 30 m cannot produce a legible face, so every millisecond
+        # spent detecting one there is wasted and every crop it does produce is
+        # a marginal one that can only make a FALSE MATCH more likely.
+        if not getattr(cam, "face_recognition", True):
+            return
         camera = cam.row.get("name", "")
         try:
-            people = [o for o in observations if o.label in FACE_LABELS]
+            people = [o for o in observations if o.label in self._labels]
             if not people:
                 return
             # ROI: only look where a face is actually legible. Empty means the
@@ -232,11 +262,14 @@ class FacePass:
         key = (camera, obs.tracker_id)
         st = self._tracks.get(key)
         if st is None:
-            st = _TrackState(camera=camera)
+            st = _TrackState(
+                camera=camera,
+                buffer=BestShotBuffer(keep=self._shots, min_gap_s=self._shot_gap),
+            )
             self._tracks[key] = st
         if event_fid:
             st.event_fid = event_fid
-        if frame_time - st.last_pass < PASS_INTERVAL_S:
+        if frame_time - st.last_pass < self._pass_interval:
             return
         st.last_pass = frame_time
 
@@ -273,7 +306,7 @@ class FacePass:
         )
 
         best = st.buffer.best(obs.tracker_id, "face")
-        if best is None or best.quality.total < IDENTIFY_QUALITY:
+        if best is None or best.quality.total < self._identify_quality:
             return
         already = st.identified_from
         if already is not None and best.quality.total - already < REIDENTIFY_IMPROVEMENT:
@@ -482,6 +515,15 @@ class FacePass:
     async def _tick(self, settings: Any) -> None:
         cfg = (settings.get() or {}).get("recognition") or {}
         enabled = bool(cfg.get("enabled"))
+        self._shots, self._shot_gap = shot_params(cfg)
+        self._pass_interval = clamp_setting(
+            cfg.get('pass_interval_seconds'), PASS_INTERVAL_S, 0.1, 5.0)
+        self._identify_quality = clamp_setting(
+            cfg.get('identify_quality'), IDENTIFY_QUALITY, 0.15, 0.9)
+        self._labels = (
+            FACE_LABELS + VEHICLE_FACE_LABELS
+            if cfg.get('face_on_vehicles') else FACE_LABELS
+        )
 
         if enabled and not self._recognizer.ready:
             # load() downloads on first use and never raises; a box with no

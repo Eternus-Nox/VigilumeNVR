@@ -3399,3 +3399,37 @@ label > select {
   font: inherit;
   text-decoration: underline;
 }
+
+/* Which cameras recognize. A table, not a card grid: the question is "compare
+   these two columns down a list of names", which is what a table is for. */
+.recog-camera-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 0.6rem;
+  font-size: 0.85rem;
+}
+
+.recog-camera-table th,
+.recog-camera-table td {
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border, rgba(148, 163, 184, 0.2));
+}
+
+.recog-camera-table th:not(:first-child),
+.recog-camera-table td:not(:first-child) {
+  text-align: center;
+  width: 5.5rem;
+}
+
+.recog-camera-table th {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary, #94a3b8);
+  font-weight: 600;
+}
+
+.recog-camera-table tr:last-child td {
+  border-bottom: 0;
+}

@@ -15,7 +15,22 @@ import aiosqlite
 
 from .config import DEFAULT_DETECT_OBJECTS
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
+
+
+def _col_or(row: Any, name: str, default: Any) -> Any:
+    """Read a column that a row might not have, without exploding.
+
+    `sqlite3.Row` raises IndexError for a name it does not carry rather than
+    returning None, so a row selected from a table that predates a column — a
+    synthetic upgrade fixture, or a connection opened mid-migration — takes down
+    the whole read. This keeps such a row answerable at its documented default.
+    """
+    try:
+        value = row[name]
+    except (IndexError, KeyError):
+        return default
+    return default if value is None else value
 
 #: The recognition tables, SEPARATE from _SCHEMA and run on EVERY boot.
 #:
@@ -186,6 +201,17 @@ CREATE TABLE IF NOT EXISTS cameras (
     -- an upgraded box keeps working before anyone draws anything.
     face_zones      TEXT NOT NULL DEFAULT '[]',
     plate_zones     TEXT NOT NULL DEFAULT '[]',
+    -- WHETHER this camera runs recognition at all, distinct from WHERE it looks.
+    --
+    -- The zones above could not express "off": '[]' means whole frame, so before
+    -- these columns existed, switching recognition on ran a face pass on every
+    -- camera in the system. That is the wrong default for a 12-camera box where
+    -- two doorways see faces worth reading and the rest see a driveway at 30 m.
+    --
+    -- Default 1 so enabling these columns changes NOTHING on an upgrade — the
+    -- operator prunes down rather than discovering recognition silently stopped.
+    face_recognition  INTEGER NOT NULL DEFAULT 1,
+    plate_recognition INTEGER NOT NULL DEFAULT 1,
     created_at      REAL NOT NULL
 );
 
@@ -742,6 +768,32 @@ class Database:
                 # as v22 — that _SCHEMA runs every boot — which is why the table
                 # was missing on every upgraded box. See _RECOGNITION_SCHEMA.
                 pass
+            if version < 24:
+                # v24: per-camera recognition switches. Until now the zones were
+                # the only per-camera control and they cannot express "off" —
+                # '[]' means whole frame — so turning recognition on ran a face
+                # pass on EVERY camera.
+                #
+                # Both default to 1, so this migration is a no-op for behaviour:
+                # an upgraded box recognizes exactly what it did yesterday and
+                # the operator turns cameras OFF rather than finding recognition
+                # silently stopped. Guarded on the cameras table existing, and
+                # each column checked individually, matching v20/v21/v22.
+                cur = await self.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cameras'"
+                )
+                if await cur.fetchone() is not None:
+                    existing = [
+                        r[1] for r in await (
+                            await self.conn.execute("PRAGMA table_info(cameras)")
+                        ).fetchall()
+                    ]
+                    for _col in ("face_recognition", "plate_recognition"):
+                        if _col not in existing:
+                            await self.conn.execute(
+                                f"ALTER TABLE cameras ADD COLUMN {_col} "
+                                "INTEGER NOT NULL DEFAULT 1"
+                            )
         if version < SCHEMA_VERSION:
             await self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         await self.conn.commit()
@@ -778,6 +830,11 @@ class Database:
             # [] = whole frame (correct, just slower).
             "face_zones": json.loads(row["face_zones"]),
             "plate_zones": json.loads(row["plate_zones"]),
+            # WHETHER this camera recognizes, as opposed to where it looks.
+            # Keyed off the row with a default of True so a camera row read
+            # back from a pre-v24 fixture still answers.
+            "face_recognition": bool(_col_or(row, "face_recognition", 1)),
+            "plate_recognition": bool(_col_or(row, "plate_recognition", 1)),
             "detect_width": row["detect_width"],
             "detect_height": row["detect_height"],
             "detect_fps": row["detect_fps"],
@@ -827,6 +884,7 @@ class Database:
         INSERT INTO cameras (name, friendly_name, model, ip, username, password,
                              detect_objects, exempt_zones, include_zones, cross_lines,
                              notify_on_cross, face_zones, plate_zones,
+                             face_recognition, plate_recognition,
                              detect_width, detect_height,
                              detect_fps, audio_events, detect_enabled, record_enabled,
                              capabilities, source, position, main_url, sub_url,
@@ -835,6 +893,7 @@ class Database:
         VALUES (:name, :friendly_name, :model, :ip, :username, :password,
                 :detect_objects, :exempt_zones, :include_zones, :cross_lines,
                 :notify_on_cross, :face_zones, :plate_zones,
+                :face_recognition, :plate_recognition,
                 :detect_width, :detect_height,
                 :detect_fps, :audio_events, :detect_enabled, :record_enabled,
                 :capabilities, :source,
@@ -854,6 +913,11 @@ class Database:
             "notify_on_cross": int(cam.get("notify_on_cross") or False),
             "face_zones": json.dumps(cam.get("face_zones") or []),
             "plate_zones": json.dumps(cam.get("plate_zones") or []),
+            # Default TRUE when the key is absent, matching the column
+            # default: a caller that predates these fields must not silently
+            # switch recognition off for the camera it is saving.
+            "face_recognition": int(cam.get("face_recognition", True)),
+            "plate_recognition": int(cam.get("plate_recognition", True)),
             "capabilities": json.dumps(cam.get("capabilities") or {}),
             "audio_events": int(cam.get("audio_events", True)),
             "detect_enabled": int(cam.get("detect_enabled", True)),
@@ -896,6 +960,8 @@ class Database:
                 notify_on_cross = excluded.notify_on_cross,
                 face_zones    = excluded.face_zones,
                 plate_zones   = excluded.plate_zones,
+                face_recognition  = excluded.face_recognition,
+                plate_recognition = excluded.plate_recognition,
                 detect_width  = excluded.detect_width,
                 detect_height = excluded.detect_height,
                 detect_fps    = excluded.detect_fps,

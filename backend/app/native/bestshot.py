@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Iterable, Optional, Sequence
+from typing import Any, Iterable, Optional, Sequence
 
 import cv2
 import numpy as np
@@ -81,6 +81,46 @@ MIN_GAP_S = 0.4
 #: point `best()` correctly returns nothing and the event carries no
 #: recognition, rather than a confident reading of a smear.
 MIN_QUALITY = 0.25
+
+
+def clamp_setting(value: Any, default: float, lo: float, hi: float) -> float:
+    """A numeric setting, clamped, with every bad shape falling back.
+
+    Settings reach the passes from a maintenance tick. An exception there takes
+    recognition down, so a missing key, None, a string, or NaN must all degrade
+    to the shipped default rather than raise — and an out-of-range number is
+    clamped to the same bounds the API validates against, so a document written
+    by an older or hand-edited client cannot push a pass somewhere the UI would
+    not let you.
+    """
+    try:
+        number = float(default if value is None else value)
+    except (TypeError, ValueError):
+        return default
+    if number != number:  # NaN compares false against both bounds
+        return default
+    return max(lo, min(hi, number))
+
+
+def shot_params(cfg: Any) -> tuple[int, float]:
+    """(shots, min gap) from a `settings.recognition` dict, clamped.
+
+    Shared by both passes so one malformed settings document cannot give faces
+    and plates different buffer shapes. Every failure mode — missing key, None,
+    a string, a number out of range — falls back to the shipped default rather
+    than raising: this is called from a maintenance tick, and an exception there
+    would take recognition down over a typo in a settings field.
+
+    The ceilings match the API's validators. They are not arbitrary: past ~12
+    shots the buffer stops holding distinct moments and starts holding
+    neighbouring frames, and a gap over a few seconds outlives most walk-pasts
+    so the buffer never fills at all.
+    """
+    cfg = cfg if isinstance(cfg, dict) else {}
+    return (
+        int(clamp_setting(cfg.get("shots_per_track"), KEEP_SHOTS, 1, 12)),
+        clamp_setting(cfg.get("shot_min_gap_seconds"), MIN_GAP_S, 0.05, 5.0),
+    )
 
 #: Face embedding models in the permissive tier take a 112x112 aligned crop.
 #: A face arriving at least this wide needs no upscaling, so it is the point

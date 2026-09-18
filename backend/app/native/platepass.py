@@ -43,7 +43,9 @@ from typing import Any, Optional, Sequence
 import numpy as np
 
 from . import zones as zonelib
-from .bestshot import BestShotBuffer, Shot, score_plate
+from .bestshot import (
+    KEEP_SHOTS, MIN_GAP_S, BestShotBuffer, Shot, score_plate, shot_params,
+)
 from .heatmap import HeatmapAccumulator
 from .plates import OCR_MIN_CONFIDENCE, PlateReader, candidate_regions, deskew, is_vehicle
 from .recognition import Gallery, Match, PlateRead, PlateVote, normalize_plate, vote_plate
@@ -111,6 +113,12 @@ class PlatePass:
         self._db = db
         self._images_dir = Path(images_dir)
         self._tracks: dict[tuple[str, int], _TrackState] = {}
+        # Shot-buffer shape, refreshed from settings in run(). More shots
+        # matter MORE for plates than for faces: the pass OCRs every
+        # retained shot and votes per character, so each extra distinct
+        # look is another independent vote against a misread.
+        self._shots = KEEP_SHOTS
+        self._shot_gap = MIN_GAP_S
         # Shared with the face pass when both are running: one accumulator, two
         # kinds. Its own instance when constructed standalone (tests).
         self.heatmap = heatmap if heatmap is not None else HeatmapAccumulator(db)
@@ -153,6 +161,12 @@ class PlatePass:
         """Look for a plate on the confirmed vehicles in this frame. Never raises."""
         if frame_bgr is None or not self._reader.ready:
             return
+        # Per-camera opt-out, checked before any work — see the twin in
+        # facepass. A camera that never sees a plate at a readable angle costs
+        # localization on every vehicle and returns only marginal crops, which
+        # is exactly where a WRONG PLATE comes from.
+        if not getattr(cam, "plate_recognition", True):
+            return
         camera = cam.row.get("name", "")
         try:
             vehicles = [o for o in observations if is_vehicle(o.label)]
@@ -176,7 +190,10 @@ class PlatePass:
         key = (camera, obs.tracker_id)
         st = self._tracks.get(key)
         if st is None:
-            st = _TrackState(camera=camera)
+            st = _TrackState(
+                camera=camera,
+                buffer=BestShotBuffer(keep=self._shots, min_gap_s=self._shot_gap),
+            )
             self._tracks[key] = st
         if event_fid:
             st.event_fid = event_fid
@@ -418,6 +435,7 @@ class PlatePass:
             try:
                 cfg = (settings.get() or {}).get("recognition") or {}
                 enabled = bool(cfg.get("enabled"))
+                self._shots, self._shot_gap = shot_params(cfg)
                 if enabled and not self._reader.ready:
                     if await self._reader.load():
                         await self.reload_gallery()

@@ -73,6 +73,11 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
     candidate_retention_days: 14,
     notify_grace_seconds: 4,
     notify_mode: 'all' as 'all' | 'unknown_only',
+    shots_per_track: 5,
+    shot_min_gap_seconds: 0.4,
+    pass_interval_seconds: 0.6,
+    face_on_vehicles: false,
+    identify_quality: 0.45,
     ...(savedRecognition ?? {}),
     ...(pending.recognition ?? {}),
   });
@@ -554,6 +559,106 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
                     — keep the window no longer than you need. 0 keeps nothing, which also
                     means there is nothing to enroll from. Faces already enrolled against a
                     person are kept until you delete that person.
+                  </span>
+                </label>
+                <label>
+                  Shots collected per face or vehicle
+                  <input
+                    type="number"
+                    min={1}
+                    max={12}
+                    step={1}
+                    value={recognition.shots_per_track}
+                    onChange={(e) =>
+                      setRecognition({
+                        ...recognition,
+                        shots_per_track: Math.min(12, Math.max(1, Math.floor(Number(e.target.value) || 5))),
+                      })
+                    }
+                  />
+                  <span className="control-hint">
+                    The best of these is what gets read. More shots is the real defence
+                    against a <em>wrong</em> name: a false match comes from scoring a
+                    marginal crop, and the cure is having a better one available — not a
+                    stricter threshold, which only trades wrong names for missed ones.
+                    Past about 10 the extra shots stop being distinct moments.
+                  </span>
+                </label>
+                <label>
+                  Minimum gap between shots (seconds)
+                  <input
+                    type="number"
+                    min={0.05}
+                    max={5}
+                    step={0.05}
+                    value={recognition.shot_min_gap_seconds}
+                    onChange={(e) =>
+                      setRecognition({
+                        ...recognition,
+                        shot_min_gap_seconds: Math.min(5, Math.max(0.05, Number(e.target.value) || 0.4)),
+                      })
+                    }
+                  />
+                  <span className="control-hint">
+                    This matters as much as the count. Without a gap the buffer fills with
+                    neighbouring frames of one stride — five samples of one pose, which is
+                    worth barely more than one.
+                  </span>
+                </label>
+                <label>
+                  Look again every (seconds)
+                  <input
+                    type="number"
+                    min={0.1}
+                    max={5}
+                    step={0.1}
+                    value={recognition.pass_interval_seconds}
+                    onChange={(e) =>
+                      setRecognition({
+                        ...recognition,
+                        pass_interval_seconds: Math.min(5, Math.max(0.1, Number(e.target.value) || 0.6)),
+                      })
+                    }
+                  />
+                  <span className="control-hint">
+                    How often each tracked person or vehicle is checked for a face. 0.2
+                    looks every frame of a 5&nbsp;fps detect stream instead of every third,
+                    which is how a brief side-on glance still yields one usable shot. Costs
+                    CPU in proportion, and only on the cameras you ticked.
+                  </span>
+                </label>
+                <label className="row-label">
+                  <input
+                    type="checkbox"
+                    checked={recognition.face_on_vehicles}
+                    onChange={(e) =>
+                      setRecognition({ ...recognition, face_on_vehicles: e.target.checked })
+                    }
+                  />
+                  Also look for faces on vehicles
+                </label>
+                <span className="control-hint">
+                  The driver through the windscreen. Off by default: on a road-facing
+                  camera most windscreens are glare, and a plate identifies a car better
+                  than a face does. It earns its keep on a driveway or at a gate.
+                </span>
+                <label>
+                  Crop quality needed to identify: {Math.round(recognition.identify_quality * 100)}%
+                  <input
+                    type="range"
+                    min={0.15}
+                    max={0.9}
+                    step={0.05}
+                    value={recognition.identify_quality}
+                    onChange={(e) =>
+                      setRecognition({ ...recognition, identify_quality: Number(e.target.value) })
+                    }
+                  />
+                  <span className="control-hint">
+                    <strong>Lowering this is not &ldquo;more accurate&rdquo;.</strong> A
+                    marginal crop produces a marginal reading, which is precisely where a
+                    wrong name comes from. Lower it only if people are being missed
+                    entirely, and prefer more shots and a shorter interval first.
                   </span>
                 </label>
               </>

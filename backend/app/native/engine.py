@@ -390,6 +390,13 @@ class _CameraState:
     face_zones: list[tuple[str, Any]] = field(default_factory=list)
     # Detect-space PLATE regions of interest. Same contract as face_zones.
     plate_zones: list[tuple[str, Any]] = field(default_factory=list)
+    # WHETHER this camera recognizes at all, as opposed to where it looks.
+    # The zones cannot express this: an empty zone list means WHOLE FRAME,
+    # so without these a box with recognition on ran a face pass on every
+    # camera it had. Default True, matching the column default, so a camera
+    # row from before the switches existed behaves as it always did.
+    face_recognition: bool = True
+    plate_recognition: bool = True
     # tracker_id -> (hit count, last seen epoch)
     hits: dict[int, tuple[int, float]] = field(default_factory=dict)
     latest_frame: Optional[np.ndarray] = None
@@ -567,6 +574,13 @@ class DetectionEngine:
             # rebuilding it on every unrelated reload — a camera rename, a
             # privacy toggle — would forget which side of the line everyone was
             # on and silently drop the crossing in progress.
+            # Assigned unconditionally, OUTSIDE the geometry_key guard
+            # below: these are scalars, not geometry, and folding them into
+            # that key would rebuild every zone polygon each time someone
+            # ticked a checkbox. Leaving them out of the guard entirely is
+            # what makes the switch take effect on the next reload.
+            state.face_recognition = bool(row.get("face_recognition", True))
+            state.plate_recognition = bool(row.get("plate_recognition", True))
             geometry_key = (
                 repr(row.get("include_zones") or []),
                 repr(row.get("cross_lines") or []),
