@@ -3188,6 +3188,14 @@ label > select {
   color: var(--warning, #fbbf24);
 }
 
+/* Icon-only: an unmatched face, where there is no name to print. Square padding
+   and no gap so it reads as a round badge rather than a chip someone forgot to
+   put a label in. The meaning lives on aria-label and the tooltip. */
+.recog-chip-iconly {
+  gap: 0;
+  padding: 0.18rem;
+}
+
 /* A plate is a string of ambiguous glyphs; a monospaced face is what keeps
    0 apart from O at this size. */
 .recog-chip-plate {

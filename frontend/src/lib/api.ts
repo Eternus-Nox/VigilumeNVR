@@ -546,6 +546,21 @@ export function recognitionLabel(r: EventRecognition): string {
   return r.kind === 'face' ? 'Unknown face' : 'Unread plate';
 }
 
+/**
+ * The part of the label worth PRINTING, or null when there is none.
+ *
+ * A name and a plate number are information — "Unknown face" is not. Spelling
+ * out the absence of an answer costs a whole chip's width on a thumbnail to say
+ * nothing, so those render icon-only and the wording moves to the accessible
+ * label. Note an unmatched PLATE still returns its digits: it was read, nobody
+ * is enrolled for it, and the number is exactly what the operator wants.
+ */
+export function recognitionText(r: EventRecognition): string | null {
+  if (r.known && r.name) return r.name;
+  if (r.plate) return r.plate;
+  return null;
+}
+
 /** A profile names a PERSON or a VEHICLE. The API says "person"/"vehicle". */
 export type ProfileKind = 'person' | 'vehicle';
 /** A candidate crop is a FACE or a PLATE — the sighting, not the identity. */

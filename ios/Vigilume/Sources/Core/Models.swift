@@ -372,6 +372,19 @@ struct EventRecognition: Codable, Sendable, Hashable, Identifiable {
         if !plate.isEmpty { return plate }
         return isFace ? "Unknown face" : "Unread plate"
     }
+
+    /// The part of `displayText` worth PRINTING, or nil when there is none.
+    ///
+    /// A name and a plate number are information; "Unknown face" is not — it
+    /// spends a badge's width on a thumbnail to say nothing, so that case shows
+    /// the icon alone and the wording moves to the accessibility label. An
+    /// unmatched PLATE still returns its digits: it was read, nobody is
+    /// enrolled for it, and the number is exactly what the operator wants.
+    var printableText: String? {
+        if known && !name.isEmpty { return name }
+        if !plate.isEmpty { return plate }
+        return nil
+    }
 }
 
 struct Event: Decodable, Identifiable, Sendable, Equatable {

@@ -41,19 +41,26 @@ struct RecognitionBadge: View {
     private var tint: Color { isKnown ? Theme.success : Theme.warning }
 
     var body: some View {
-        HStack(spacing: 4) {
+        // nil text means an unmatched face: the icon alone, in a round badge.
+        // Spelling out "Unknown face" costs a badge's width on a thumbnail to
+        // say nothing, and the wording survives on accessibilityLabel below.
+        let text = recognition.printableText
+
+        return HStack(spacing: text == nil ? 0 : 4) {
             Image(systemName: icon)
                 .font(compact ? .caption2 : .caption)
-            Text(recognition.displayText)
-                .font((compact ? Font.caption2 : Font.caption).weight(.semibold))
-                .lineLimit(1)
-                // Plates are strings of ambiguous glyphs; a monospaced face is
-                // what makes 0 vs O legible at this size.
-                .monospaced(!recognition.plate.isEmpty && !isKnown)
+            if let text {
+                Text(text)
+                    .font((compact ? Font.caption2 : Font.caption).weight(.semibold))
+                    .lineLimit(1)
+                    // Plates are strings of ambiguous glyphs; a monospaced face
+                    // is what makes 0 vs O legible at this size.
+                    .monospaced(!recognition.plate.isEmpty && !isKnown)
+            }
         }
         .foregroundStyle(tint)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 2)
+        .padding(.horizontal, text == nil ? 3 : 6)
+        .padding(.vertical, text == nil ? 3 : 2)
         .background(Capsule().fill(tint.opacity(0.14)))
         .accessibilityLabel(
             isKnown
