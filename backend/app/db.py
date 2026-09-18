@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import aiosqlite
 
@@ -1113,6 +1113,46 @@ class Database:
             # primary `label` so every event always exposes at least one label.
             "labels": json.loads(row["labels"]) or [row["label"]],
         }
+
+    async def recognitions_for(self, fids: "Sequence[str]") -> dict[str, list[dict[str, Any]]]:
+        """Recognitions keyed by event frigate_id, for a batch of events.
+
+        One query for the whole page rather than one per event: the events list
+        asks for up to 1000 rows and a per-row lookup would be 1000 round trips
+        on a screen that has to feel instant.
+
+        Rows are returned oldest-first per event, so the FIRST recognition of a
+        kind is the one a caller showing a single line should use.
+        """
+        wanted = [f for f in dict.fromkeys(fids) if f]
+        if not wanted:
+            return {}
+        out: dict[str, list[dict[str, Any]]] = {}
+        # Chunked to stay clear of SQLite's variable limit (999 by default) —
+        # exactly the page size the timeline asks for.
+        for i in range(0, len(wanted), 400):
+            chunk = wanted[i : i + 400]
+            placeholders = ",".join("?" * len(chunk))
+            cur = await self.conn.execute(
+                "SELECT event_fid, kind, profile_id, name, plate, score, quality "
+                f"FROM event_recognitions WHERE event_fid IN ({placeholders}) "
+                "ORDER BY created_at ASC",
+                chunk,
+            )
+            for r in await cur.fetchall():
+                out.setdefault(r["event_fid"], []).append({
+                    "kind": r["kind"],
+                    "profile_id": r["profile_id"],
+                    "name": r["name"],
+                    "plate": r["plate"],
+                    "score": r["score"],
+                    "quality": r["quality"],
+                    # profile_id NULL means a face WAS read and belonged to
+                    # nobody enrolled. Named explicitly so a client does not
+                    # have to infer "unknown" from a missing key.
+                    "known": r["profile_id"] is not None,
+                })
+        return out
 
     async def insert_event(
         self,

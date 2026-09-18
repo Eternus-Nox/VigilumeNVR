@@ -399,6 +399,72 @@ def roi_zone_checks(client: TestClient, h: dict) -> None:
     check(r.status_code == 204, "clearing a heatmap is idempotent")
 
 
+def event_recognition_checks(client: TestClient, h: dict) -> None:
+    """Recognition reaches the events API — the screen people actually look at."""
+    print("\nrecognition on event rows")
+    db = app.state.db
+
+    async def _seed() -> int:
+        cur = await db.conn.execute(
+            "INSERT INTO events (frigate_id, camera, label, count, score, start_time, "
+            "has_clip, has_snapshot, zones, box, labels) "
+            "VALUES ('native.evt-1','drive','person',1,0.9,1000.0,0,0,'[]','[]','[]')"
+        )
+        eid = cur.lastrowid
+        await db.conn.execute(
+            "INSERT INTO event_recognitions (event_fid, kind, profile_id, name, plate, "
+            "score, quality, image_path, created_at) "
+            "VALUES ('native.evt-1','face',NULL,'','',0.2,0.7,'',1000.0)"
+        )
+        await db.conn.execute(
+            "INSERT INTO event_recognitions (event_fid, kind, profile_id, name, plate, "
+            "score, quality, image_path, created_at) "
+            "VALUES ('native.evt-1','plate',NULL,'','7ABC123',0.0,0.8,'',1001.0)"
+        )
+        await db.conn.commit()
+        return eid
+
+    eid = _run(_seed())
+
+    r = client.get(f"/api/events/{eid}", headers=h)
+    check(r.status_code == 200, "the event detail loads")
+    recs = r.json().get("recognitions")
+    check(isinstance(recs, list) and len(recs) == 2,
+          f"both recognitions are attached (got {recs})")
+    check(recs[0]["kind"] == "face" and recs[0]["known"] is False,
+          "an unmatched face is reported as a face that matched NOBODY, "
+          "not as a missing recognition")
+    check(recs[1]["plate"] == "7ABC123", "the plate read comes through")
+    check([x["kind"] for x in recs] == ["face", "plate"],
+          "ordered oldest-first, so the first of a kind is the one to show")
+
+    r = client.get("/api/events", headers=h)
+    listed = [e for e in r.json()["events"] if e["id"] == eid]
+    check(listed and len(listed[0].get("recognitions") or []) == 2,
+          "and the LIST carries them too — one query for the page, not one per row")
+    others = [e for e in r.json()["events"] if e["id"] != eid]
+    check(all(e.get("recognitions") == [] for e in others),
+          "events with no recognition carry an empty list, not a missing key")
+
+    # A viewer sees recognition on an event even though /api/recognition is
+    # admin-only: the snapshot already shows the face, so withholding the label
+    # while serving the photograph would protect nothing. Pinned so the
+    # decision is deliberate rather than accidental.
+    vr = client.post("/api/users", headers=h, json={
+        "username": "recogviewer", "password": "password12", "role": "viewer"})
+    if vr.status_code in (200, 201):
+        tok = client.post("/api/auth/login", json={
+            "username": "recogviewer", "password": "password12"}).json().get("token")
+        vh = {"Authorization": f"Bearer {tok}"}
+        rv = client.get(f"/api/events/{eid}", headers=vh)
+        check(rv.status_code == 200, "a viewer can open the event")
+        check(len(rv.json().get("recognitions") or []) == 2,
+              "and DOES see its recognitions — the aggregate register stays "
+              "admin-only, one label beside a visible face does not")
+        check(client.get("/api/recognition/profiles", headers=vh).status_code == 403,
+              "...while the profile register itself stays 403 for them")
+
+
 def status_checks(client: TestClient, h: dict) -> None:
     print("\nstatus")
     r = client.get("/api/recognition/status", headers=h)
@@ -419,6 +485,7 @@ def main() -> int:
         enroll_checks(client, h, adam, truck)
         traversal_checks(client, h)
         roi_zone_checks(client, h)
+        event_recognition_checks(client, h)
         status_checks(client, h)
     print(f"\nALL {PASS} CHECKS PASSED (recognition profiles API)")
     return 0

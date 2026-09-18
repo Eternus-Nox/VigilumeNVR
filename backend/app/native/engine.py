@@ -458,10 +458,28 @@ class DetectionEngine:
     def set_face_pass(self, face: Optional[Any]) -> None:
         """Inject the face pass. Safe before or after start()."""
         self._face = face
+        self._wire_recognition_hook()
 
     def set_plate_pass(self, plates: Optional[Any]) -> None:
         """Inject the plate pass. Safe before or after start()."""
         self._plates = plates
+        self._wire_recognition_hook()
+
+    def _wire_recognition_hook(self) -> None:
+        """Give the passes a way to announce a recognition on a LIVE event.
+
+        Called from BOTH set_pipeline and the two pass setters, because the
+        wiring order is not fixed and getting it wrong is silent: main.py
+        happens to call set_pipeline first, so wiring only there would have
+        found no passes and left every alert unnamed with nothing to show for
+        it. Idempotent, so being called three times costs nothing.
+        """
+        note = getattr(self._pipeline, "note_recognition", None)
+        if note is None:
+            return
+        for pass_ in (self._face, self._plates):
+            if pass_ is not None:
+                pass_.on_recognition = note
 
     @property
     def recognition_model_key(self) -> str:
@@ -483,6 +501,7 @@ class DetectionEngine:
         """Late-bound: the pipeline needs the media provider, which needs
         this engine — main.py wires the cycle up in that order."""
         self._pipeline = pipeline
+        self._wire_recognition_hook()
 
     # ---------- lifecycle ----------
 

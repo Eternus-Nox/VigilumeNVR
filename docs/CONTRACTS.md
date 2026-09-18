@@ -975,6 +975,54 @@ Unmatched faces are deduplicated by cosine before being stored, so one stranger
 seen twelve times is one row to review. `cameras.face_zones` gates the pass
 entirely — a person outside the ROI gets no face work at all.
 
+#### Recognition on events and alerts
+
+`GET /api/events` and `GET /api/events/{id}` carry `recognitions[]`:
+`{kind, profile_id, name, plate, score, quality, known}`. `known: false` means a
+face or plate was READ and matched nobody enrolled — an answer, not a missing
+one, and the row an unknown-subject alert is built from. Empty (never absent) on
+a box that never enabled recognition. One indexed query per page, not per row.
+
+**ANY-AUTH, unlike `/api/recognition` which is admin-only even for reads.** The
+two are consistent: what is gated there is the AGGREGATE (a named register of
+everyone who visits, a gallery of strangers' faces); what is exposed here is one
+name beside one event whose snapshot already shows that person's face to the
+same viewer. Withholding the label while serving the photograph would protect
+nothing.
+
+**The notification gate** (`EventsPipeline._recognition_gate`). Recognition
+finishes a few frames after an object is confirmed — after the event has already
+opened — so an alert sent immediately can never name anyone. Two settings:
+
+- `recognition.notify_grace_seconds` (default 4, 0 disables) — how long a
+  person/vehicle alert is HELD while recognition decides. Applies only while
+  recognition is enabled and only to `RECOGNIZABLE_LABELS`; a dog is never held
+  for a face that will not come.
+- `recognition.notify_mode` — `"all"` names a known subject in the alert;
+  `"unknown_only"` stays silent for enrolled people and vehicles. That is the
+  setting that stops your own household setting the phone off every evening.
+
+Rules that are easy to get backwards and are pinned in
+`recognition_notify_smoke`:
+
+- A hold is a **deferral, never a drop** — `notified` stays False and every
+  update re-decides, exactly like the crossing gate. It returns **before** the
+  cooldown check, so a held alert cannot burn the cooldown the real one needs.
+- **An expired hold always sends.** "Someone was here and I could not tell who"
+  is the case most worth hearing about.
+- **A recognition that matched nobody ends the hold immediately** — that is an
+  answer, and an unknown face should alert as fast as a known one is named.
+- `unknown_only` **suppresses permanently** (sets `notified`), never defers;
+  deferring would fire the very alert that was opted out of once the hold ran
+  out.
+
+Recognitions reach the pipeline **live** via `note_recognition`, called by the
+passes the moment they identify — not when they store, which happens at track
+end, long after the subject has walked away. The hook is wired from
+`set_pipeline` **and** both pass setters because main.py's ordering calls
+`set_pipeline` first, and wiring in only one place left every alert unnamed with
+nothing on screen to show for it.
+
 #### Plate pipeline (`native/plates.py`, `native/platepass.py`)
 
 **NO LEARNED PLATE DETECTOR SHIPS, deliberately.** Every accurate license-plate

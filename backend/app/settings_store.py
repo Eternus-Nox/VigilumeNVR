@@ -155,6 +155,18 @@ class SettingsStore:
         return self._cached["detection"]
 
     @property
+    def recognition(self) -> dict[str, Any]:
+        """Face/plate recognition settings.
+
+        ``.get(...)`` on the result rather than indexing, because a /data
+        volume written before recognition existed has no such block and must
+        keep working — the merge over DEFAULT_SETTINGS normally supplies it,
+        but this property is read on the notification hot path and a KeyError
+        there would cost an alert.
+        """
+        return self._cached.get("recognition") or {}
+
+    @property
     def recording(self) -> dict[str, Any]:
         return self._cached["recording"]
 

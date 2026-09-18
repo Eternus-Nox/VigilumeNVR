@@ -345,6 +345,35 @@ struct LabelsResponse: Decodable, Sendable {
 
 // MARK: - Events
 
+/// One thing recognition read on an event: a face matched to a person, a plate
+/// read off a vehicle, or either of those having matched NOBODY.
+///
+/// `known == false` with a non-empty `plate` is the useful unmatched case —
+/// the plate was read clearly, it just belongs to no enrolled vehicle. For a
+/// face, unknown means exactly that: a face was read and nobody enrolled
+/// matches it, which is the row a security alert is built from.
+struct EventRecognition: Codable, Sendable, Hashable, Identifiable {
+    /// "face" | "plate".
+    let kind: String
+    let profileId: Int?
+    let name: String
+    let plate: String
+    let score: Double
+    let quality: Double
+    let known: Bool
+
+    var id: String { "\(kind)|\(profileId ?? -1)|\(plate)|\(score)" }
+    var isFace: Bool { kind == "face" }
+
+    /// What to put on a row. Never empty, so a caller does not have to decide
+    /// what an unlabelled recognition means.
+    var displayText: String {
+        if known && !name.isEmpty { return name }
+        if !plate.isEmpty { return plate }
+        return isFace ? "Unknown face" : "Unread plate"
+    }
+}
+
 struct Event: Decodable, Identifiable, Sendable, Equatable {
     let id: Int
     let frigateId: String
@@ -362,6 +391,19 @@ struct Event: Decodable, Identifiable, Sendable, Equatable {
     let hasClip: Bool
     let hasSnapshot: Bool
     let zones: [String]
+    /// What recognition read here. Absent on a backend predating the feature,
+    /// and empty on a box that never enabled it.
+    let recognitions: [EventRecognition]?
+
+    /// The one recognition worth a row in a list: a named person first (that is
+    /// the most informative thing an event can say), then a plate, then an
+    /// explicit unknown. nil when recognition read nothing at all.
+    var headlineRecognition: EventRecognition? {
+        guard let recognitions, !recognitions.isEmpty else { return nil }
+        return recognitions.first(where: { $0.known && !$0.name.isEmpty })
+            ?? recognitions.first(where: { !$0.plate.isEmpty })
+            ?? recognitions.first
+    }
 
     /// Every detected class to show, de-duplicated and never empty: the `labels`
     /// list when present, else just `[label]`. Order preserves the wire order
@@ -407,10 +449,22 @@ struct EventDetail: Decodable, Identifiable, Sendable {
     let snapshotUrl: String
     let recordEnabled: Bool
     let clipState: ClipState
+    /// What recognition read here (see EventRecognition). nil on an older
+    /// backend, empty on a box that never enabled recognition.
+    let recognitions: [EventRecognition]?
 
     /// Every detected class to show (de-duplicated, primary first, never empty).
     var allLabels: [String] {
         Event.resolveLabels(primary: label, labels: labels)
+    }
+
+    /// Same precedence as Event.headlineRecognition: a named person, then a
+    /// plate, then an explicit unknown.
+    var headlineRecognition: EventRecognition? {
+        guard let recognitions, !recognitions.isEmpty else { return nil }
+        return recognitions.first(where: { $0.known && !$0.name.isEmpty })
+            ?? recognitions.first(where: { !$0.plate.isEmpty })
+            ?? recognitions.first
     }
 }
 

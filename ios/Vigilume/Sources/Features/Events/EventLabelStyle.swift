@@ -18,3 +18,47 @@ enum EventLabelStyle {
         colors[label] ?? Color(hex: 0x94A3B8)
     }
 }
+
+/// The one recognition worth showing beside an event.
+///
+/// A NAMED subject reads as a positive identification and a UNKNOWN one as a
+/// caution, so they are visually distinct — but the distinction is carried by
+/// the icon and the wording as much as the colour, because "unknown person at
+/// the door" is exactly the row that must not depend on colour perception.
+struct RecognitionBadge: View {
+    let recognition: EventRecognition
+    var compact: Bool = false
+
+    private var isKnown: Bool { recognition.known && !recognition.name.isEmpty }
+
+    private var icon: String {
+        if recognition.isFace {
+            return isKnown ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.questionmark"
+        }
+        return isKnown ? "car.circle.fill" : "car.circle"
+    }
+
+    private var tint: Color { isKnown ? Theme.success : Theme.warning }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(compact ? .caption2 : .caption)
+            Text(recognition.displayText)
+                .font((compact ? Font.caption2 : Font.caption).weight(.semibold))
+                .lineLimit(1)
+                // Plates are strings of ambiguous glyphs; a monospaced face is
+                // what makes 0 vs O legible at this size.
+                .monospaced(!recognition.plate.isEmpty && !isKnown)
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Capsule().fill(tint.opacity(0.14)))
+        .accessibilityLabel(
+            isKnown
+                ? "Recognized \(recognition.displayText)"
+                : (recognition.isFace ? "Unrecognized face" : "Plate \(recognition.displayText)")
+        )
+    }
+}

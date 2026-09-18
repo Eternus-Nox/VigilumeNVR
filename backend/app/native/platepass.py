@@ -103,7 +103,10 @@ class PlatePass:
         db: Any,
         images_dir: Path,
         heatmap: Optional[HeatmapAccumulator] = None,
+        on_recognition: Optional[Any] = None,
     ) -> None:
+        # See FacePass.on_recognition — the live hook, not the stored row.
+        self.on_recognition = on_recognition
         self._reader = reader
         self._db = db
         self._images_dir = Path(images_dir)
@@ -249,6 +252,29 @@ class PlatePass:
                 "recognized %s (%s) on %s from %d read(s)",
                 st.match.name, st.vote.text, st.camera, st.vote.reads,
             )
+        self._announce(st)
+
+    def _announce(self, st: _TrackState) -> None:
+        """Tell the events pipeline what the plate reads, while the event lives.
+
+        Announced even when it matched NOBODY: an unmatched plate still belongs
+        in the alert ("plate 7ABC123"), which is the whole point of reading one
+        on a vehicle that is not enrolled.
+        """
+        if self.on_recognition is None or not st.event_fid or st.vote is None:
+            return
+        if st.vote.confidence < MIN_VOTE_CONFIDENCE:
+            return
+        try:
+            self.on_recognition(
+                st.event_fid, "plate",
+                name=st.match.name if (st.match and st.match.matched) else "",
+                profile_id=st.match.profile_id if (st.match and st.match.matched) else None,
+                plate=st.vote.text,
+                score=st.match.score if st.match else 0.0,
+            )
+        except Exception:
+            log.exception("could not announce a plate recognition")
 
     # ---------- track end ----------
 

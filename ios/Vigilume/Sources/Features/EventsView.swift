@@ -410,6 +410,9 @@ private struct EventRowView: View {
                             .foregroundStyle(Theme.danger)
                     }
                 }
+                if let recognition = event.headlineRecognition {
+                    RecognitionBadge(recognition: recognition, compact: true)
+                }
                 Text(cameraName)
                     .font(.caption)
                     .foregroundStyle(Theme.textSecondary)

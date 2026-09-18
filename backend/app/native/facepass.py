@@ -136,7 +136,13 @@ class FacePass:
         recognizer: FaceRecognizer,
         db: Any,
         images_dir: Path,
+        on_recognition: Optional[Any] = None,
     ) -> None:
+        # Called the moment a track is identified, NOT when the row is stored.
+        # The stored row lands at track end, which for an alert is long after
+        # the person has walked away — so a notification that wants to say
+        # "Adam is at the door" has to hear about it here.
+        self.on_recognition = on_recognition
         self._recognizer = recognizer
         self._db = db
         self._images_dir = Path(images_dir)
@@ -291,6 +297,26 @@ class FacePass:
                 st.match.name, st.camera, st.match.score, st.match.margin,
                 shot.quality.total,
             )
+            self._announce(st)
+
+    def _announce(self, st: _TrackState) -> None:
+        """Tell the events pipeline who this is, while the event is still live.
+
+        Best-effort and never raises: recognition is an enhancement, and a
+        pipeline that has already closed the event (or a wiring that was never
+        made) must not cost the recognition itself.
+        """
+        if self.on_recognition is None or not st.event_fid or st.match is None:
+            return
+        try:
+            self.on_recognition(
+                st.event_fid, "face",
+                name=st.match.name,
+                profile_id=st.match.profile_id,
+                score=st.match.score,
+            )
+        except Exception:
+            log.exception("could not announce a face recognition")
 
     # ---------- track end ----------
 

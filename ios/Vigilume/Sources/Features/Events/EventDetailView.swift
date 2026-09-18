@@ -346,6 +346,23 @@ struct EventDetailView: View {
             if !detail.zones.isEmpty {
                 metaRow("Zones", detail.zones.map(\.capitalized).joined(separator: ", "))
             }
+            // EVERY recognition, not just the headline: a car arriving with a
+            // person in frame produces two, and collapsing them to one would
+            // hide the half the operator is looking for.
+            if let recognitions = detail.recognitions, !recognitions.isEmpty {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Recognized")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                        .frame(width: 92, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(recognitions) { recognition in
+                            RecognitionBadge(recognition: recognition)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
             metaRow("Event ID", "\(detail.id)")
         }
         .frame(maxWidth: .infinity, alignment: .leading)

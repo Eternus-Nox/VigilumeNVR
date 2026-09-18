@@ -198,15 +198,43 @@ async def list_events(
     limit: int = Query(default=50, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
-    events, total = await request.app.state.db.list_events(
+    db = request.app.state.db
+    events, total = await db.list_events(
         camera=camera, label=label, after=after, before=before, limit=limit, offset=offset
     )
+    events = await _with_recognitions(db, events)
     return {"events": events, "total": total}
+
+
+async def _with_recognitions(db: Any, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach `recognitions` to each event row.
+
+    ANY-AUTH, deliberately — unlike /api/recognition, which is admin-only even
+    for its reads.
+    
+    Those two decisions are consistent, not contradictory. What is gated there
+    is the AGGREGATE: a named register of everyone who visits this address, and
+    a rolling gallery of strangers' faces. What is exposed here is one name
+    beside one event whose snapshot already SHOWS that person's face to the same
+    viewer. Withholding the label while serving the photograph would protect
+    nothing and would make the feature useless on the screen people actually
+    look at.
+
+    Empty for every event on a box that never enabled recognition, so this costs
+    one indexed query and nothing else.
+    """
+    if not events:
+        return events
+    by_fid = await db.recognitions_for([e.get("frigate_id") for e in events])
+    if not by_fid:
+        return [{**e, "recognitions": []} for e in events]
+    return [{**e, "recognitions": by_fid.get(e.get("frigate_id"), [])} for e in events]
 
 
 @router.get("/{event_id}", dependencies=[Depends(require_auth)])
 async def get_event(event_id: int, request: Request) -> dict[str, Any]:
     event = await _get_event_or_404(request, event_id)
+    event = (await _with_recognitions(request.app.state.db, [event]))[0]
     record_enabled = await _record_enabled_for(request, event)
     # Additive fields (existing consumers keep working): record_enabled and a
     # derived clip_state let the UI show an accurate clip status instead of a

@@ -305,6 +305,27 @@ DEFAULT_SETTINGS: dict = {
         # store before it is purged. This is the biometric retention window;
         # 0 disables the rolling store entirely (matches are still recorded).
         "candidate_retention_days": 7,
+        # How long a person/vehicle alert is HELD while recognition decides who
+        # it is. Recognition needs a few frames; an alert sent the instant a
+        # person is confirmed can never name them.
+        #
+        # This buys the alert's usefulness with its latency, so it is an
+        # operator dial and not a constant. 0 disables the hold entirely
+        # (alerts fire immediately and are never named). The hold applies ONLY
+        # to labels recognition covers, only while recognition is enabled, and
+        # it ends the moment an identification lands — so the common case is
+        # far shorter than the ceiling.
+        "notify_grace_seconds": 4,
+        # Which recognized subjects are worth an alert:
+        #   "all"          — always alert; a known subject is NAMED in it.
+        #   "unknown_only" — stay silent for enrolled people and vehicles, and
+        #                    alert for everyone else. This is the setting that
+        #                    stops your own household setting the phone off
+        #                    every evening, and it is why an alert that could
+        #                    not identify anyone still fires: "someone was here
+        #                    and I could not tell who" is the case you most want
+        #                    to hear about.
+        "notify_mode": "all",
     },
     "notifications": {
         "enabled": True,

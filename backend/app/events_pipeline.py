@@ -333,6 +333,18 @@ class EventsPipeline:
             "enriching": False,
             # Running set of all classes seen during this event (order-preserving).
             "labels": labels,
+            # Live recognitions from the face/plate passes, keyed by kind. These
+            # arrive OUT OF BAND (note_recognition) rather than on the event
+            # payload, because recognition finishes on its own schedule — a few
+            # frames after the object is confirmed, which is already after this
+            # event opened.
+            "recognitions": [],
+            # The most recent payload, so `note_recognition` can re-run the
+            # notify decision immediately instead of waiting for the next frame.
+            "last_after": after,
+            # Deadline for the recognition hold. Monotonic so a clock step
+            # cannot strand an alert.
+            "opened_at": time.monotonic(),
         }
         row = await self._db.get_event(event_id)
         if row:
@@ -347,6 +359,9 @@ class EventsPipeline:
             await self._on_new(fid, after)
             return
         camera, label = after["camera"], after["label"]
+        # Kept current so a recognition landing between frames re-runs the
+        # notify decision against this payload rather than the opening one.
+        state["last_after"] = after
         count = self.current_count(camera, label)
         state["max_count"] = max(state["max_count"], count)
         update_fields: dict[str, Any] = {
@@ -522,6 +537,115 @@ class EventsPipeline:
     def _click_url(self, event_id: int) -> str:
         return f"{self._settings.public_url}/events/{event_id}"
 
+    #: Labels the recognition passes can say something about. Anything else
+    #: (a dog, a parcel) must never wait on a recognition that will not come.
+    RECOGNIZABLE_LABELS = ("person", "car", "truck", "bus", "motorcycle", "van")
+
+    def note_recognition(
+        self,
+        fid: str,
+        kind: str,
+        *,
+        name: str = "",
+        profile_id: Optional[int] = None,
+        plate: str = "",
+        score: float = 0.0,
+    ) -> None:
+        """A recognition pass identified something on a LIVE event.
+
+        Called by FacePass/PlatePass the moment they identify, not when they
+        store — the stored row lands at track end, which for an alert is long
+        after the person has walked away.
+
+        Re-runs the notification check, because the alert may have been held
+        precisely for this.
+        """
+        state = self._active.get(fid)
+        if state is None:
+            return
+        state.setdefault("recognitions", []).append({
+            "kind": kind,
+            "name": name,
+            "profile_id": profile_id,
+            "plate": plate,
+            "score": float(score),
+        })
+        if not state.get("notified"):
+            # The hold exists to wait for exactly this. Re-check now rather than
+            # on the next frame's update, so a named alert is not delayed by a
+            # further heartbeat.
+            self._spawn(self._renotify(fid))
+
+    async def _renotify(self, fid: str) -> None:
+        state = self._active.get(fid)
+        after = state.get("last_after") if state else None
+        if state is None or not after:
+            return
+        try:
+            await self._maybe_notify_object(fid, after, state)
+        except Exception:
+            log.exception("re-notify after recognition failed for %s", fid)
+
+    def _recognition_gate(
+        self, after: dict[str, Any], state: dict[str, Any]
+    ) -> tuple[bool, str]:
+        """Should this alert go now, and what should it be called?
+
+        Returns ``(send_now, name)``. A False means DEFER, never drop — the
+        same contract as the crossing gate: the event, clip and snapshot are
+        being recorded either way, `notified` stays False, and every later
+        update re-runs this.
+
+        Three outcomes:
+          * recognition off / label not recognizable / hold elapsed -> send
+          * a KNOWN subject, mode "unknown_only"                    -> suppress
+          * still inside the hold with nothing identified yet       -> defer
+        """
+        rs = self._settings.recognition
+        if not rs.get("enabled"):
+            return True, ""
+        label = (after.get("label") or "").lower()
+        if label not in self.RECOGNIZABLE_LABELS:
+            return True, ""
+
+        recognitions = state.get("recognitions") or []
+        known = [r for r in recognitions if r.get("profile_id") is not None]
+        if known:
+            if str(rs.get("notify_mode") or "all") == "unknown_only":
+                # Suppress PERMANENTLY, not defer: this subject is enrolled and
+                # the operator asked not to hear about enrolled subjects. Marking
+                # it notified is what stops the next update re-deciding.
+                state["notified"] = True
+                log.info(
+                    "alert suppressed on %s — recognized %s (unknown_only)",
+                    after.get("camera"), known[0].get("name") or "a known subject",
+                )
+                return False, ""
+            return True, known[0].get("name") or ""
+
+        if recognitions:
+            # A recognition landed and matched NOBODY. That is an answer, not a
+            # missing one, so the hold is over: an unknown face should alert as
+            # fast as a known one is named. Waiting out the rest of the window
+            # here would delay precisely the alert that matters most, for
+            # information that has already arrived.
+            return True, ""
+
+        # Nothing identified yet at all. Hold, but only for as long as the
+        # operator allowed — and then send ANYWAY. "Someone was here and I could
+        # not tell who" is the case most worth hearing about, so an expired hold
+        # must never swallow the alert.
+        try:
+            grace = float(rs.get("notify_grace_seconds", 4))
+        except (TypeError, ValueError):
+            grace = 4.0
+        if grace <= 0:
+            return True, ""
+        opened = state.get("opened_at")
+        if opened is None or (time.monotonic() - opened) >= grace:
+            return True, ""
+        return False, ""
+
     async def _maybe_notify_object(self, fid: str, after: dict[str, Any], state: dict[str, Any]) -> None:
         if state["notified"]:
             return
@@ -542,6 +666,13 @@ class EventsPipeline:
             # cooldown check matters: a deferred notification must not burn the
             # cooldown that the real one will need.
             return
+        send_now, recognized_name = self._recognition_gate(after, state)
+        if not send_now:
+            # DEFERRED (or suppressed — the gate sets `notified` itself in that
+            # case). Returning BEFORE the cooldown check matters for the same
+            # reason it does on the crossing gate: a held notification must not
+            # burn the cooldown the real one will need.
+            return
         if not self._cooldown_ok((camera, label), float(ns.get("cooldown_seconds", 60))):
             return
         state["notified"] = True
@@ -560,6 +691,16 @@ class EventsPipeline:
         else:
             title = f"{label.replace('_', ' ').capitalize()} detected at {friendly}"
             body = f"{annotate.plural_label(label, count)} in frame"
+        if recognized_name:
+            # A name is the most useful thing an alert can carry, so it LEADS
+            # rather than being appended: the notification is read from a lock
+            # screen where the tail is truncated.
+            title = f"{recognized_name} at {friendly}"
+            body = f"Recognized {recognized_name}"
+        plate = next((r.get("plate") for r in (state.get("recognitions") or [])
+                      if r.get("plate")), "")
+        if plate and not recognized_name:
+            body = f"{body} — plate {plate}"
         has_snapshot = state.get("snap_time") is not None
         await self._send_notification(
             title=title,
