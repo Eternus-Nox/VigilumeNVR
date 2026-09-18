@@ -943,6 +943,31 @@ class Database:
             "created_at": cam.get("created_at") or time.time(),
         }
 
+    async def set_camera_recognition(
+        self, name: str, *, face: Optional[bool] = None, plate: Optional[bool] = None
+    ) -> None:
+        """Flip one camera's recognition switches, touching nothing else.
+
+        A targeted UPDATE rather than a read-modify-upsert. `upsert_camera`
+        rewrites every column, so using it here would make a checkbox tick race
+        with any other edit in flight and silently win — the classic lost
+        update. Two integers is all this needs to write.
+        """
+        sets, params = [], []
+        if face is not None:
+            sets.append("face_recognition = ?")
+            params.append(int(face))
+        if plate is not None:
+            sets.append("plate_recognition = ?")
+            params.append(int(plate))
+        if not sets:
+            return
+        params.append(name)
+        await self.conn.execute(
+            f"UPDATE cameras SET {', '.join(sets)} WHERE name = ?", params
+        )
+        await self.conn.commit()
+
     async def upsert_camera(self, cam: dict[str, Any]) -> None:
         await self.conn.execute(
             self._CAMERA_INSERT_SQL

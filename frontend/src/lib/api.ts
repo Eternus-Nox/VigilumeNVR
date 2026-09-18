@@ -1598,6 +1598,22 @@ export const api = {
   cameras: () => request<Camera[]>('/api/cameras'),
   addCamera: (cam: CameraInput) =>
     request<Camera>('/api/cameras', { method: 'POST', body: JSON.stringify(cam) }),
+  /**
+   * Flip ONE camera's recognition switches. A dedicated route, not updateCamera.
+   *
+   * `PUT /api/cameras/{name}` is a "save the camera" operation: it probes the
+   * physical device over the network, regenerates the go2rtc config, reloads
+   * the engine, restarts the recorder's ffmpeg writers and resyncs doorbells.
+   * Driving that from a checkbox made the click take seconds and bounced the
+   * recording pipeline. This one writes two integers and re-reads the camera
+   * rows, which is all the recognition passes need.
+   */
+  setCameraRecognition: (name: string, body: { face?: boolean; plate?: boolean }) =>
+    request<{ name: string; face_recognition: boolean; plate_recognition: boolean }>(
+      `/api/cameras/${encodeURIComponent(name)}/recognition`,
+      { method: 'PUT', body: JSON.stringify(body) },
+    ),
+
   updateCamera: (name: string, cam: CameraInput) =>
     request<Camera>(`/api/cameras/${encodeURIComponent(name)}`, {
       method: 'PUT',

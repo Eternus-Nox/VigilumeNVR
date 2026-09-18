@@ -55,6 +55,11 @@ export default function RecognitionTab() {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  // Which camera rows are mid-save. PER ROW, not the page-wide `busy`:
+  // freezing every control on the tab while one checkbox saved is what made
+  // this feel like a stall, and ticking three cameras in a row is the normal
+  // way to use this table.
+  const [camBusy, setCamBusy] = useState<Set<string>>(new Set());
   const [newName, setNewName] = useState('');
   const [confirm, setConfirm] = useState<
     | { kind: 'profile'; id: number; name: string }
@@ -161,34 +166,44 @@ export default function RecognitionTab() {
   /**
    * Turn recognition on or off for ONE camera.
    *
-   * `PUT /api/cameras/{name}` is a full-body update, so the identity fields have
-   * to be resent — but every OPTIONAL field left out is kept server-side, and
-   * empty credentials mean "keep the stored ones". So this names the identity
-   * plus the single flag and touches nothing else: it cannot clobber a zone, an
-   * RTSP override or a detect toggle set from another screen.
+   * OPTIMISTIC: the checkbox moves at once and is rolled back if the save
+   * fails. The round trip is short now (see api.setCameraRecognition) but it is
+   * still a round trip, and a checkbox that waits for the network to agree
+   * before it moves reads as broken.
    */
   const toggleCamera = async (cam: Camera, field: 'face' | 'plate') => {
     const key = field === 'face' ? 'face_recognition' : 'plate_recognition';
-    const next = !(cam[key] ?? true);
-    setBusy(true);
+    const previous = cam[key] ?? true;
+    const next = !previous;
+    setCameras((prev) => prev.map((c) => (c.name === cam.name ? { ...c, [key]: next } : c)));
+    setCamBusy((prev) => new Set(prev).add(cam.name));
     try {
-      await api.updateCamera(cam.name, {
-        name: cam.name,
-        friendly_name: cam.friendly_name,
-        model: cam.model,
-        ip: cam.ip,
-        username: '',
-        password: '',
-        [key]: next,
-      });
+      const saved = await api.setCameraRecognition(cam.name, { [field]: next });
+      // Adopt what the server actually stored rather than assuming `next` —
+      // the two flags are returned together, so a value changed elsewhere
+      // shows up here instead of being overwritten by this row's guess.
       setCameras((prev) =>
-        prev.map((c) => (c.name === cam.name ? { ...c, [key]: next } : c)),
+        prev.map((c) =>
+          c.name === cam.name
+            ? {
+                ...c,
+                face_recognition: saved.face_recognition,
+                plate_recognition: saved.plate_recognition,
+              }
+            : c,
+        ),
       );
     } catch (e) {
       fail(e, 'Could not update the camera');
-      await reload();
+      setCameras((prev) =>
+        prev.map((c) => (c.name === cam.name ? { ...c, [key]: previous } : c)),
+      );
     } finally {
-      setBusy(false);
+      setCamBusy((prev) => {
+        const nextSet = new Set(prev);
+        nextSet.delete(cam.name);
+        return nextSet;
+      });
     }
   };
 
@@ -332,7 +347,7 @@ export default function RecognitionTab() {
                     <input
                       type="checkbox"
                       checked={c.face_recognition ?? true}
-                      disabled={busy}
+                      disabled={camBusy.has(c.name)}
                       aria-label={`Recognize faces on ${c.friendly_name || c.name}`}
                       onChange={() => void toggleCamera(c, 'face')}
                     />
@@ -341,7 +356,7 @@ export default function RecognitionTab() {
                     <input
                       type="checkbox"
                       checked={c.plate_recognition ?? true}
-                      disabled={busy}
+                      disabled={camBusy.has(c.name)}
                       aria-label={`Read plates on ${c.friendly_name || c.name}`}
                       onChange={() => void toggleCamera(c, 'plate')}
                     />

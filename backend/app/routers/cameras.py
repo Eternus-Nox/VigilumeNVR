@@ -1038,6 +1038,55 @@ async def get_device_settings(name: str, request: Request) -> dict[str, Any]:
     return result
 
 
+class RecognitionToggle(BaseModel):
+    """Whether a camera runs face / plate recognition. Omitted = leave alone."""
+
+    face: Optional[bool] = None
+    plate: Optional[bool] = None
+
+
+@router.put("/{name}/recognition", dependencies=[Depends(require_admin)])
+async def set_camera_recognition(
+    name: str, body: RecognitionToggle, request: Request
+) -> dict[str, Any]:
+    """Flip this camera's recognition switches. NOTHING ELSE.
+
+    A SEPARATE ROUTE FROM `PUT /{name}`, and that is the whole point of it.
+    The full update is a "save the camera" operation: it probes the physical
+    device over the network for its capabilities (up to _PROBE_TIMEOUT_S, and a
+    slow or offline camera spends all of it), then regenerates the go2rtc
+    config, reloads the engine, RESTARTS THE RECORDER's ffmpeg writers and
+    resyncs the doorbell watchers.
+
+    All of that is correct when someone changes an IP or a model. Driving it
+    from a checkbox was a mistake: it made the click take seconds, and it
+    bounced the recording pipeline for a flag that only the recognition passes
+    ever read.
+
+    So this route writes two integers and calls `engine.reload()` — a re-read of
+    the camera rows, which is the only thing needed for the passes to see the
+    change. No device I/O, no go2rtc, no recorder restart, no dropped frames.
+    """
+    await _get_cam_or_404(request, name)
+    if body.face is None and body.plate is None:
+        raise HTTPException(status_code=400, detail="Nothing to change")
+    state = request.app.state
+    await state.db.set_camera_recognition(name, face=body.face, plate=body.plate)
+    # Engine only. It re-reads the camera rows, which is what makes the switch
+    # take effect; every other reconciler in _apply_camera_change is about
+    # streams, and no stream is affected by this.
+    try:
+        await state.engine.reload()
+    except Exception:  # noqa: BLE001 — a skeleton engine must not fail the save
+        log.exception("engine reload after a recognition toggle on %s failed", name)
+    cam = await _get_cam_or_404(request, name)
+    return {
+        "name": name,
+        "face_recognition": bool(cam.get("face_recognition", True)),
+        "plate_recognition": bool(cam.get("plate_recognition", True)),
+    }
+
+
 @router.put("/{name}/settings", dependencies=[Depends(require_admin)])
 async def put_device_settings(name: str, body: DeviceSettingsPatch, request: Request) -> dict[str, Any]:
     cam = await _get_cam_or_404(request, name)
