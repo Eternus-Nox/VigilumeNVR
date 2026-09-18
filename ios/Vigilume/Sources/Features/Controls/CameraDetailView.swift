@@ -104,6 +104,41 @@ struct CameraDetailView: View {
 
     @State private var controlTab: ControlTab = .ptz
 
+    /// The single alert this view presents, derived from the two things that
+    /// can fail independently. A control failure wins when both are pending;
+    /// the talk one is not lost, it simply presents next (see the dismissal
+    /// binding on the `.alert` modifier).
+    private enum ActiveAlert: Identifiable {
+        case control(String)
+        case talk(String)
+
+        var id: String {
+            switch self {
+            case .control(let message): return "control:\(message)"
+            case .talk(let message): return "talk:\(message)"
+            }
+        }
+
+        var title: String {
+            switch self {
+            case .control: return "Camera control"
+            case .talk: return "Two-way talk"
+            }
+        }
+
+        var message: String {
+            switch self {
+            case .control(let message), .talk(let message): return message
+            }
+        }
+    }
+
+    private var activeAlert: ActiveAlert? {
+        if let controlError { return .control(controlError) }
+        if let message = talk.alertMessage { return .talk(message) }
+        return nil
+    }
+
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
@@ -208,27 +243,35 @@ struct CameraDetailView: View {
                 break
             }
         }
+        // ONE alert modifier for both failure sources. Two `.alert` modifiers on
+        // the SAME view do not both present — SwiftUI honours one and silently
+        // drops the other — so as two separate modifiers, either a control
+        // failure or a talk failure was being swallowed with nothing on screen
+        // to explain it. (SingleCameraView solves the same problem the other
+        // legal way, by hanging its second alert off a different view.)
+        //
+        // Derived from the two sources rather than stored, because
+        // `talk.alertMessage` lives on the TalkController and is set from
+        // outside this view; mirroring it into local state would leave two
+        // copies to keep in step.
         .alert(
-            "Camera control",
+            activeAlert?.title ?? "",
             isPresented: Binding(
-                get: { controlError != nil },
-                set: { if !$0 { controlError = nil } }
-            )
-        ) {
+                get: { activeAlert != nil },
+                // Clear the one being PRESENTED, in the same precedence order
+                // the getter uses, so a talk failure that arrived while the
+                // control alert was up still gets its turn instead of being
+                // dismissed unseen along with it.
+                set: { if !$0 {
+                    if controlError != nil { controlError = nil }
+                    else { talk.alertMessage = nil }
+                } }
+            ),
+            presenting: activeAlert
+        ) { _ in
             Button("OK", role: .cancel) {}
-        } message: {
-            Text(controlError ?? "")
-        }
-        .alert(
-            "Two-way talk",
-            isPresented: Binding(
-                get: { talk.alertMessage != nil },
-                set: { if !$0 { talk.alertMessage = nil } }
-            )
-        ) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(talk.alertMessage ?? "")
+        } message: { alert in
+            Text(alert.message)
         }
         .confirmationDialog(
             "Reboot \(camera.friendlyName)?",
