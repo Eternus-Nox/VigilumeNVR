@@ -143,6 +143,14 @@ class CameraInput(BaseModel):
     # explicit [] clears them.
     include_zones: Optional[list[IncludeZone]] = None
     cross_lines: Optional[list[CrossLine]] = None
+    # Recognition regions of interest. Same None/[] contract again, but the
+    # CONSEQUENCE is the opposite of include_zones: these do not filter
+    # detection at all, they only mark where a face or plate is legible enough
+    # to be worth a recognition pass. An empty list means the whole frame,
+    # which is correct and merely slower — so unlike an include zone, a
+    # degenerate one here cannot blind anything.
+    face_zones: Optional[list[IncludeZone]] = None
+    plate_zones: Optional[list[IncludeZone]] = None
     # "Only alert me when something crosses a line on this camera." None
     # (omitted) = keep stored on update / off on create. Gates the NOTIFICATION
     # only — the event, its clip and its snapshot are recorded either way — and
@@ -216,6 +224,14 @@ class CameraInput(BaseModel):
             if len(pts) >= 3:
                 cleaned.append(ExemptZone(name=zone.name.strip(), points=pts))
         return cleaned
+
+    @field_validator("face_zones", "plate_zones")
+    @classmethod
+    def _clean_roi(cls, v: Optional[list[IncludeZone]]) -> Optional[list[IncludeZone]]:
+        # Identical cleaning to include zones (clamp, drop under 3 points), but
+        # no blinding risk: an ROI that ends up empty just means "search the
+        # whole frame".
+        return cls._clean_include(v)
 
     @field_validator("include_zones")
     @classmethod
@@ -450,6 +466,9 @@ def _camera_response(
         # is stored, same as exempt_zones.
         "include_zones": list(cam.get("include_zones") or []),
         "cross_lines": list(cam.get("cross_lines") or []),
+        # Recognition ROIs, verbatim. [] means the whole frame.
+        "face_zones": list(cam.get("face_zones") or []),
+        "plate_zones": list(cam.get("plate_zones") or []),
         "notify_on_cross": bool(cam.get("notify_on_cross") or False),
         "detect": {"enabled": bool(cam.get("detect_enabled", True))},
         "record": {"enabled": bool(cam.get("record_enabled", True))},
@@ -632,6 +651,8 @@ async def add_camera(body: CameraInput, request: Request) -> dict[str, Any]:
         "exempt_zones": _zones_to_stored(body.exempt_zones),
         "include_zones": _include_to_stored(body.include_zones),
         "cross_lines": _lines_to_stored(body.cross_lines),
+        "face_zones": _include_to_stored(body.face_zones),
+        "plate_zones": _include_to_stored(body.plate_zones),
         "notify_on_cross": bool(body.notify_on_cross),
         "detect_width": width,
         "detect_height": height,
@@ -738,6 +759,12 @@ async def update_camera(name: str, body: CameraUpdate, request: Request) -> dict
         cam["include_zones"] = _include_to_stored(body.include_zones)
     if body.cross_lines is not None:
         cam["cross_lines"] = _lines_to_stored(body.cross_lines)
+    if body.face_zones is not None:
+        # Omitted keeps stored; an explicit [] clears them (back to searching
+        # the whole frame for faces).
+        cam["face_zones"] = _include_to_stored(body.face_zones)
+    if body.plate_zones is not None:
+        cam["plate_zones"] = _include_to_stored(body.plate_zones)
     if body.notify_on_cross is not None:
         cam["notify_on_cross"] = body.notify_on_cross
     if body.detect_enabled is not None:

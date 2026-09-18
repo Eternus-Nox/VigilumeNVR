@@ -37,6 +37,12 @@ struct CameraSettingsView: View {
     @State private var exemptZones: [ExemptZone] = []
     @State private var includeZones: [IncludeZone] = []
     @State private var crossLines: [CrossLine] = []
+    // Recognition ROIs are edited on their OWN screen, so this view only keeps
+    // enough to render "Whole frame" vs "Set". Held as state rather than read
+    // off `camera` (a `let`) so the row updates when the editor saves, instead
+    // of lying until the screen is revisited.
+    @State private var faceZones: [IncludeZone] = []
+    @State private var plateZones: [IncludeZone] = []
     @State private var notifyOnCross = false
     @State private var configSaving = false
 
@@ -121,6 +127,7 @@ struct CameraSettingsView: View {
                 detectionCard
                 streamsCard
                 zonesCard
+                recognitionZonesCard
                 credentialsCard
                 deviceCard
             }
@@ -322,6 +329,53 @@ struct CameraSettingsView: View {
         }
     }
 
+    // MARK: - Recognition regions
+
+    /// Where a face or a plate is worth LOOKING for — a different question from
+    /// the detection zones above, which decide what produces an event at all.
+    /// These never suppress anything; leaving them empty searches the whole
+    /// frame, which is correct and merely slower.
+    private var recognitionZonesCard: some View {
+        settingsCard("Recognition areas", systemImage: "viewfinder") {
+            NavigationLink {
+                RecognitionZoneEditor(camera: camera, kind: "face") { await reloadCamera() }
+            } label: {
+                recognitionZoneRow(
+                    title: "Face area",
+                    count: faceZones.count,
+                    systemImage: "person.crop.square"
+                )
+            }
+            NavigationLink {
+                RecognitionZoneEditor(camera: camera, kind: "plate") { await reloadCamera() }
+            } label: {
+                recognitionZoneRow(
+                    title: "Plate area",
+                    count: plateZones.count,
+                    systemImage: "car"
+                )
+            }
+            Text("These do NOT filter detection — they only mark where detail is legible enough to be worth a recognition pass. Each editor draws a heatmap of where sightings have actually been readable on this camera, which is usually not where people walk.")
+                .font(.caption2)
+                .foregroundStyle(Theme.textSecondary)
+        }
+    }
+
+    private func recognitionZoneRow(title: String, count: Int, systemImage: String) -> some View {
+        HStack {
+            Label(title, systemImage: systemImage)
+                .foregroundStyle(Theme.textPrimary)
+            Spacer()
+            Text(count == 0 ? "Whole frame" : "Set")
+                .font(.caption)
+                .foregroundStyle(count == 0 ? Theme.textSecondary : Theme.accent)
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Theme.textSecondary)
+        }
+        .contentShape(Rectangle())
+    }
+
     // MARK: - Credentials
 
     private var credentialsCard: some View {
@@ -440,6 +494,20 @@ struct CameraSettingsView: View {
         includeZones = camera.includeZones ?? []
         crossLines = camera.crossLines ?? []
         notifyOnCross = camera.notifyOnCross ?? false
+        faceZones = camera.faceZones ?? []
+        plateZones = camera.plateZones ?? []
+    }
+
+    /// Re-read this camera after the ROI editor saved, so the rows stop saying
+    /// "Whole frame" the moment they stop being true. Best-effort: a failed
+    /// refresh leaves a stale label, which is not worth an error dialog on a
+    /// screen the user has just returned to.
+    private func reloadCamera() async {
+        guard let api = session.api else { return }
+        guard let fresh = try? await api.cameras().first(where: { $0.name == camera.name })
+        else { return }
+        faceZones = fresh.faceZones ?? []
+        plateZones = fresh.plateZones ?? []
     }
 
     private func loadDeviceSettings() async {

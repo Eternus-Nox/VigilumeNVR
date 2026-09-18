@@ -340,16 +340,22 @@ class FaceRecognizer:
         }
 
 
-def crop_box(
+def crop_with_origin(
     frame_bgr: np.ndarray,
     box: Sequence[float],
     *,
     pad: float = 0.0,
-) -> Optional[np.ndarray]:
-    """Crop `box` from a frame, clamped to its bounds, optionally padded.
+) -> Optional[tuple[np.ndarray, int, int]]:
+    """Crop `box` from a frame, returning ``(crop, origin_x, origin_y)``.
+
+    The ORIGIN is why this exists separately from `crop_box`. Anything detected
+    inside the crop — a face found in a person box — comes back in the crop's
+    own coordinates, and is meaningless anywhere else until it is translated by
+    the offset the crop was taken at. Losing that offset is a silent bug: the
+    coordinates stay plausible and simply point at the wrong part of the frame.
 
     Returns None for a degenerate result rather than a zero-sized array, so
-    callers get one thing to check instead of two.
+    callers have one thing to check instead of two.
     """
     if frame_bgr is None or frame_bgr.size == 0:
         return None
@@ -362,4 +368,15 @@ def crop_box(
     xi2, yi2 = min(w, int(round(x2))), min(h, int(round(y2)))
     if xi2 - xi1 < 2 or yi2 - yi1 < 2:
         return None
-    return frame_bgr[yi1:yi2, xi1:xi2]
+    return frame_bgr[yi1:yi2, xi1:xi2], xi1, yi1
+
+
+def crop_box(
+    frame_bgr: np.ndarray,
+    box: Sequence[float],
+    *,
+    pad: float = 0.0,
+) -> Optional[np.ndarray]:
+    """`crop_with_origin` without the offset, for callers that stay in-crop."""
+    got = crop_with_origin(frame_bgr, box, pad=pad)
+    return None if got is None else got[0]

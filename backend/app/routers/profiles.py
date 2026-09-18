@@ -46,6 +46,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 
 from ..auth import require_admin, require_media_admin
+from ..native.heatmap import COLS, ROWS, suggest_zone
 from ..native.recognition import FACE_THRESHOLD, MIN_MARGIN, normalize_plate
 
 log = logging.getLogger(__name__)
@@ -574,6 +575,61 @@ async def candidate_image(candidate_id: int, request: Request) -> FileResponse:
 
 
 # ---------------------------------------------------------------------------
+# Heatmap — where recognition actually works
+# ---------------------------------------------------------------------------
+
+
+@router.get("/heatmap/{camera}")
+async def recognition_heatmap(
+    camera: str,
+    request: Request,
+    kind: str = Query(default="face"),
+) -> dict[str, Any]:
+    """The legibility map the ROI editor draws over the live frame.
+
+    Returns two flat arrays of `cols * rows` values: `counts` normalized 0..1
+    against the busiest cell (the absolute number means nothing to a person —
+    what they need is where, relatively) and `quality` as the MEAN bestshot
+    score in that cell, which is already absolute.
+
+    Rendered as density-for-opacity and quality-for-hue, that distinction is
+    the whole point: it separates "busy but unreadable" (the far pavement) from
+    "quiet but sharp" (the doorstep), which is exactly what decides where a
+    face zone should go and is invisible in a still frame.
+
+    `suggested_zone` is a rectangle over the cells with both real evidence and
+    usable quality — a starting point to drag, not a recommendation. It is
+    empty when there is not yet enough evidence to say anything, which the UI
+    shows as "watch for a while first".
+    """
+    if kind not in ("face", "plate"):
+        raise HTTPException(status_code=400, detail="kind must be 'face' or 'plate'")
+    heat = _heatmap(request)
+    if heat is None:
+        return {
+            "camera": camera, "kind": kind, "cols": COLS, "rows": ROWS,
+            "counts": [], "quality": [], "samples": 0, "peak": 0.0,
+            "updated_at": None, "suggested_zone": [],
+        }
+    grid = await heat.grid(camera, kind)
+    return {**grid, "suggested_zone": suggest_zone(grid)}
+
+
+@router.delete("/heatmap/{camera}", status_code=204)
+async def clear_recognition_heatmap(
+    camera: str,
+    request: Request,
+    kind: Optional[str] = Query(default=None),
+) -> Response:
+    """Forget a camera's map — for a camera that has been moved or re-aimed,
+    where everything it recorded about the old view is now a lie."""
+    heat = _heatmap(request)
+    if heat is not None:
+        await heat.clear(camera=camera, kind=kind)
+    return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
 # Status
 # ---------------------------------------------------------------------------
 
@@ -615,6 +671,17 @@ async def recognition_status(request: Request) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _heatmap(request: Request) -> Optional[Any]:
+    """The engine's heatmap accumulator, or None when recognition is not wired.
+
+    None is a normal state (a box that never enabled recognition), so every
+    caller degrades to an empty map rather than erroring.
+    """
+    engine = getattr(request.app.state, "engine", None)
+    face = getattr(engine, "_face", None) if engine is not None else None
+    return getattr(face, "heatmap", None)
 
 
 async def _require_profile(db: Any, profile_id: int) -> Any:

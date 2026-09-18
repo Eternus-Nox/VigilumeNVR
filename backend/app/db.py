@@ -15,7 +15,7 @@ import aiosqlite
 
 from .config import DEFAULT_DETECT_OBJECTS
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cameras (
@@ -221,6 +221,35 @@ CREATE TABLE IF NOT EXISTS event_recognitions (
     created_at  REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_event_recog ON event_recognitions(event_fid);
+
+-- WHERE recognition actually works on each camera, as a coarse grid.
+--
+-- This exists to answer the question the ROI editor otherwise leaves to guesswork:
+-- "where should I draw the face zone?". Drawing it where people WALK is the
+-- obvious guess and frequently the wrong one — the useful region is where a face
+-- is actually LEGIBLE, which depends on range, lens, and where the light is. So
+-- each cell accumulates both:
+--
+--   count       how many times a face/plate was seen centred in this cell
+--   quality_sum sum of bestshot quality for those sightings
+--
+-- count alone would draw a map of footfall; quality_sum/count is the part that
+-- says whether anything readable ever came from there. The UI renders density as
+-- opacity and mean quality as hue, so a busy-but-unreadable region looks visibly
+-- different from a quiet-but-sharp one.
+--
+-- Deliberately coarse and bounded: HEATMAP_COLS x HEATMAP_ROWS cells per
+-- (camera, kind), so a camera costs at most a few hundred tiny rows no matter
+-- how long it runs.
+CREATE TABLE IF NOT EXISTS recognition_heatmap (
+    camera      TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    cell        INTEGER NOT NULL,
+    count       INTEGER NOT NULL DEFAULT 0,
+    quality_sum REAL NOT NULL DEFAULT 0,
+    updated_at  REAL NOT NULL,
+    PRIMARY KEY (camera, kind, cell)
+);
 
 -- Camera reachability history, stored as TRANSITION intervals (one row per
 -- state, not per poll — 11 cams x 45 s would otherwise be ~21k rows/day). A row
@@ -671,6 +700,13 @@ class Database:
                                 f"ALTER TABLE cameras ADD COLUMN {_col} "
                                 "TEXT NOT NULL DEFAULT '[]'"
                             )
+            if version < 23:
+                # v23: recognition_heatmap — where faces/plates were actually
+                # seen, and how legible they were. Created by _SCHEMA's
+                # CREATE TABLE IF NOT EXISTS on every boot, so there is nothing
+                # to ALTER; the version bump is what records that an upgraded
+                # box now has it.
+                pass
         if version < SCHEMA_VERSION:
             await self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         await self.conn.commit()

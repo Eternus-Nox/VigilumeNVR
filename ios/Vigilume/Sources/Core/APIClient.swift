@@ -583,6 +583,64 @@ struct APIClient: Sendable {
         mediaURL("api/recognition/candidates/\(id)/image.jpg")
     }
 
+    /// ADMIN: GET /api/recognition/heatmap/{camera} — the legibility map the
+    /// ROI editor draws over the live frame.
+    func recognitionHeatmap(camera: String, kind: String) async throws -> RecognitionHeatmap {
+        try await get(
+            "api/recognition/heatmap/\(camera)",
+            query: [URLQueryItem(name: "kind", value: kind)]
+        )
+    }
+
+    /// ADMIN: save ONLY a camera's recognition ROIs.
+    ///
+    /// PUT /api/cameras/{name} is a partial update where an omitted field keeps
+    /// the stored value — so this sends the identity fields the route requires
+    /// and exactly one of the two zone lists. Sending a whole CameraUpdatePayload
+    /// built from a decoded Camera would be the obvious alternative and is a
+    /// trap: any field the editor did not think about would be written back
+    /// from whatever the client last decoded, silently reverting a change made
+    /// elsewhere.
+    ///
+    /// `nil` leaves that ROI alone; `[]` clears it (back to searching the whole
+    /// frame).
+    @discardableResult
+    func updateCameraZones(
+        camera: Camera,
+        faceZones: [IncludeZone]? = nil,
+        plateZones: [IncludeZone]? = nil
+    ) async throws -> Camera {
+        struct ZonePatch: Encodable {
+            let name: String
+            let friendlyName: String
+            let model: String
+            let ip: String
+            var faceZones: [IncludeZone]?
+            var plateZones: [IncludeZone]?
+        }
+        return try await sendJSON(
+            "PUT", "api/cameras/\(camera.name)",
+            body: ZonePatch(
+                name: camera.name,
+                friendlyName: camera.friendlyName,
+                model: camera.model,
+                ip: camera.ip,
+                faceZones: faceZones,
+                plateZones: plateZones
+            )
+        )
+    }
+
+    /// ADMIN: DELETE /api/recognition/heatmap/{camera} — forget the map for a
+    /// camera that has been moved or re-aimed, where the old view's history is
+    /// now actively misleading.
+    func clearRecognitionHeatmap(camera: String, kind: String? = nil) async throws {
+        try await send(try makeRequest(
+            "DELETE", "api/recognition/heatmap/\(camera)",
+            query: kind.map { [URLQueryItem(name: "kind", value: $0)] } ?? []
+        ))
+    }
+
     // MARK: Recordings
 
     func recordingCameras() async throws -> [RecordingCamera] {

@@ -975,6 +975,46 @@ Unmatched faces are deduplicated by cosine before being stored, so one stranger
 seen twelve times is one row to review. `cameras.face_zones` gates the pass
 entirely — a person outside the ROI gets no face work at all.
 
+#### Recognition heatmap (`native/heatmap.py`, schema v23)
+
+- `GET /api/recognition/heatmap/{camera}?kind=face|plate` → `{cols, rows, counts[], quality[], samples, peak, updated_at, suggested_zone}`. Two flat grids of `cols * rows`: `counts` normalized 0..1 against the busiest cell, `quality` the MEAN bestshot score in that cell.
+- `DELETE /api/recognition/heatmap/{camera}[?kind=]` → 204. For a camera that has been moved or re-aimed, where the old view's history is now a lie.
+
+**Why both numbers.** Asked to draw a face zone on a still frame, almost everyone
+draws where people WALK — the obvious guess and frequently the wrong one, since
+legibility depends on range, lens, mounting height and light, none of which are
+visible in a still. `counts` alone is a footfall map; `quality_sum / count` is
+what says whether anything readable ever came from a cell. The editors render
+**density as opacity and mean quality as hue**, so a busy-but-unreadable strip of
+far pavement and a quiet-but-sharp doorstep look different at a glance. Colour is
+never the only channel — density is also encoded as opacity, the legend states
+the mapping in words, and "Use suggested region" is a colour-free path.
+
+`suggested_zone` is the bounding box of cells with both real evidence (≥ 10% of
+peak traffic) and usable mean quality. It returns `[]` when the evidence is thin,
+which the UI shows as "watch for a while first" rather than dressing a guess up
+as a recommendation.
+
+Accumulated in memory and flushed on the recognition maintenance tick — a face
+pass runs several times a second per track, and a write per sighting would be
+churn for data meant to be looked at occasionally. The grid is coarse (32x24) on
+purpose: finer would imply precision the measurement does not have, since a
+face's centre moves several cells between frames. Cells decay by 0.98/day so a
+re-aimed camera stops being described by where faces used to be, and this table
+holds **no biometric data** — counts and quality sums only — so it has no
+retention window and survives "clear unknown faces".
+
+A face is detected inside a PERSON CROP, so its box must be translated by the
+crop's origin (`recognizer.crop_with_origin`) before it can be placed on the
+frame. Getting that wrong does not fail; it paints a plausible map of the wrong
+places, which is why a position outside 0..1 is DROPPED rather than clamped.
+
+`cameras.face_zones` / `plate_zones` are edited on iOS via Settings › Cameras ›
+(camera) › Recognition areas, which draws the heatmap over a live snapshot.
+`PUT /api/cameras/{name}` accepts either list; omitted keeps stored, `[]` clears
+(back to whole frame). Unlike `include_zones`, an empty or degenerate recognition
+ROI is harmless — it means "search the whole frame", not "match nothing".
+
 ## Event & notification pipeline (backend, in-process)
 
 1. The native engine calls `EventsPipeline.handle_event()` with Frigate-shaped payloads

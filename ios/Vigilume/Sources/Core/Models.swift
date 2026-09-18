@@ -188,6 +188,13 @@ struct Camera: Decodable, Identifiable, Sendable, Hashable {
     let includeZones: [IncludeZone]?
     /// Boundaries whose crossings are counted. Absent -> nil == none.
     let crossLines: [CrossLine]?
+    /// Recognition regions of interest. Same polygon shape as `includeZones`
+    /// but the OPPOSITE consequence: these never filter detection, they only
+    /// mark where a face or plate is legible enough to be worth a recognition
+    /// pass. nil/[] == search the whole frame, which is correct and merely
+    /// slower — so unlike an include zone, an empty one cannot blind anything.
+    let faceZones: [IncludeZone]?
+    let plateZones: [IncludeZone]?
     /// Only notify once something crosses one of this camera's lines. Gates the
     /// ALERT only — the event, its clip and its snapshot are recorded either
     /// way — and the backend ignores it entirely when no lines are drawn, so it
@@ -283,6 +290,10 @@ struct CameraUpdatePayload: Encodable, Sendable {
     /// with < 3 points, or a line whose ends coincide, is dropped server-side.
     var includeZones: [IncludeZone]?
     var crossLines: [CrossLine]?
+    /// Recognition ROIs. nil keeps the stored value, an explicit [] clears them
+    /// (back to searching the whole frame).
+    var faceZones: [IncludeZone]?
+    var plateZones: [IncludeZone]?
     /// Alert only on a line crossing; nil = keep stored.
     var notifyOnCross: Bool?
     var detectFps: Int?
@@ -512,6 +523,42 @@ struct RecognitionStatus: Codable, Sendable {
     /// Embeddings the active model can no longer compare. Non-zero means some
     /// profiles have stopped matching and need re-enrolling.
     let staleSamples: Int
+}
+
+/// GET /api/recognition/heatmap/{camera} — where recognition actually works.
+///
+/// Two flat grids of `cols * rows`. `counts` is normalized 0..1 against the
+/// busiest cell (the absolute number means nothing to a person; "where,
+/// relatively" does). `quality` is the MEAN legibility in that cell and is
+/// already absolute. Keeping them separate is the whole point: density alone is
+/// a footfall map, and footfall is the wrong thing to draw a recognition zone
+/// around.
+struct RecognitionHeatmap: Codable, Sendable {
+    let camera: String
+    let kind: String
+    let cols: Int
+    let rows: Int
+    let counts: [Double]
+    let quality: [Double]
+    let samples: Int
+    let peak: Double
+    let updatedAt: Double?
+    /// A rectangle over the cells with both real evidence and usable quality —
+    /// a starting point to drag, not a recommendation. Empty when there is not
+    /// yet enough evidence to say anything.
+    let suggestedZone: [[Double]]
+
+    var isEmpty: Bool { counts.isEmpty || samples == 0 }
+
+    func count(col: Int, row: Int) -> Double {
+        let i = row * cols + col
+        return counts.indices.contains(i) ? counts[i] : 0
+    }
+
+    func meanQuality(col: Int, row: Int) -> Double {
+        let i = row * cols + col
+        return quality.indices.contains(i) ? quality[i] : 0
+    }
 }
 
 // MARK: - Recordings

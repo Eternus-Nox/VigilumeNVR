@@ -299,6 +299,74 @@ def traversal_checks(client: TestClient, h: dict) -> None:
           "a DB row pointing outside the image directory 404s instead of serving it")
 
 
+def roi_zone_checks(client: TestClient, h: dict) -> None:
+    """The ROI round-trip, and the partial-update contract the iOS editor relies on."""
+    print("\nrecognition ROIs on a camera")
+    r = client.post("/api/cameras", headers=h, json={
+        "name": "drive", "friendly_name": "Drive", "model": "IP4M-1041B",
+        "ip": "192.0.2.77", "username": "admin", "password": "secret",
+        "detect_objects": ["person", "car"],
+    })
+    check(r.status_code == 201, f"create a camera (got {r.status_code}: {r.text[:120]})")
+    check(r.json()["face_zones"] == [], "a new camera has no face ROI (== whole frame)")
+    check(r.json()["plate_zones"] == [], "...and no plate ROI")
+
+    zone = [{"name": "door", "points": [[0.1, 0.1], [0.6, 0.1], [0.6, 0.7], [0.1, 0.7]]}]
+    # EXACTLY the body the iOS editor sends: identity fields + one zone list,
+    # no credentials. Anything else omitted must be left alone.
+    r = client.put("/api/cameras/drive", headers=h, json={
+        "name": "drive", "friendly_name": "Drive", "model": "IP4M-1041B",
+        "ip": "192.0.2.77", "face_zones": zone,
+    })
+    check(r.status_code == 200, f"save a face ROI (got {r.status_code}: {r.text[:160]})")
+    body = r.json()
+    check(len(body["face_zones"]) == 1, "the face ROI is stored")
+    check(body["face_zones"][0]["points"][1] == [0.6, 0.1], "...with its points intact")
+    check(body["plate_zones"] == [], "the plate ROI was not disturbed")
+    check(body["detect_objects"] == ["person", "car"],
+          "and an OMITTED field keeps its stored value — the editor's minimal "
+          "body must not revert settings it never mentioned")
+    check(body["needs_credentials"] is False,
+          "blank credentials in the patch KEPT the stored ones rather than wiping them")
+
+    r = client.put("/api/cameras/drive", headers=h, json={
+        "name": "drive", "friendly_name": "Drive", "model": "IP4M-1041B",
+        "ip": "192.0.2.77", "plate_zones": [{"name": "kerb",
+                                             "points": [[0, 0.5], [1, 0.5], [1, 1], [0, 1]]}],
+    })
+    check(len(r.json()["plate_zones"]) == 1, "a plate ROI saves independently")
+    check(len(r.json()["face_zones"]) == 1, "...leaving the face ROI in place")
+
+    r = client.put("/api/cameras/drive", headers=h, json={
+        "name": "drive", "friendly_name": "Drive", "model": "IP4M-1041B",
+        "ip": "192.0.2.77", "face_zones": [],
+    })
+    check(r.json()["face_zones"] == [], "an explicit [] CLEARS the ROI (back to whole frame)")
+    check(len(r.json()["plate_zones"]) == 1, "...without touching the other one")
+
+    r = client.put("/api/cameras/drive", headers=h, json={
+        "name": "drive", "friendly_name": "Drive", "model": "IP4M-1041B",
+        "ip": "192.0.2.77", "face_zones": [{"name": "bad", "points": [[0.1, 0.1], [0.5, 0.5]]}],
+    })
+    check(r.json()["face_zones"] == [],
+          "a 2-point 'polygon' is dropped rather than stored — but unlike an "
+          "include zone that is harmless: empty means search the whole frame")
+
+    print("\nheatmap endpoint")
+    r = client.get("/api/recognition/heatmap/drive", headers=h)
+    check(r.status_code == 200, "the heatmap endpoint answers")
+    hm = r.json()
+    check(hm["cols"] > 0 and hm["rows"] > 0, "it reports grid dimensions")
+    check(hm["samples"] == 0 and hm["counts"] == [],
+          "a camera with no history returns an empty map, not an error")
+    check(hm["suggested_zone"] == [],
+          "and suggests nothing rather than guessing from no evidence")
+    r = client.get("/api/recognition/heatmap/drive", headers=h, params={"kind": "bogus"})
+    check(r.status_code == 400, "an unknown kind is refused")
+    r = client.delete("/api/recognition/heatmap/drive", headers=h)
+    check(r.status_code == 204, "clearing a heatmap is idempotent")
+
+
 def status_checks(client: TestClient, h: dict) -> None:
     print("\nstatus")
     r = client.get("/api/recognition/status", headers=h)
@@ -318,6 +386,7 @@ def main() -> int:
         adam, truck = profile_checks(client, h)
         enroll_checks(client, h, adam, truck)
         traversal_checks(client, h)
+        roi_zone_checks(client, h)
         status_checks(client, h)
     print(f"\nALL {PASS} CHECKS PASSED (recognition profiles API)")
     return 0

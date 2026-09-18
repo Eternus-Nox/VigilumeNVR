@@ -70,7 +70,8 @@ import numpy as np
 from . import zones as zonelib
 from .bestshot import BestShotBuffer, Shot, score_face
 from .recognition import Gallery, Match, to_blob
-from .recognizer import FaceRecognizer, crop_box
+from .heatmap import HeatmapAccumulator
+from .recognizer import FaceRecognizer, crop_with_origin
 
 log = logging.getLogger(__name__)
 
@@ -140,6 +141,10 @@ class FacePass:
         self._db = db
         self._images_dir = Path(images_dir)
         self._tracks: dict[tuple[str, int], _TrackState] = {}
+        # Where faces are actually legible on each camera — the map the ROI
+        # editor draws over the live frame. Accumulated in memory and flushed
+        # on the maintenance tick.
+        self.heatmap = HeatmapAccumulator(db)
         self._gallery: Optional[Gallery] = None
         self._gallery_lock = asyncio.Lock()
 
@@ -229,9 +234,10 @@ class FacePass:
             return
         st.last_pass = frame_time
 
-        person = crop_box(frame_bgr, obs.box, pad=PERSON_CROP_PAD)
-        if person is None:
+        cropped = crop_with_origin(frame_bgr, obs.box, pad=PERSON_CROP_PAD)
+        if cropped is None:
             return
+        person, ox, oy = cropped
         faces = await self._recognizer.detect(person)
         if not faces:
             return
@@ -245,6 +251,16 @@ class FacePass:
         if aligned is None:
             return
         quality = score_face(aligned, landmarks=face.landmarks)
+
+        # Heatmap. The face box is in the PERSON CROP's coordinates, so it is
+        # meaningless until translated by the crop's origin — that translation
+        # is the whole reason crop_with_origin exists. Getting it wrong would
+        # not fail; it would paint a plausible map of the wrong places.
+        fh, fw = frame_bgr.shape[:2]
+        if fw > 0 and fh > 0:
+            cx = (ox + (face.box[0] + face.box[2]) / 2.0) / fw
+            cy = (oy + (face.box[1] + face.box[3]) / 2.0) / fh
+            self.heatmap.record(camera, "face", cx, cy, quality.total)
         st.buffer.offer(
             tracker_id=obs.tracker_id, kind="face", crop_bgr=aligned,
             box=face.box, frame_time=frame_time, quality=quality,
@@ -452,6 +468,11 @@ class FacePass:
             self._tracks.clear()
 
         await self.purge_expired(cfg.get("candidate_retention_days"))
+        # The heatmap is flushed even when recognition has just been switched
+        # off: those sightings already happened, and discarding them would lose
+        # the map that tells the operator where to aim the camera.
+        await self.heatmap.flush()
+        await self.heatmap.maybe_decay()
 
     async def purge_expired(self, retention_days: Any) -> int:
         """Drop candidate crops past the retention window. Returns rows removed.
