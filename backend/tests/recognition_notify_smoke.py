@@ -194,9 +194,58 @@ def note_checks() -> None:
           "...and is not claimed as a known vehicle")
 
 
+def events_join_checks() -> None:
+    """Recognition must never be able to take down the events list.
+
+    `_with_recognitions` decorates GET /api/events with who was recognized. It
+    is an optional feature, OFF by default, decorating the core screen of the
+    product — so a fault on the recognition side has exactly one acceptable
+    outcome: serve the events without it. An exception escaping here 500s the
+    events list AND the timeline, leaving the operator with nothing at all.
+    """
+    import asyncio
+
+    from app.routers.events import _with_recognitions
+
+    print("\n_with_recognitions")
+
+    rows = [{"id": 1, "frigate_id": "native.1"}, {"id": 2, "frigate_id": "native.2"}]
+
+    class OkDB:
+        async def recognitions_for(self, fids):
+            return {"native.1": [KNOWN]}
+
+    out = asyncio.run(_with_recognitions(OkDB(), [dict(r) for r in rows]))
+    check(out[0]["recognitions"] == [KNOWN], "a matched event carries its recognition")
+    check(out[1]["recognitions"] == [],
+          "an event with none carries [] — absent and empty must not differ to a client")
+
+    class BoomDB:
+        async def recognitions_for(self, fids):
+            raise RuntimeError("no such table: event_recognitions")
+
+    try:
+        out = asyncio.run(_with_recognitions(BoomDB(), [dict(r) for r in rows]))
+        raised = False
+    except Exception:
+        raised = True
+    check(not raised,
+          "a FAILING recognition store does not propagate — an off-by-default "
+          "feature must never 500 the events list")
+    if not raised:
+        check([e["recognitions"] for e in out] == [[], []],
+              "...and every event is served with no recognitions rather than dropped")
+        check([e["id"] for e in out] == [1, 2],
+              "...with the events themselves intact, which is what the screen is for")
+
+    check(asyncio.run(_with_recognitions(BoomDB(), [])) == [],
+          "no events -> no query at all")
+
+
 def main() -> int:
     gate_checks()
     note_checks()
+    events_join_checks()
     print()
     if _failures:
         print(f"{len(_failures)} of {_checks} CHECKS FAILED")

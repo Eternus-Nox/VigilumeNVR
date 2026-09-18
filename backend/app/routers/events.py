@@ -225,7 +225,26 @@ async def _with_recognitions(db: Any, events: list[dict[str, Any]]) -> list[dict
     """
     if not events:
         return events
-    by_fid = await db.recognitions_for([e.get("frigate_id") for e in events])
+    # NEVER let recognition take down the events list.
+    #
+    # This is a decoration on the core screen of the product, from a feature
+    # that is OFF by default. An unguarded query here means any recognition-side
+    # fault — a store that failed to migrate, a locked database, a table an
+    # older /data volume has not got yet — turns every GET /api/events into a
+    # 500 and leaves the operator with no events, no timeline, and a console
+    # full of server errors that name nothing recognizable.
+    #
+    # Degrading to "no recognitions" is always correct: the events themselves
+    # are intact and are what the screen is for. The failure is logged once with
+    # its traceback so it is diagnosable rather than silent.
+    try:
+        by_fid = await db.recognitions_for([e.get("frigate_id") for e in events])
+    except Exception:
+        log.exception(
+            "recognition lookup failed for %d event(s) — serving the events "
+            "without it", len(events),
+        )
+        by_fid = {}
     if not by_fid:
         return [{**e, "recognitions": []} for e in events]
     return [{**e, "recognitions": by_fid.get(e.get("frigate_id"), [])} for e in events]
