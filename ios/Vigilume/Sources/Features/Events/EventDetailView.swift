@@ -23,14 +23,35 @@ struct EventDetailView: View {
     @State private var clipAwaitingTap = false
     @State private var pollStalled = false
     @State private var pollGeneration = 0
-    @State private var confirmDelete = false
     @State private var deleting = false
-    @State private var deleteError: String?
-    @State private var confirmReject = false
     @State private var rejecting = false
-    @State private var rejectError: String?
     /// Presents the event clip full-screen (landscape, tap to dismiss).
     @State private var showClipFullScreen = false
+
+    /// ONE alert modifier, switched by this.
+    ///
+    /// This view previously carried FOUR `.alert` modifiers in one chain — two
+    /// confirmations and two failure reports. SwiftUI presents only one `.alert`
+    /// per view and which one wins is not something you can rely on, so in
+    /// practice the two failure alerts never appeared: a delete or an exclude
+    /// that failed looked to the user like nothing had happened at all, with no
+    /// reason given. Every alert on this view goes through this one case.
+    private enum ActiveAlert: Identifiable {
+        case confirmDelete
+        case confirmReject
+        /// A failure to report. Carries its own title because "Delete failed"
+        /// and "Couldn't exclude" are different answers to different questions.
+        case failure(title: String, message: String)
+
+        var id: String {
+            switch self {
+            case .confirmDelete: return "confirmDelete"
+            case .confirmReject: return "confirmReject"
+            case .failure(let title, let message): return "failure:\(title):\(message)"
+            }
+        }
+    }
+    @State private var activeAlert: ActiveAlert?
 
     // The only explicit save flow: the event clip → photo library.
     @StateObject private var clipSaver = MediaSaver()
@@ -74,33 +95,46 @@ struct EventDetailView: View {
                 EventVideoFullScreenView(url: api.eventClipURL(id: detail.id))
             }
         }
-        .alert("Delete event", isPresented: $confirmDelete) {
-            Button("Delete", role: .destructive) { Task { await deleteEvent() } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Delete this event and its media? This cannot be undone.")
+        .alert(
+            alertTitle,
+            isPresented: Binding(
+                get: { activeAlert != nil },
+                set: { if !$0 { activeAlert = nil } }
+            ),
+            presenting: activeAlert
+        ) { alert in
+            switch alert {
+            case .confirmDelete:
+                Button("Delete", role: .destructive) { Task { await deleteEvent() } }
+                Button("Cancel", role: .cancel) {}
+            case .confirmReject:
+                Button("Exclude", role: .destructive) { Task { await rejectEvent() } }
+                Button("Cancel", role: .cancel) {}
+            case .failure:
+                Button("OK", role: .cancel) {}
+            }
+        } message: { alert in
+            switch alert {
+            case .confirmDelete:
+                Text("Delete this event and its media? This cannot be undone.")
+            case .confirmReject:
+                Text("This stops alerting on detections like it here, and removes this event.")
+            case .failure(_, let message):
+                Text(message)
+            }
         }
-        .alert("Delete failed", isPresented: .init(
-            get: { deleteError != nil },
-            set: { if !$0 { deleteError = nil } }
-        )) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(deleteError ?? "")
-        }
-        .alert(rejectPrompt, isPresented: $confirmReject) {
-            Button("Exclude", role: .destructive) { Task { await rejectEvent() } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This stops alerting on detections like it here, and removes this event.")
-        }
-        .alert("Couldn't exclude", isPresented: .init(
-            get: { rejectError != nil },
-            set: { if !$0 { rejectError = nil } }
-        )) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(rejectError ?? "")
+    }
+
+    /// `.alert(_:isPresented:presenting:)` takes its title as a plain value, so
+    /// it cannot switch on the case the way the actions and message builders do.
+    /// `guard let` first: a `switch` over an Optional enum with bare `.case`
+    /// patterns does not compile.
+    private var alertTitle: String {
+        guard let activeAlert else { return "" }
+        switch activeAlert {
+        case .confirmDelete: return "Delete event"
+        case .confirmReject: return rejectPrompt
+        case .failure(let title, _): return title
         }
     }
 
@@ -123,7 +157,7 @@ struct EventDetailView: View {
         ToolbarItemGroup(placement: .topBarTrailing) {
             if detail != nil, session.isAdmin {
                 Button(role: .destructive) {
-                    confirmDelete = true
+                    activeAlert = .confirmDelete
                 } label: {
                     if deleting {
                         ProgressView()
@@ -403,7 +437,7 @@ struct EventDetailView: View {
     private func rejectCard(for detail: EventDetail) -> some View {
         if session.isAdmin {
             Button(role: .destructive) {
-                confirmReject = true
+                activeAlert = .confirmReject
             } label: {
                 HStack(spacing: 8) {
                     if rejecting {
@@ -499,7 +533,10 @@ struct EventDetailView: View {
             dismiss()
         } catch {
             session.handleAPIError(error)
-            deleteError = (error as? ApiError)?.message ?? error.localizedDescription
+            activeAlert = .failure(
+                title: "Delete failed",
+                message: (error as? ApiError)?.message ?? error.localizedDescription
+            )
         }
         deleting = false
     }
@@ -518,7 +555,10 @@ struct EventDetailView: View {
             dismiss()
         } catch {
             session.handleAPIError(error)
-            rejectError = (error as? ApiError)?.message ?? error.localizedDescription
+            activeAlert = .failure(
+                title: "Couldn't exclude",
+                message: (error as? ApiError)?.message ?? error.localizedDescription
+            )
         }
         rejecting = false
     }
