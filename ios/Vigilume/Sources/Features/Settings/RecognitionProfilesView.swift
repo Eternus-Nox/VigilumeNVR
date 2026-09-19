@@ -106,9 +106,16 @@ struct RecognitionProfilesView: View {
 
             if let settings {
                 Section {
+                    // `newValue in` is NOT optional here. `$0` inside `Task { }`
+                    // binds to the TASK's closure, which takes no arguments —
+                    // so the setter appears to ignore its own parameter, Swift
+                    // falls back to the (Value, Transaction) overload of
+                    // Binding.init(get:set:), and the error talks about 2
+                    // arguments and an `@isolated(any) () async -> ()` that
+                    // nothing in this code mentions. Name the parameter.
                     Toggle("Recognize faces & plates", isOn: Binding(
                         get: { settings.enabled },
-                        set: { Task { await setEnabled($0) } }
+                        set: { newValue in Task { await setEnabled(newValue) } }
                     ))
                     .tint(Theme.accent)
                     .disabled(savingSettings)
@@ -117,7 +124,7 @@ struct RecognitionProfilesView: View {
                     if settings.enabled {
                         Picker("Alert me about", selection: Binding(
                             get: { settings.notifyMode },
-                            set: { Task { await setNotifyMode($0) } }
+                            set: { newValue in Task { await setNotifyMode(newValue) } }
                         )) {
                             Text("Everyone").tag("all")
                             Text("Only unrecognized").tag("unknown_only")
