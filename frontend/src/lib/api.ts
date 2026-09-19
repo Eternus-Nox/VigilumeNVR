@@ -1957,8 +1957,14 @@ export const api = {
   deleteRecognitionProfile: (id: number) =>
     request<void>(`/api/recognition/profiles/${id}`, { method: 'DELETE' }),
   /** Vehicles only — enroll by typing the plate, no sighting needed. */
+  /**
+   * Vehicles only. Unread-plate sightings that ARE this plate are absorbed
+   * automatically — unlike faces, 'same plate' has an exact answer, so a
+   * duplicate carries no new information and only buries the plates still
+   * worth reviewing. `absorbed_candidates` counts them.
+   */
   addRecognitionPlate: (id: number, plate: string) =>
-    request<RecognitionSample>(`/api/recognition/profiles/${id}/plate`, {
+    request<RecognitionSample & { absorbed_candidates?: number }>(`/api/recognition/profiles/${id}/plate`, {
       method: 'POST',
       body: JSON.stringify({ plate }),
     }),
@@ -1969,10 +1975,28 @@ export const api = {
    * purge. One request for the whole selection, never one per shot.
    */
   enrollRecognitionCandidates: (id: number, candidateIds: number[]) =>
-    request<{ enrolled: number; sample_ids: number[] }>(
+    request<{
+      enrolled: number;
+      sample_ids: number[];
+      /**
+       * Unmatched crops that look like what was just enrolled. A
+       * SUGGESTION — nothing has been applied. Accepting any of them is
+       * another enroll call, so the confirmation is a real step.
+       */
+      similar?: (RecognitionCandidate & { similarity: number })[];
+      similar_threshold?: number;
+    }>(
       `/api/recognition/profiles/${id}/enroll`,
       { method: 'POST', body: JSON.stringify({ candidate_ids: candidateIds }) },
     ),
+  /** Crops that look like this profile. Read-only: it applies nothing. */
+  recognitionSimilar: (id: number) =>
+    request<{
+      profile_id: number;
+      threshold: number;
+      candidates: (RecognitionCandidate & { similarity: number })[];
+    }>(`/api/recognition/profiles/${id}/similar`),
+
   deleteRecognitionSample: (id: number) =>
     request<void>(`/api/recognition/samples/${id}`, { method: 'DELETE' }),
   /** Unmatched crops, BEST-QUALITY first — this list exists to be enrolled from. */

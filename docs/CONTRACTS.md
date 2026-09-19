@@ -920,6 +920,7 @@ scored.
 - `DELETE /api/recognition/profiles/{id}` → 204, and deletes its samples AND their reference images from disk.
 - `POST /api/recognition/profiles/{id}/plate` `{plate}` → 201. Vehicle profiles only (person → 400); the plate is normalized (uppercase, non-alphanumerics stripped).
 - `POST /api/recognition/profiles/{id}/enroll` `{candidate_ids:[...]}` → `{enrolled, sample_ids}`. **Atomic** across the batch, kind-checked (a face candidate into a vehicle profile → 400), and it **MOVES** each crop from the rolling candidate directory into the durable profile directory — copying would leave enrolled references in the directory the retention purge walks.
+- `GET /api/recognition/profiles/{id}/similar[?limit=]` → `{profile_id, threshold, candidates[]}` — unmatched crops that look like this profile, each with a `similarity`, best first. **A read: it applies nothing.** `POST .../enroll` also returns `similar[]` + `similar_threshold`, so the offer lands at the moment the operator is thinking about that person.
 - `DELETE /api/recognition/samples/{id}` → 204 (+ unlinks its image).
 - `GET /api/recognition/candidates[?kind=&camera=&limit=]` → unmatched crops **best-quality first**, because this list exists to be enrolled from and the shot worth enrolling is the legible one, not the most recent.
 - `DELETE /api/recognition/candidates/{id}` and `DELETE /api/recognition/candidates[?kind=]` → 204.
@@ -939,6 +940,40 @@ face is dark — preferring the IR-blown frame would be backwards), and pose fro
 outright rather than being carried over the line by a high sharpness term.
 Retained shots must be `MIN_GAP_S` apart, so the buffer holds several distinct
 moments instead of five copies of one stride.
+
+#### "Add the ones that look like this" — suggested for faces, automatic for plates
+
+Enrolling one shot should not mean finding that person's every other sighting by
+eye in a list sorted by legibility. Nobody does that, so profiles stay thin, and
+thin profiles are the ones that miss. So an enrollment offers the crops that
+resemble it.
+
+The two kinds are **not equally decidable**, and treating them alike would be a
+real bug:
+
+| | question | answer | so |
+|---|---|---|---|
+| plate | is this the same plate? | EXACT — normalized + glyph-folded, within `PLATE_MAX_DISTANCE` | absorbed automatically |
+| face | is this the same face? | a SCORE | offered, never applied |
+
+A wrong **match** mislabels one event and is corrected by looking at that event.
+A wrong **enrollment** corrupts the gallery: that profile matches a stranger from
+then on, silently, with nothing afterwards pointing back at the moment it went
+wrong. Hence `SUGGEST_FACE_COSINE` (0.52) sits well above `FACE_THRESHOLD`
+(0.38) — the bar for "offer this" is higher than the bar for "call this a
+match" — and the endpoint writes nothing, so accepting is the ordinary enroll
+call rather than a dialog someone dismisses without seeing what it did.
+
+Scored **max-over-samples**, the same rule the matcher uses, so a suggestion
+means exactly "this would now be recognized as Adam". A centroid would be
+measurably worse and in the wrong direction: averaging unit vectors from two
+poses lands near neither (0.75 vs 0.49 on the `similar_smoke` fixture), so it
+would miss the very shots this exists to find.
+
+Absorbing a plate **deletes** the duplicate candidate rather than enrolling it. A
+second copy of an exact string matches exactly what one copy matches, so it is
+noise rather than evidence — unlike a face, where each sample is a different
+pose in a continuous space and more genuinely helps.
 
 Multi-frame plate voting (`native/recognition.py:vote_plate`) reconciles several
 OCR reads of one plate by weighted per-character vote, deciding string LENGTH

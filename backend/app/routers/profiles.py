@@ -49,7 +49,11 @@ from ..auth import require_admin, require_media_admin
 from ..native import accel
 from ..native.timing import TIMINGS
 from ..native.heatmap import COLS, ROWS, suggest_zone
-from ..native.recognition import FACE_THRESHOLD, MIN_MARGIN, normalize_plate
+from ..native.recognition import (
+    FACE_THRESHOLD, MIN_MARGIN, SUGGEST_FACE_COSINE, SUGGEST_LIMIT,
+    PLATE_MAX_DISTANCE, cosine, from_blob, normalize, normalize_plate,
+    plate_distance,
+)
 
 log = logging.getLogger(__name__)
 
@@ -366,12 +370,19 @@ async def add_plate_sample(
     await db.conn.execute(
         "UPDATE profiles SET updated_at = ? WHERE id = ?", (time.time(), profile_id)
     )
+    # Any unread-plate sighting that IS this plate is now answered. Removing
+    # them is what stops the review list filling with the same car you just
+    # named. See _absorb_matching_plates on why this is safe to do without
+    # asking, where the face equivalent is not.
+    absorbed = await _absorb_matching_plates(
+        db, request.app.state.config.candidate_crops_dir, profile_id, body.plate
+    )
     await db.conn.commit()
     await _reload_gallery(request)
     sample = await (
         await db.conn.execute("SELECT * FROM profile_samples WHERE id = ?", (cur.lastrowid,))
     ).fetchone()
-    return _sample_out(sample)
+    return {**_sample_out(sample), "absorbed_candidates": absorbed}
 
 
 @router.post("/profiles/{profile_id}/enroll", status_code=201)
@@ -452,7 +463,162 @@ async def enroll_candidates(
     )
     await db.conn.commit()
     await _reload_gallery(request)
-    return {"enrolled": len(created), "sample_ids": created}
+    # "You said this is Adam — here are the others that look like him."
+    # Returned with the enroll so the operator is offered them at the one
+    # moment they are thinking about this person, rather than having to know
+    # to go looking. Computed AFTER the gallery reload so the suggestion is
+    # scored against the profile as it now stands, including what was just
+    # added — which is the whole point: the shot just enrolled is usually the
+    # one that finds the rest.
+    similar = await _similar_candidates(
+        db, profile, active_model=_active_model_key(request)
+    )
+    return {
+        "enrolled": len(created),
+        "sample_ids": created,
+        # A SUGGESTION. Enrolling any of these is another explicit call.
+        "similar": similar,
+        "similar_threshold": SUGGEST_FACE_COSINE,
+    }
+
+
+
+async def _absorb_matching_plates(
+    db: Any, crops_dir: Path, profile_id: int, plate: str
+) -> int:
+    """Delete unread-plate candidates that ARE this plate. Returns how many.
+
+    AUTOMATIC, unlike the face suggestion, and the difference is not a
+    preference — it is that the two questions are not equally decidable.
+
+    "Is this the same plate?" has an exact answer: after normalization and
+    glyph folding, two reads of 7ABC123 are the same vehicle by definition.
+    "Is this the same face?" is a score, and a score can be wrong in a way that
+    silently attaches a stranger to someone's name.
+
+    So a candidate within PLATE_MAX_DISTANCE of a plate the operator has just
+    typed carries no new information — it is a duplicate of a fact already
+    established — and leaving it in the unread list is noise that buries the
+    plates still worth reviewing. The rows are REMOVED rather than enrolled:
+    the plate string is already a sample, and a second identical string adds
+    nothing to match against.
+    """
+    try:
+        rows = await (
+            await db.conn.execute(
+                "SELECT id, plate, image_path FROM recognition_candidates "
+                "WHERE kind = 'plate' AND plate != ''"
+            )
+        ).fetchall()
+    except Exception:
+        log.exception("could not scan plate candidates for %s", plate)
+        return 0
+    doomed = [
+        r for r in rows if plate_distance(r["plate"], plate) <= PLATE_MAX_DISTANCE
+    ]
+    if not doomed:
+        return 0
+    for r in doomed:
+        _unlink(crops_dir, r["image_path"])
+    placeholders = ",".join("?" * len(doomed))
+    await db.conn.execute(
+        f"DELETE FROM recognition_candidates WHERE id IN ({placeholders})",
+        [r["id"] for r in doomed],
+    )
+    log.info(
+        "absorbed %d unread-plate candidate(s) matching %s into profile %d",
+        len(doomed), plate, profile_id,
+    )
+    return len(doomed)
+
+
+async def _similar_candidates(
+    db: Any, profile: Any, *, active_model: str, limit: int = SUGGEST_LIMIT
+) -> list[dict[str, Any]]:
+    """Unmatched crops that look like THIS profile, best first.
+
+    "You said this crop is Adam — here are the others that look like him."
+    Without it, enrolling someone means finding their every other sighting by
+    eye in a list sorted by legibility, which nobody does, so profiles stay
+    thin and thin profiles are the ones that miss.
+
+    Scored MAX-OVER-SAMPLES, the same rule the matcher uses, so a suggestion
+    means exactly "this would now be recognized as Adam" rather than a second,
+    subtly different notion of similar that could disagree with the matcher and
+    leave an operator unable to tell which was lying.
+
+    Returns [] for a vehicle, for a profile with no usable samples, and when
+    recognition has no model loaded — none of which is an error, and all of
+    which would otherwise be an exception on an ordinary enrollment.
+    """
+    if profile["kind"] != "person" or not active_model:
+        return []
+    try:
+        sample_rows = await (
+            await db.conn.execute(
+                "SELECT embedding, dim FROM profile_samples "
+                "WHERE profile_id = ? AND model_key = ? AND embedding IS NOT NULL",
+                (profile["id"], active_model),
+            )
+        ).fetchall()
+        # Only candidates from the SAME embedding space. Vectors from two
+        # models are incomparable and score in an entirely plausible range, so
+        # mixing them would produce confident nonsense rather than an error.
+        cand_rows = await (
+            await db.conn.execute(
+                "SELECT * FROM recognition_candidates "
+                "WHERE kind = 'face' AND model_key = ? AND embedding IS NOT NULL",
+                (active_model,),
+            )
+        ).fetchall()
+    except Exception:
+        log.exception("similar-candidate lookup failed for profile %s", profile["id"])
+        return []
+
+    vectors = [
+        normalize(from_blob(r["embedding"], r["dim"]))
+        for r in sample_rows
+        if r["embedding"]
+    ]
+    vectors = [v for v in vectors if v is not None and v.size]
+    if not vectors:
+        return []
+
+    scored: list[tuple[float, Any]] = []
+    for row in cand_rows:
+        vec = normalize(from_blob(row["embedding"], row["dim"]))
+        if vec is None or not vec.size:
+            continue
+        score = max((cosine(vec, v) for v in vectors), default=0.0)
+        if score >= SUGGEST_FACE_COSINE:
+            scored.append((score, row))
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [
+        {**_candidate_out(row), "similarity": round(float(score), 4)}
+        for score, row in scored[:limit]
+    ]
+
+
+@router.get("/profiles/{profile_id}/similar")
+async def similar_to_profile(
+    profile_id: int, request: Request, limit: int = Query(default=SUGGEST_LIMIT, ge=1, le=100)
+) -> dict[str, Any]:
+    """Unmatched crops that look like this profile. A SUGGESTION, never applied.
+
+    Deliberately a read. Enrolling these is the ordinary enroll call, which
+    means the operator's confirmation is a real step and not a dialog they can
+    dismiss without noticing what it did.
+    """
+    db = request.app.state.db
+    profile = await _require_profile(db, profile_id)
+    items = await _similar_candidates(
+        db, profile, active_model=_active_model_key(request), limit=limit
+    )
+    return {
+        "profile_id": profile_id,
+        "threshold": SUGGEST_FACE_COSINE,
+        "candidates": items,
+    }
 
 
 @router.delete("/samples/{sample_id}", status_code=204)

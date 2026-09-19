@@ -69,6 +69,15 @@ export default function RecognitionTab() {
   // this feel like a stall, and ticking three cameras in a row is the normal
   // way to use this table.
   const [camBusy, setCamBusy] = useState<Set<string>>(new Set());
+  // Crops that look like the profile just enrolled into. Held here rather
+  // than auto-applied: a wrong face enrollment matches a stranger from then
+  // on, silently, with nothing on screen pointing back at the moment it
+  // went wrong. So it is an offer, and accepting is another explicit call.
+  const [suggested, setSuggested] = useState<{
+    profileId: number;
+    profileName: string;
+    items: (RecognitionCandidate & { similarity: number })[];
+  } | null>(null);
   const [newName, setNewName] = useState('');
   const [confirm, setConfirm] = useState<
     | { kind: 'profile'; id: number; name: string }
@@ -144,13 +153,26 @@ export default function RecognitionTab() {
     if (selected.size === 0) return;
     setBusy(true);
     try {
-      const { enrolled } = await api.enrollRecognitionCandidates(profileId, [...selected]);
+      const result = await api.enrollRecognitionCandidates(profileId, [...selected]);
+      const { enrolled } = result;
       pushToast({
         kind: 'info',
         title: `Enrolled ${enrolled} ${enrolled === 1 ? 'shot' : 'shots'}`,
         body: '',
       });
       setSelected(new Set());
+      // Offer the lookalikes at the one moment the operator is thinking about
+      // this person, rather than expecting them to know to go looking later.
+      const similar = result.similar ?? [];
+      setSuggested(
+        similar.length > 0
+          ? {
+              profileId,
+              profileName: profiles.find((p) => p.id === profileId)?.name ?? '',
+              items: similar,
+            }
+          : null,
+      );
       await reload();
       if (openProfile?.id === profileId) await refreshOpen(profileId);
     } catch (e) {
@@ -163,7 +185,18 @@ export default function RecognitionTab() {
   const setPlate = async (profileId: number, plate: string) => {
     setBusy(true);
     try {
-      await api.addRecognitionPlate(profileId, plate);
+      const saved = await api.addRecognitionPlate(profileId, plate);
+      // Say so when sightings were absorbed. The rows vanishing from the unread
+      // list with no explanation reads as a bug, even though it is the feature.
+      if (saved.absorbed_candidates) {
+        pushToast({
+          kind: 'info',
+          title: `Matched ${saved.absorbed_candidates} unread ${
+            saved.absorbed_candidates === 1 ? 'sighting' : 'sightings'
+          }`,
+          body: 'Already-read sightings of this plate were cleared from the review list.',
+        });
+      }
       await Promise.all([reload(), refreshOpen(profileId)]);
     } catch (e) {
       fail(e, 'Could not add the plate');
@@ -213,6 +246,31 @@ export default function RecognitionTab() {
         nextSet.delete(cam.name);
         return nextSet;
       });
+    }
+  };
+
+  /** Accept some or all of the suggested lookalikes. An ordinary enroll. */
+  const acceptSuggested = async (ids: number[]) => {
+    if (!suggested || ids.length === 0) return;
+    setBusy(true);
+    try {
+      const result = await api.enrollRecognitionCandidates(suggested.profileId, ids);
+      pushToast({
+        kind: 'info',
+        title: `Added ${result.enrolled} more`,
+        body: '',
+      });
+      // Chase the chain: the shots just added can themselves surface more.
+      // Stopping after one round would leave the rest to be found by hand,
+      // which is the work this exists to remove.
+      const more = result.similar ?? [];
+      setSuggested(more.length > 0 ? { ...suggested, items: more } : null);
+      await reload();
+      if (openProfile?.id === suggested.profileId) await refreshOpen(suggested.profileId);
+    } catch (e) {
+      fail(e, 'Could not add those');
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -326,6 +384,70 @@ export default function RecognitionTab() {
           </p>
         )}
       </section>
+
+      {suggested && suggested.items.length > 0 && (
+        <section className="card card-attn">
+          <div className="card-head">
+            <h2>
+              More shots that look like {suggested.profileName || 'this person'}
+            </h2>
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => setSuggested(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+          <p className="muted small">
+            These are unmatched sightings that resemble what you just enrolled.{' '}
+            <strong>Nothing has been added.</strong> Check that each one is really the
+            same person before accepting — a wrong face in a profile is not a wrong
+            label on one event, it makes that profile match a stranger from then on,
+            and nothing afterwards points back at where it went wrong.
+          </p>
+          <ul className="recog-candidate-grid">
+            {suggested.items.map((c) => (
+              <li key={c.id}>
+                <div className="recog-candidate recog-suggested">
+                  {c.has_image && c.image_url ? (
+                    <AuthImage src={c.image_url} alt="" loading="lazy" />
+                  ) : (
+                    <span className="recog-candidate-noimg">no image</span>
+                  )}
+                  <span className="recog-candidate-meta">
+                    <strong>{Math.round(c.similarity * 100)}% alike</strong>
+                    <span>{titleCase(c.camera)}</span>
+                    <span>{formatDateTime(c.created_at)}</span>
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-primary recog-suggested-add"
+                    disabled={busy}
+                    onClick={() => void acceptSuggested([c.id])}
+                  >
+                    Add
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+          <div className="recog-suggested-actions">
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={busy}
+              onClick={() => void acceptSuggested(suggested.items.slice(0, 25).map((c) => c.id))}
+            >
+              Add all {suggested.items.length > 25 ? '(first 25)' : ''}
+            </button>
+            <span className="control-hint">
+              Only if you have actually looked at them. &ldquo;Add all&rdquo; on a grid
+              nobody checked is how a stranger ends up in someone&rsquo;s profile.
+            </span>
+          </div>
+        </section>
+      )}
 
       {status?.devices && (
         <section className="card">

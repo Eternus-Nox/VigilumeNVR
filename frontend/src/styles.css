@@ -3441,3 +3441,28 @@ label > select {
   margin-top: 0.1rem;
   max-width: 38ch;
 }
+
+/* A suggested lookalike. Visually distinct from a candidate you select: these
+   are not selected-then-enrolled, they are reviewed one at a time, because the
+   cost of waving one through is a profile that matches a stranger. */
+.recog-suggested {
+  cursor: default;
+  border-color: rgba(56, 189, 248, 0.35);
+}
+
+.recog-suggested-add {
+  margin: 0 0.3rem 0.3rem;
+  width: calc(100% - 0.6rem);
+  justify-content: center;
+}
+
+.recog-suggested-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-top: 0.7rem;
+}
+
+.recog-suggested-actions .btn {
+  align-self: flex-start;
+}

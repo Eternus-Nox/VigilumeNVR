@@ -77,6 +77,23 @@ FACE_THRESHOLD = 0.38
 #: How far ahead of the runner-up the winner must be. See MARGIN above.
 MIN_MARGIN = 0.06
 
+#: Similarity at which an UNMATCHED crop is offered as "this looks like the
+#: person you just enrolled".
+#:
+#: DELIBERATELY WELL ABOVE ``FACE_THRESHOLD``, and the asymmetry is the point.
+#: A match decides what one event is called and is corrected by looking at that
+#: event. An enrollment suggestion decides what the GALLERY contains: accept a
+#: wrong one and the profile matches a stranger from then on, silently, with
+#: nothing on screen ever pointing back at the moment it went wrong. So the bar
+#: for "offer this" is much higher than the bar for "call this a match", and
+#: the offer is still only an offer — see the suggestion endpoint.
+SUGGEST_FACE_COSINE = 0.52
+
+#: Most similar crops offered at once. Past this it stops being a review and
+#: becomes a page of thumbnails nobody looks at properly, which is the failure
+#: mode that gets a stranger accepted into a profile.
+SUGGEST_LIMIT = 24
+
 #: Plate strings are compared after normalization; this is the edit distance
 #: within which two normalized plates are called the same vehicle. 1 covers the
 #: single-character misread that survives voting; 2 starts matching genuinely
