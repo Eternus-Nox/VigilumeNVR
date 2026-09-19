@@ -57,6 +57,8 @@ import numpy as np
 
 from .detector import ensure_model, model_path, sha256_file
 
+from .timing import TIMINGS
+
 log = logging.getLogger(__name__)
 
 # Revision-pinned, SHA-256-verified. Both hashes were verified by downloading
@@ -240,6 +242,11 @@ class FaceRecognizer:
         """Faces in a BGR frame. CPU-bound — call via `detect()` off the loop."""
         if not self.ready or frame_bgr is None or frame_bgr.size == 0:
             return []
+        with TIMINGS.face_detect.measure():
+            return self._detect_blocking(frame_bgr)
+
+    def _detect_blocking(self, frame_bgr: np.ndarray) -> list[FaceDetection]:
+        """The real body. Split only so the timer wraps exactly the work."""
         h, w = frame_bgr.shape[:2]
         if w <= 0 or h <= 0:
             return []
@@ -269,6 +276,13 @@ class FaceRecognizer:
         and is needed once per track. Doing both together meant paying for an
         embedding on every frame and throwing it away.
         """
+        with TIMINGS.face_align.measure():
+            return self._align_blocking(frame_bgr, face)
+
+    def _align_blocking(
+        self, frame_bgr: np.ndarray, face: FaceDetection
+    ) -> Optional[np.ndarray]:
+        """The real body. Split only so the timer wraps exactly the work."""
         if not self.ready:
             return None
         try:
@@ -286,6 +300,11 @@ class FaceRecognizer:
         embeddings are only comparable in the canonical geometry, and an
         unaligned crop does not fail, it just quietly lands in the wrong place.
         """
+        with TIMINGS.face_embed.measure():
+            return self._feature_blocking(aligned_bgr)
+
+    def _feature_blocking(self, aligned_bgr: np.ndarray) -> Optional[np.ndarray]:
+        """The real body. Split only so the timer wraps exactly the work."""
         if not self.ready or aligned_bgr is None or aligned_bgr.size == 0:
             return None
         try:

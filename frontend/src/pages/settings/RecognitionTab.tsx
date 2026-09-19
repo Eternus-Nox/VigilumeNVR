@@ -44,6 +44,15 @@ const CANDIDATE_OF: Record<ProfileKind, CandidateKind> = {
   vehicle: 'plate',
 };
 
+/** Pipeline order, which is the order they are useful to read in. */
+const STAGES: [string, string][] = [
+  ['face_detect', 'Find a face'],
+  ['face_align', 'Align it'],
+  ['face_embed', 'Read the face'],
+  ['plate_localize', 'Find a plate'],
+  ['plate_ocr', 'Read the plate'],
+];
+
 export default function RecognitionTab() {
   const { pushToast } = useAppState();
   const [kind, setKind] = useState<ProfileKind>('person');
@@ -317,6 +326,60 @@ export default function RecognitionTab() {
           </p>
         )}
       </section>
+
+      {status?.devices && (
+        <section className="card">
+          <h2>Where it runs</h2>
+          <p className="muted small">
+            Recognition <strong>follows the detector</strong> automatically — CUDA when
+            detection is on CUDA, CPU when it is on CPU, and CPU on an Edge TPU, which
+            runs int8 graphs compiled for it and cannot execute these float models at all.
+            Nothing to configure; it re-resolves whenever the detector does.
+          </p>
+          <table className="recog-camera-table">
+            <thead>
+              <tr>
+                <th scope="col">Stage</th>
+                <th scope="col">Runs on</th>
+                <th scope="col">Measured</th>
+              </tr>
+            </thead>
+            <tbody>
+              {STAGES.map(([key, label]) => {
+                const dev = status.devices?.[key] as { device: string; why: string } | undefined;
+                const t = status.timings?.[key];
+                if (!dev) return null;
+                return (
+                  <tr key={key}>
+                    <td>
+                      {label}
+                      {dev.why && <span className="control-hint stage-why">{dev.why}</span>}
+                    </td>
+                    <td>{dev.device.toUpperCase()}</td>
+                    <td className="mono">
+                      {t ? (
+                        <>
+                          {t.mean_ms}&thinsp;ms
+                          <span className="muted"> · p95 {t.p95_ms}</span>
+                        </>
+                      ) : (
+                        <span className="muted">—</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <p className="control-hint">
+            Times are a rolling mean over recent calls, measured on this box with your
+            settings — not an estimate. A dash means the stage has not run yet, which is
+            a different thing from running instantly. If you are weighing whether to move
+            work to the GPU, <em>these</em> numbers are the answer, not a benchmark from
+            somebody else&rsquo;s hardware.
+          </p>
+        </section>
+      )}
 
       <section className="card">
         <h2>Which cameras</h2>

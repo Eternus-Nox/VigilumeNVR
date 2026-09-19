@@ -3433,3 +3433,11 @@ label > select {
 .recog-camera-table tr:last-child td {
   border-bottom: 0;
 }
+
+/* The "why" under a stage name: a CPU stage has a reason, and the reason is
+   the point — without it the column reads as an oversight. */
+.stage-why {
+  display: block;
+  margin-top: 0.1rem;
+  max-width: 38ch;
+}

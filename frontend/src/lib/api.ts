@@ -647,6 +647,26 @@ export interface RecognitionStatus {
   /** >0 means some profiles need re-enrolling after a model change. */
   stale_samples: number;
   defaults: { face_threshold: number; min_margin: number };
+  /**
+   * Which silicon each stage runs on AND why. Recognition follows the
+   * detector automatically: CUDA when it is on CUDA, CPU when it is on CPU or
+   * an Edge TPU (which cannot run these float ONNX graphs at all). A stage
+   * reporting `cpu` carries the constraint that put it there, so it reads as a
+   * decision rather than an oversight. Absent on an older backend.
+   */
+  devices?: {
+    follows_detector?: { device: string; kind: string };
+    [stage: string]: { device: string; why: string } | { device: string; kind: string } | undefined;
+  };
+  /**
+   * MEASURED per-stage cost over a rolling window, not an estimate. A stage
+   * absent from this map has not run — which is a different finding from one
+   * that runs instantly, so it is omitted rather than reported as zero.
+   */
+  timings?: Record<
+    string,
+    { calls: number; mean_ms: number; p95_ms: number; max_ms: number; lifetime_mean_ms: number }
+  >;
 }
 
 export interface NvrEvent {

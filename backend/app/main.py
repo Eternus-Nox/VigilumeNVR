@@ -434,7 +434,15 @@ async def lifespan(app: FastAPI):
     # localization is classical CV over D-FINE's vehicle box and only the OCR is
     # a model. Shares the face pass's heatmap accumulator so one flush covers
     # both kinds.
-    plate_reader = PlateReader(config.models_dir)
+    # The detector is handed in so the OCR session FOLLOWS IT onto whatever
+    # silicon it actually resolved to (native/accel.py): CUDA when the detector
+    # is on CUDA, CPU when it is on CPU, and CPU on a Coral box — an Edge TPU
+    # runs int8 graphs compiled for it, and this is float ONNX. Passing the
+    # detector itself rather than a device string is what keeps that automatic:
+    # `backend="gpu"` on a box whose CUDA never came up reports device="cpu",
+    # and following the resolved value is the only way not to claim a card that
+    # is not there.
+    plate_reader = PlateReader(config.models_dir, detector=detector)
     plate_pass = PlatePass(plate_reader, db, config.candidate_crops_dir,
                            heatmap=face_pass.heatmap)
     engine.set_plate_pass(plate_pass)

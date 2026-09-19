@@ -991,12 +991,45 @@ Unmatched faces are deduplicated by cosine before being stored, so one stranger
 seen twelve times is one row to review. `cameras.face_zones` gates the pass
 entirely — a person outside the ROI gets no face work at all.
 
-#### Where recognition runs (it is CPU, by design)
+#### Where recognition runs (it follows the detector)
 
-Object detection (D-FINE) uses the NVIDIA card via onnxruntime's CUDA provider,
-unchanged. **Recognition does not, deliberately** — and `GET
-/api/recognition/status` reports this under `devices` so the question is
-answerable from the app rather than from source.
+Recognition **follows the detector's RESOLVED device** (`native/accel.py`), so
+there is one hardware decision on the box rather than two that can disagree:
+
+| detector | recognition |
+|---|---|
+| CUDA | CUDA for the stages that can use it (today: plate OCR) |
+| CPU | CPU |
+| Coral | **CPU** — an Edge TPU runs int8 graphs compiled for it, and YuNet / SFace / the plate OCR are float ONNX with no Edge TPU build |
+
+It follows the RESOLVED device, never `settings.detection.backend`. Those differ
+exactly when it matters: `backend="gpu"` on a box whose CUDA did not come up
+reports `device="cpu"`, and `"auto"` can land anywhere. Reading the setting would
+claim a card that is not there and then fail at session creation — on a
+maintenance tick, where the exception costs the whole feature.
+`accel.make_session` also falls back to CPU rather than raising when a CUDA
+session cannot be created (missing cuDNN, driver mismatch, a card D-FINE has
+filled), and reports what ORT actually **bound** rather than what was requested.
+
+**What still cannot move.** YuNet and SFace go through `cv2.FaceDetectorYN` /
+`cv2.FaceRecognizerSF`, and the pip OpenCV wheel is built without CUDA
+(`cv2.cuda.getCudaEnabledDeviceCount() == 0`). Reaching the card needs either a
+custom OpenCV build or re-implementing YuNet's per-stride decode against a raw
+ORT session — the decode being the risky half, since getting a stride wrong
+yields plausible boxes in the wrong places rather than an error. Plate
+localization is classical CV, not a model. `alignCrop` is geometry and gains
+nothing from a GPU. `GET /api/recognition/status` names each CPU-bound stage
+**with its reason**, so the constraint stays visible instead of becoming
+folklore.
+
+**Whether to move any of it is a measurement, not an argument.** The same
+endpoint serves `timings`: a rolling window per stage with mean, p95 and max,
+measured on that box under that operator's settings. A stage that has never run
+is ABSENT rather than zero — "did not run" and "ran instantly" are different
+findings. Note that at a 112x112 input the host/device transfer can rival the
+inference, and extra CUDA sessions compete with D-FINE for VRAM and scheduling
+slots; detection falling behind the stream is a worse failure than recognition
+taking a few more milliseconds.
 
 Measured on this codebase rather than assumed:
 

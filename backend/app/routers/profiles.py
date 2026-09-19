@@ -46,6 +46,8 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 
 from ..auth import require_admin, require_media_admin
+from ..native import accel
+from ..native.timing import TIMINGS
 from ..native.heatmap import COLS, ROWS, suggest_zone
 from ..native.recognition import FACE_THRESHOLD, MIN_MARGIN, normalize_plate
 
@@ -670,13 +672,20 @@ async def recognition_status(request: Request) -> dict[str, Any]:
         # scheduling slots from D-FINE — the model that genuinely needs the card
         # — to save single-digit milliseconds. The plate OCR is a 128x64 input
         # where transfer overhead would likely exceed the 2.9 ms it takes on CPU.
-        "devices": {
-            "face_detect": "cpu",
-            "face_embed": "cpu",
-            "plate_localize": "cpu",
-            "plate_ocr": "cpu",
-            "note": "Recognition runs on CPU by design; the GPU stays with object detection.",
-        },
+        # MEASURED, not asserted. This used to be four hardcoded "cpu" strings
+        # and a note — which stopped being the whole truth the moment the plate
+        # OCR learned to follow the detector, and which could never answer "is
+        # this actually costing me anything on MY box with MY settings".
+        #
+        # `devices` names each stage's silicon AND why, so a CPU stage reads as
+        # a decision rather than an oversight. `timings` is the live rolling
+        # window; a stage absent from it has not run, which is a different
+        # finding from a stage that runs instantly and must not look the same.
+        "devices": accel.report(
+            getattr(request.app.state, "detector", None),
+            plate_ocr_device=getattr(getattr(plates, "_reader", None), "device", None),
+        ),
+        "timings": TIMINGS.report(),
         "face": face.status() if hasattr(face, "status") else None,
         "plates": plates.status() if hasattr(plates, "status") else None,
         "profiles": {r["kind"]: r["n"] for r in counts},

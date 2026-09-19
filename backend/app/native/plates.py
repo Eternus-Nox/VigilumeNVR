@@ -45,6 +45,8 @@ from typing import Any
 import cv2
 import numpy as np
 
+from . import accel
+from .timing import TIMINGS
 from .detector import ensure_model, model_path, sha256_file
 
 log = logging.getLogger(__name__)
@@ -134,6 +136,16 @@ def candidate_regions(
     characters of one plate into a single blob. Contours over that give
     plate-shaped candidates.
     """
+    with TIMINGS.plate_localize.measure():
+        return _candidate_regions(vehicle_bgr, max_regions=max_regions)
+
+
+def _candidate_regions(
+    vehicle_bgr: np.ndarray,
+    *,
+    max_regions: int = MAX_REGIONS,
+) -> list[tuple[int, int, int, int]]:
+    """The real body. Split only so the timer wraps exactly the work."""
     if vehicle_bgr is None or vehicle_bgr.size == 0:
         return []
     h, w = vehicle_bgr.shape[:2]
@@ -250,7 +262,14 @@ def deskew(strip_bgr: np.ndarray) -> np.ndarray:
 class PlateReader:
     """The pinned OCR model. Loads lazily; never raises into the caller."""
 
-    def __init__(self, models_dir: Path) -> None:
+    def __init__(self, models_dir: Path, detector: Any = None) -> None:
+        # The DETECTOR, so this session can follow whatever silicon it
+        # actually resolved to (native/accel.py). Optional so a test can
+        # construct a reader with no engine around it; None resolves to CPU.
+        self._detector = detector
+        # What the session actually BOUND, which is not always what was
+        # asked for — reported by /api/recognition/status.
+        self.device = "cpu"
         self._models_dir = Path(models_dir)
         self._session: Any = None
         self._input_name = ""
@@ -297,9 +316,15 @@ class PlateReader:
                 f"plate OCR on disk hashes to {digest[:12]}… — pin is "
                 f"{PLATE_MODELS['plate_ocr']['sha256'][:12]}…"
             )
-        # CPU deliberately: this runs on a handful of small strips per event,
-        # and the GPU belongs to D-FINE.
-        self._session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+        # Device follows the DETECTOR automatically — CUDA when it is on
+        # CUDA, CPU when it is on CPU or an Edge TPU (which cannot run this
+        # float graph at all). make_session falls back to CPU rather than
+        # raising if the CUDA session cannot be created: a missing cuDNN or a
+        # card D-FINE has filled is a reason to run on CPU, not a reason for
+        # plate reading to be unavailable.
+        self._session, self.device = accel.make_session(
+            str(path), self._detector, label="plate OCR"
+        )
         self._input_name = self._session.get_inputs()[0].name
 
     def close(self) -> None:
@@ -313,6 +338,13 @@ class PlateReader:
         rather than inventing characters, which is what lets the localizer
         upstream be generous.
         """
+        if not self.ready or strip_bgr is None or strip_bgr.size == 0:
+            return "", 0.0
+        with TIMINGS.plate_ocr.measure():
+            return self._read_blocking(strip_bgr)
+
+    def _read_blocking(self, strip_bgr: np.ndarray) -> tuple[str, float]:
+        """The real body. Split only so the timer wraps exactly the work."""
         if not self.ready or strip_bgr is None or strip_bgr.size == 0:
             return "", 0.0
         try:
