@@ -51,6 +51,47 @@ struct RecognitionProfilesView: View {
         profiles.filter { $0.kind == kind }
     }
 
+    /// Footer copy for the Recognition section.
+    ///
+    /// A PLAIN String-returning function, deliberately, rather than the obvious
+    /// inline version. A ternary whose two branches are both interpolated
+    /// strings, inside a `Text(...)`, inside a ViewBuilder closure, is the exact
+    /// shape that makes Swift's type checker give up:
+    ///
+    ///     error: The compiler is unable to type-check this expression in
+    ///            reasonable time; try breaking up the expression
+    ///
+    /// The failure is nastier than it sounds. The type never gets built, so
+    /// every USE SITE reports "Cannot find 'RecognitionProfilesView' in scope"
+    /// — which points at SettingsHomeView, a file with nothing wrong in it.
+    ///
+    /// Returning `String` rather than `Text` keeps this out of the ViewBuilder
+    /// entirely: ordinary control flow the compiler checks in one pass, and the
+    /// interpolation happens once, into a local, instead of inside an
+    /// expression it has to solve overloads across.
+    private func recognitionFooter(_ settings: SettingsDocument.Recognition) -> String {
+        guard settings.enabled else {
+            return """
+                Off. Turning this on downloads two extra models (~41 MB) and keeps face \
+                images on the server for \(settings.candidateRetentionDays) days so you \
+                can enroll people afterwards. Profiles can be set up either way — they \
+                start matching once this is on.
+                """
+        }
+        let hold = Int(settings.notifyGraceSeconds)
+        if settings.notifyMode == "unknown_only" {
+            return """
+                Enrolled people and vehicles arrive silently; anyone else still alerts — \
+                including someone nobody could identify. Alerts are held about \(hold)s \
+                while recognition decides.
+                """
+        }
+        return """
+            Alerts name a recognized person or vehicle. Held about \(hold)s while \
+            recognition decides, then sent either way.
+            """
+    }
+
     var body: some View {
         List {
             Section {
@@ -87,13 +128,7 @@ struct RecognitionProfilesView: View {
                 } header: {
                     Text("Recognition")
                 } footer: {
-                    if settings.enabled {
-                        Text(settings.notifyMode == "unknown_only"
-                             ? "Enrolled people and vehicles arrive silently; anyone else still alerts — including someone nobody could identify. Alerts are held about \(Int(settings.notifyGraceSeconds))s while recognition decides."
-                             : "Alerts name a recognized person or vehicle. Held about \(Int(settings.notifyGraceSeconds))s while recognition decides, then sent either way.")
-                    } else {
-                        Text("Off. Turning this on downloads two extra models (~41 MB) and keeps face images on the server for \(settings.candidateRetentionDays) days so you can enroll people afterwards. Profiles can be set up either way — they start matching once this is on.")
-                    }
+                    Text(recognitionFooter(settings))
                 }
             }
 
