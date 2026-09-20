@@ -44,6 +44,22 @@ const CANDIDATE_OF: Record<ProfileKind, CandidateKind> = {
   vehicle: 'plate',
 };
 
+/**
+ * Why a face did not become a reviewable candidate, in plain words plus what
+ * to DO about it. Each is a legitimate outcome; the remedies are opposite,
+ * which is the whole reason the reason is shown rather than just a count.
+ */
+const DROP_REASONS: Record<string, string> = {
+  no_face_found: 'The person was facing away, or no face was visible. Nothing to fix.',
+  below_quality:
+    'Too small or too blurry to keep. A face narrower than the model\u2019s minimum is scored zero outright, so this usually means the camera is too far from where people walk.',
+  no_shot_at_end: 'The whole visit produced nothing usable.',
+  embed_failed: 'A crop was kept but could not be read.',
+  duplicate: 'This stranger is already in the list. Working as intended.',
+  crop_write_failed:
+    'The row saved but its image did not \u2014 this is what a tile with no picture means. Check that the server can write to its data directory.',
+};
+
 /** Pipeline order, which is the order they are useful to read in. */
 const STAGES: [string, string][] = [
   ['face_detect', 'Find a face'],
@@ -446,6 +462,51 @@ export default function RecognitionTab() {
               nobody checked is how a stranger ends up in someone&rsquo;s profile.
             </span>
           </div>
+        </section>
+      )}
+
+      {status?.face?.drops && Object.values(status.face.drops).some((n) => n > 0) && (
+        <section className="card">
+          <h2>Why faces are or aren&rsquo;t showing up</h2>
+          <p className="muted small">
+            Counted since the server last started. A face reaching the list has to pass
+            several gates, and each of these is a gate it did not pass. Most are normal —
+            what matters is <em>which</em> is large, because the fixes are opposite.
+          </p>
+          <table className="recog-camera-table">
+            <tbody>
+              <tr>
+                <td>
+                  <strong>Kept</strong>
+                  <span className="control-hint stage-why">
+                    Faces that became reviewable candidates.
+                  </span>
+                </td>
+                <td className="mono">{status.face.kept_candidates ?? 0}</td>
+              </tr>
+              {Object.entries(status.face.drops)
+                .filter(([, n]) => n > 0)
+                .sort((a, b) => b[1] - a[1])
+                .map(([reason, n]) => (
+                  <tr key={reason}>
+                    <td>
+                      {reason.replace(/_/g, ' ')}
+                      <span className="control-hint stage-why">
+                        {DROP_REASONS[reason] ?? ''}
+                      </span>
+                    </td>
+                    <td className="mono">{n}</td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+          {status.face.labels && (
+            <p className="control-hint">
+              Looking at: <strong>{status.face.labels.join(', ')}</strong>.
+              {!status.face.labels.some((l) => l !== 'person') &&
+                ' Turn on \u201calso look for faces on vehicles\u201d under Recording to include drivers through a windscreen.'}
+            </p>
+          )}
         </section>
       )}
 

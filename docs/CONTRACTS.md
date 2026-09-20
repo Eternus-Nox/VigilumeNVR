@@ -1089,6 +1089,30 @@ so YuNet and SFace cannot reach the card without a custom OpenCV build; and
 `alignCrop`, which the embeddings depend on, is geometry rather than a DNN and
 gains nothing from one.
 
+#### Why a face may not reach "unknown faces"
+
+A face passes six gates before it is reviewable, and every one of them used to
+be silent — so "the list is emptier than it should be" had no answer short of
+reading the source. `GET /api/recognition/status` now serves `face.drops`,
+counted since boot, because the remedies are opposite:
+
+| reason | what it means | what to do |
+|---|---|---|
+| `no_face_found` | the person was facing away | nothing |
+| `below_quality` | under the buffer floor. A face narrower than `FACE_MIN_PX` scores **zero outright** (the resolution veto), so this is usually range | move the camera, raise detect resolution, or lower `identify_quality` |
+| `no_shot_at_end` | the whole visit produced nothing usable | as above |
+| `embed_failed` | a crop was kept but could not be read | check `face.model_key` / `ready` |
+| `duplicate` | this stranger is already stored | nothing — working |
+| `crop_write_failed` | the ROW saved and the IMAGE did not | the data directory is not writable; this is exactly what a tile showing a placeholder and no picture means |
+
+`face.labels` reports which labels the pass is actually being offered, which is
+how `face_on_vehicles` is verified rather than assumed — see below.
+
+**The engine must hand the pass every label it wants.** `engine.process` fed it
+`by_label["person"]` alone, which made `face_on_vehicles` dead on arrival: the
+pass would accept a car and no car was ever offered. The filter lives in ONE
+place — `FacePass.labels`, driven by the setting — and the engine asks.
+
 #### Recognition on events and alerts
 
 `GET /api/events` and `GET /api/events/{id}` carry `recognitions[]`:
@@ -1109,6 +1133,20 @@ stay there. `AppSettings` drops anything it does not model, and PATCH validates
 the merged document and stores the result, so a missing model would not merely
 make recognition unreachable: every unrelated settings save would silently wipe
 it back to defaults. `profiles_smoke` pins both halves.
+
+**Home Assistant hears WHO** (`mqtt_ha.publish_recognition`). Each camera gains
+a `Recognized` sensor at `<base>/<cam>/recognized/state`, with the detail on
+`.../recognized/attributes`. Three states are deliberately distinguishable:
+a **name**, `Unknown` (a face was read and matched nobody), and `""` (recognition
+has not spoken). `Unknown` is published rather than suppressed — "someone was at
+the door and it was nobody we know" is the case most worth automating on, and
+silence there would be indistinguishable from the feature being off.
+
+Published from `note_recognition`, i.e. the moment recognition decides — NOT
+from the stored row, which lands at track end long after the subject has walked
+away. The event's own `last_event/attributes` also carries `recognitions[]`, so
+an automation reading that topic need not correlate two. MQTT being unconfigured
+is a no-op, never a failure: recognition must not depend on it.
 
 **The notification gate** (`EventsPipeline._recognition_gate`). Recognition
 finishes a few frames after an object is confirmed — after the event has already

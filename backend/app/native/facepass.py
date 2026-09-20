@@ -170,6 +170,26 @@ class FacePass:
         # Which labels this pass looks at. Recomputed on the tick so that
         # turning face_on_vehicles on takes effect without a restart.
         self._labels: tuple[str, ...] = FACE_LABELS
+        # WHY EVERY FACE WAS DROPPED, counted.
+        #
+        # A face can fail to become a reviewable candidate at six separate
+        # points, and every one of them was silent — so "unknown faces is
+        # emptier than it should be" had no answer short of reading this file.
+        # Each is a legitimate outcome; what was missing was the ability to
+        # tell WHICH is happening, because the remedies are opposite. "too
+        # small" means move the camera or raise the detect resolution; "below
+        # quality" means lower the floor; "duplicate" means it is working as
+        # intended and the person has already been seen.
+        self.drops: dict[str, int] = {
+            "no_face_found": 0,      # YuNet found nothing in the person crop
+            "below_quality": 0,      # scored under the buffer's floor, incl. the
+                                     # resolution veto for a face under FACE_MIN_PX
+            "no_shot_at_end": 0,     # track ended with an empty buffer
+            "embed_failed": 0,       # the embedder returned nothing
+            "duplicate": 0,          # same stranger already in the store
+            "crop_write_failed": 0,  # row stored, image did not — a placeholder
+        }
+        self.kept = 0
         # Where faces are actually legible on each camera — the map the ROI
         # editor draws over the live frame. Accumulated in memory and flushed
         # on the maintenance tick.
@@ -182,6 +202,17 @@ class FacePass:
     @property
     def model_key(self) -> str:
         return self._recognizer.model_key
+
+    @property
+    def labels(self) -> tuple[str, ...]:
+        """Labels this pass wants offered to it.
+
+        Read by the engine so the person/vehicle decision lives in ONE place —
+        here, with the setting that drives it. The engine previously hardcoded
+        "person", which made `face_on_vehicles` unreachable: the pass would
+        accept a car and no car was ever handed to it.
+        """
+        return self._labels
 
     async def reload_gallery(self) -> None:
         """Rebuild the in-memory gallery from the database.
@@ -279,6 +310,7 @@ class FacePass:
         person, ox, oy = cropped
         faces = await self._recognizer.detect(person)
         if not faces:
+            self.drops["no_face_found"] += 1
             return
         # One person box, one face: the biggest. A second face inside a person
         # box is someone standing behind them, and it belongs to THEIR track.
@@ -300,10 +332,15 @@ class FacePass:
             cx = (ox + (face.box[0] + face.box[2]) / 2.0) / fw
             cy = (oy + (face.box[1] + face.box[3]) / 2.0) / fh
             self.heatmap.record(camera, "face", cx, cy, quality.total)
-        st.buffer.offer(
+        if not st.buffer.offer(
             tracker_id=obs.tracker_id, kind="face", crop_bgr=aligned,
             box=face.box, frame_time=frame_time, quality=quality,
-        )
+        ):
+            # Refused: under the quality floor, or too close in time to a
+            # shot already held. Only the first is worth counting as a
+            # drop — the second is the diversity rule working.
+            if not quality:
+                self.drops["below_quality"] += 1
 
         best = st.buffer.best(obs.tracker_id, "face")
         if best is None or best.quality.total < self._identify_quality:
@@ -361,12 +398,14 @@ class FacePass:
         try:
             shot = st.buffer.best(tracker_id, "face")
             if shot is None:
+                self.drops["no_shot_at_end"] += 1
                 return
             # Re-identify from the best shot of the WHOLE visit, which is only
             # knowable now. This is the answer that reaches the database.
             if st.identified_from is None or shot.quality.total > st.identified_from:
                 await self._identify(st, tracker_id, shot)
             if st.embedding is None:
+                self.drops["embed_failed"] += 1
                 return
             await self._store(st, shot)
         except Exception:
@@ -396,6 +435,7 @@ class FacePass:
     async def _store_candidate(self, st: _TrackState, shot: Shot, now: float) -> None:
         """Keep an unmatched face so it can be enrolled later."""
         if await self._is_duplicate(st.embedding):
+            self.drops["duplicate"] += 1
             return
         match = st.match
         cur = await self._db.conn.execute(
@@ -411,6 +451,17 @@ class FacePass:
         )
         candidate_id = cur.lastrowid
         name = await asyncio.to_thread(self._write_crop, candidate_id, shot.crop)
+        if not name:
+            # The row survives without its image — the embedding is what
+            # matches — but the operator sees a placeholder and cannot
+            # judge it, so this is a real failure and must be visible.
+            self.drops["crop_write_failed"] += 1
+            log.warning(
+                "candidate %d stored WITHOUT its crop — %s is not writable?",
+                candidate_id, self._images_dir,
+            )
+        else:
+            self.kept += 1
         if name:
             await self._db.conn.execute(
                 "UPDATE recognition_candidates SET image_path = ? WHERE id = ?",
@@ -599,4 +650,16 @@ class FacePass:
             "live_tracks": len(self._tracks),
             "gallery": (self._gallery.counts() if self._gallery is not None else {}),
             "model_key": self.model_key,
+            "labels": list(self._labels),
+            # Counted since boot. `drops` answers "why is Unknown Faces emptier
+            # than I expected" without reading the source, and the remedies
+            # differ per reason — see the comment on self.drops.
+            "kept_candidates": self.kept,
+            "drops": dict(self.drops),
+            "tuning": {
+                "shots_per_track": self._shots,
+                "shot_min_gap_seconds": self._shot_gap,
+                "pass_interval_seconds": self._pass_interval,
+                "identify_quality": self._identify_quality,
+            },
         }

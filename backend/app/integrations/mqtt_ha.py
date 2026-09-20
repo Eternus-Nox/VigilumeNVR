@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -141,6 +142,22 @@ def last_event_state_topic(base: str, camera: str) -> str:
 
 def last_event_attributes_topic(base: str, camera: str) -> str:
     return f"{base}/{camera}/last_event/attributes"
+
+
+def recognized_state_topic(base: str, camera: str) -> str:
+    """WHO was last recognized on this camera.
+
+    A SEPARATE sensor from last_event rather than another attribute on it,
+    because the two answer different questions and change at different times:
+    last_event says a person was seen, this says which person. An automation
+    like "unlock nothing, but stop announcing when it is Adam" wants to trigger
+    on a name changing, not on every detection tick.
+    """
+    return f"{base}/{camera}/recognized/state"
+
+
+def recognized_attributes_topic(base: str, camera: str) -> str:
+    return f"{base}/{camera}/recognized/attributes"
 
 
 def image_url_topic(base: str, camera: str) -> str:
@@ -259,6 +276,23 @@ def build_discovery(
             "state_topic": last_event_state_topic(base, camera),
             "json_attributes_topic": last_event_attributes_topic(base, camera),
             "icon": "mdi:cctv",
+            "device": device,
+            **avail,
+        }))
+
+        # Recognized-person sensor. State is the NAME, or "Unknown" when a face
+        # was read and matched nobody, or "" when nothing has been read. Those
+        # three are deliberately distinguishable: "" means recognition has not
+        # spoken, "Unknown" means it has and the answer was nobody — which is
+        # the state most worth automating on.
+        uid = f"{base}_{camera}_recognized"
+        out.append((f"{prefix}/sensor/{uid}/config", {
+            "name": "Recognized",
+            "unique_id": uid,
+            "object_id": uid,
+            "state_topic": recognized_state_topic(base, camera),
+            "json_attributes_topic": recognized_attributes_topic(base, camera),
+            "icon": "mdi:account-check",
             "device": device,
             **avail,
         }))
@@ -582,6 +616,47 @@ class MqttPublisher:
             if snapshot_url and event_row.get("has_snapshot"):
                 self._set_state(image_url_topic(base, camera), snapshot_url)
 
+    async def publish_recognition(
+        self,
+        camera: str,
+        *,
+        kind: str,
+        name: str,
+        plate: str,
+        known: bool,
+        score: float = 0.0,
+    ) -> None:
+        """A face or plate was read. Publishes WHO, plus the detail as attributes.
+
+        Called the moment recognition decides, not when the row is stored —
+        storage happens at track end, long after the person has walked away,
+        and an automation that fires then is useless.
+
+        `known: False` publishes "Unknown" rather than staying silent. That is
+        an ANSWER, and it is the one worth automating on: "someone was at the
+        door and it was nobody we know" is exactly the case an operator wants a
+        trigger for. Staying quiet would make the sensor indistinguishable from
+        recognition being switched off.
+        """
+        if not self._cfg.runnable:
+            return
+        base = self._cfg.base_topic
+        if known and name:
+            state = name
+        elif plate:
+            state = plate
+        else:
+            state = "Unknown"
+        self._set_state(recognized_state_topic(base, camera), state)
+        self._set_state(recognized_attributes_topic(base, camera), json.dumps({
+            "kind": kind,
+            "known": bool(known),
+            "name": name,
+            "plate": plate,
+            "score": round(float(score), 4),
+            "at": time.time(),
+        }))
+
     async def publish_connectivity(self, camera: str, online: bool) -> None:
         """Camera reachability changed (from the CameraProber). No-op when the
         integration is disabled."""
@@ -598,6 +673,18 @@ class MqttPublisher:
             "started": row.get("start_time"),
             "ended": row.get("end_time"),
             "snapshot_url": self._snapshot_url(int(row["id"])) if row.get("id") is not None else None,
+            # Who, when the event carries it. Present on the event's own
+            # attributes as well as the dedicated sensor so an automation
+            # reading last_event does not have to correlate two topics.
+            "recognitions": [
+                {
+                    "kind": r.get("kind"),
+                    "name": r.get("name") or "",
+                    "plate": r.get("plate") or "",
+                    "known": bool(r.get("known")),
+                }
+                for r in (row.get("recognitions") or [])
+            ],
         }
 
     def _public_url(self) -> str:

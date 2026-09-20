@@ -61,6 +61,10 @@ def pipeline_with(**recognition) -> EventsPipeline:
     p._settings = FakeSettings(**recognition)
     p._active = {}
     p._cooldowns = {}
+    # note_recognition also publishes to Home Assistant. None = the
+    # integration is off, which is the default and must stay a no-op —
+    # recognition working must never depend on MQTT being configured.
+    p._mqtt = None
     return p
 
 
@@ -242,9 +246,78 @@ def events_join_checks() -> None:
           "no events -> no query at all")
 
 
+class FakeMqtt:
+    """Records what would reach the broker."""
+
+    def __init__(self):
+        self.published = []
+
+    async def publish_recognition(self, camera, *, kind, name, plate, known, score=0.0):
+        self.published.append(
+            {"camera": camera, "kind": kind, "name": name,
+             "plate": plate, "known": known, "score": score}
+        )
+
+
+def mqtt_checks() -> None:
+    """Home Assistant must hear WHO, at the moment recognition decides."""
+    print("\nnote_recognition publishes to MQTT")
+    p = pipeline_with(enabled=True)
+    p._spawned = []
+    # _spawn is what actually runs the coroutine in production; here run it
+    # synchronously so the publish is observable.
+    import asyncio
+
+    def run(coro):
+        asyncio.get_event_loop_policy().new_event_loop().run_until_complete(coro)
+
+    p._spawn = run  # type: ignore
+    mqtt = FakeMqtt()
+    p._mqtt = mqtt
+
+    st = state()
+    st["last_after"] = after(camera="front_door")
+    p._active["native.1"] = st
+    p.note_recognition("native.1", "face", name="Adam", profile_id=7, score=0.91)
+    hit = next((x for x in mqtt.published if x["name"] == "Adam"), None)
+    check(hit is not None, "a recognized person is published")
+    if hit:
+        check(hit["camera"] == "front_door", "...on the camera that saw them")
+        check(hit["known"] is True, "...marked known, because a profile matched")
+
+    st2 = state()
+    st2["last_after"] = after(camera="front_door")
+    p._active["native.2"] = st2
+    p.note_recognition("native.2", "face", name="", profile_id=None, score=0.2)
+    unknown = [x for x in mqtt.published if not x["known"]]
+    check(len(unknown) == 1,
+          "an UNMATCHED face is published too — 'nobody we know was at the "
+          "door' is the state most worth automating on, and silence there is "
+          "indistinguishable from recognition being switched off")
+
+    print("\nMQTT off is a no-op, not a failure")
+    p2 = pipeline_with(enabled=True)
+    p2._spawned = []
+    p2._spawn = lambda coro: (p2._spawned.append(coro), coro.close())  # type: ignore
+    p2._mqtt = None
+    st3 = state()
+    st3["last_after"] = after()
+    p2._active["native.3"] = st3
+    raised = False
+    try:
+        p2.note_recognition("native.3", "face", name="Adam", profile_id=1)
+    except Exception:
+        raised = True
+    check(not raised,
+          "recognition works with no MQTT configured — the integration is off "
+          "by default and must never be a dependency")
+    check(len(st3["recognitions"]) == 1, "...and the recognition is still recorded")
+
+
 def main() -> int:
     gate_checks()
     note_checks()
+    mqtt_checks()
     events_join_checks()
     print()
     if _failures:

@@ -667,6 +667,29 @@ export interface RecognitionStatus {
     string,
     { calls: number; mean_ms: number; p95_ms: number; max_ms: number; lifetime_mean_ms: number }
   >;
+  /**
+   * The face pass's own accounting. `drops` counts, per reason, every face
+   * that did NOT become a reviewable candidate — each a legitimate outcome,
+   * but with opposite remedies, which is why the reason matters:
+   *
+   *   no_face_found     the person was facing away; nothing to do
+   *   below_quality     too small or too blurry to be worth keeping. A face
+   *                     under the model's minimum pixel width scores zero
+   *                     outright, so this is usually "the camera is too far"
+   *   no_shot_at_end    the whole visit produced nothing usable
+   *   embed_failed      a crop was kept but could not be read
+   *   duplicate         this stranger is already in the list — working
+   *   crop_write_failed the row exists but its image did not save, which is
+   *                     what a placeholder with no picture means
+   */
+  face?: {
+    live_tracks?: number;
+    model_key?: string;
+    labels?: string[];
+    kept_candidates?: number;
+    drops?: Record<string, number>;
+    tuning?: Record<string, number>;
+  };
 }
 
 export interface NvrEvent {

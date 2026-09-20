@@ -814,13 +814,30 @@ class DetectionEngine:
         # on unconfirmed flicker belongs to nobody. FacePass throttles itself
         # per track and swallows its own errors — recognition is an enhancement
         # on top of detection and recording, and must never cost a frame.
-        if self._face is not None and "person" in by_label:
-            open_fid = ""
-            st_person = self._events.get((camera, "person"))
-            if st_person is not None:
-                open_fid = st_person.fid
-            await self._face.observe(cam, by_label["person"], frame_bgr,
-                                     frame_time, open_fid)
+        if self._face is not None:
+            # Hand over people AND vehicles, and let FacePass decide which it
+            # actually wants (its `_labels`, driven by
+            # settings.recognition.face_on_vehicles).
+            #
+            # This used to pass by_label["person"] alone, which made
+            # face_on_vehicles dead on arrival: the pass would happily accept a
+            # car, but no car was ever offered to it. The filter belongs in ONE
+            # place, and that place is the pass that owns the setting.
+            faceable = [
+                o for label in self._face.labels for o in by_label.get(label, ())
+            ]
+            if faceable:
+                open_fid = ""
+                # The event fid for the label that actually opened one. A face
+                # seen on a car belongs to the car's event, not to a person
+                # event that may not exist.
+                for label in ("person", "car", "truck", "bus", "motorcycle"):
+                    st_lbl = self._events.get((camera, label))
+                    if st_lbl is not None:
+                        open_fid = st_lbl.fid
+                        break
+                await self._face.observe(cam, faceable, frame_bgr,
+                                         frame_time, open_fid)
 
         # --- plate reading pass ---
         # Fed the vehicle labels the camera is actually tracking. PlatePass

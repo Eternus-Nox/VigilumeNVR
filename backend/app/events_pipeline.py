@@ -579,6 +579,21 @@ class EventsPipeline:
             last = state.get("last_after")
             if last:
                 self._spawn(self._enrich_and_notify(fid, last))
+        # Home Assistant hears about it at the same moment the alert does.
+        # Published from HERE rather than from the stored row for the same
+        # reason the notification is re-run here: the row lands at track end,
+        # long after the person has walked away, and an automation that fires
+        # then is useless.
+        camera = (state.get("last_after") or {}).get("camera") or ""
+        if self._mqtt is not None and camera:
+            self._spawn(self._mqtt.publish_recognition(
+                camera,
+                kind=kind,
+                name=name,
+                plate=plate,
+                known=profile_id is not None,
+                score=float(score),
+            ))
         if not state.get("notified"):
             # The hold exists to wait for exactly this. Re-check now rather than
             # on the next frame's update, so a named alert is not delayed by a
