@@ -29,6 +29,10 @@ struct RecognitionCandidatesView: View {
     @State private var enrolling = false
     @State private var showingPicker = false
     @State private var confirmingClear = false
+    // The sighting open in the review sheet. Held as the row rather than an
+    // id so the sheet keeps rendering what was tapped even after a reload has
+    // dropped it from `candidates` — which is exactly what enrolling does.
+    @State private var reviewing: RecognitionCandidate?
     @State private var toast: String?
 
     private var isFace: Bool { kind == "face" }
@@ -95,6 +99,15 @@ struct RecognitionCandidatesView: View {
         .sheet(isPresented: $showingPicker) {
             profilePicker
         }
+        .sheet(item: $reviewing) { candidate in
+            CandidateReviewSheet(
+                candidate: candidate,
+                profiles: profiles,
+                onEnroll: { profile in await enroll(into: profile, ids: [candidate.id]) },
+                onDelete: { await deleteOne(candidate.id) }
+            )
+            .environmentObject(session)
+        }
         .alert(
             "Something went wrong",
             isPresented: Binding(
@@ -129,29 +142,37 @@ struct RecognitionCandidatesView: View {
         let isSelected = selected.contains(candidate.id)
         VStack(spacing: 4) {
             ZStack(alignment: .topTrailing) {
-                AsyncImage(url: session.api?.recognitionCandidateImageURL(id: candidate.id)) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().scaledToFill()
-                    case .failure:
-                        Rectangle().fill(Theme.bgDeep)
-                            .overlay { Image(systemName: "photo").foregroundStyle(Theme.textSecondary) }
-                    default:
-                        Rectangle().fill(Theme.bgDeep)
+                cropImage(candidate)
+                    .frame(width: 104, height: 104)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10)
+                            .strokeBorder(isSelected ? Theme.accent : Color.clear, lineWidth: 3)
                     }
-                }
-                .frame(width: 104, height: 104)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 10)
-                        .strokeBorder(isSelected ? Theme.accent : Color.clear, lineWidth: 3)
-                }
 
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .font(.title3)
                     .foregroundStyle(isSelected ? Theme.accent : Color.white.opacity(0.8),
                                      Color.black.opacity(0.45))
                     .padding(4)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                // Look closer. A separate control from the tap-to-select
+                // underneath: ticking is for enrolling several at once, this
+                // is for deciding what ONE of them actually is — and the crop
+                // is not enough to decide that.
+                Button {
+                    reviewing = candidate
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.white)
+                        .padding(5)
+                        .background(Circle().fill(Color.black.opacity(0.55)))
+                }
+                .buttonStyle(.plain)
+                .padding(5)
+                .accessibilityLabel("See the whole frame this was cut from")
             }
 
             // The quality bar is the whole point of this screen: it is the
@@ -182,6 +203,46 @@ struct RecognitionCandidatesView: View {
                 Label("Delete this sighting", systemImage: "trash")
             }
         }
+    }
+
+    /// The crop itself.
+    ///
+    /// `hasImage` is CHECKED, not assumed. A candidate is stored on its
+    /// embedding and the crop is written separately, so a disk that is full or
+    /// not writable leaves a row with no image at all — asking AsyncImage for
+    /// it anyway is what put an unexplained broken placeholder on this screen.
+    ///
+    /// Extracted from `tile` rather than inlined: the tile is already a big
+    /// ViewBuilder with a selection ternary in it, and this file has had the
+    /// Swift type-checker give up on a smaller expression than that.
+    @ViewBuilder
+    private func cropImage(_ candidate: RecognitionCandidate) -> some View {
+        if candidate.hasImage,
+           let url = session.api?.recognitionCandidateImageURL(id: candidate.id) {
+            AsyncImage(url: url) { phase in
+                switch phase {
+                case .success(let image):
+                    image.resizable().scaledToFill()
+                case .failure:
+                    missingCrop("exclamationmark.triangle")
+                default:
+                    Rectangle().fill(Theme.bgDeep)
+                }
+            }
+        } else {
+            missingCrop("photo")
+        }
+    }
+
+    /// A tile with no crop behind it. Named rather than drawn blank: the row
+    /// is still enrollable (the embedding is what matches), so this is "the
+    /// picture is missing", not "this sighting is broken".
+    private func missingCrop(_ symbol: String) -> some View {
+        Rectangle().fill(Theme.bgDeep)
+            .overlay {
+                Image(systemName: symbol)
+                    .foregroundStyle(Theme.textSecondary)
+            }
     }
 
     // MARK: Enroll bar + picker
@@ -270,15 +331,19 @@ struct RecognitionCandidatesView: View {
         }
     }
 
-    private func enroll(into profile: RecognitionProfile) async {
-        guard let api = session.api, !selected.isEmpty else { return }
+    /// Add sightings to a profile. `ids` defaults to the tick-selection, which
+    /// is the grid's bulk path; the review sheet passes the one crop it is
+    /// showing. Both are the same call, so neither can drift from the other.
+    private func enroll(into profile: RecognitionProfile, ids: [Int]? = nil) async {
+        let candidateIds = ids ?? Array(selected)
+        guard let api = session.api, !candidateIds.isEmpty else { return }
         enrolling = true
         defer { enrolling = false }
         do {
             let n = try await api.enrollCandidates(
-                profileId: profile.id, candidateIds: Array(selected)
+                profileId: profile.id, candidateIds: candidateIds
             )
-            selected.removeAll()
+            selected.subtract(candidateIds)
             await reload()
             await onChange()
             await flash("Enrolled \(n) into \(profile.name)")

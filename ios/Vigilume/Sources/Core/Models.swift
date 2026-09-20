@@ -579,6 +579,24 @@ struct RecognitionCandidate: Codable, Identifiable, Sendable {
     let bestProfileId: Int?
     let createdAt: Double
     let hasImage: Bool
+    /// The numeric id of the event this was seen in, or nil once that event
+    /// has been purged.
+    let eventId: Int?
+    /// Where the crop sat in the FULL frame, as [x0,y0,x1,y1] in 0..1.
+    ///
+    /// The crop alone is an aligned 112 pt face: the right input for the
+    /// matcher and not enough for a person to decide who someone is. This is
+    /// what lets the review sheet draw the whole scene with THIS subject
+    /// ringed. nil for a sighting recorded before the rectangle was captured
+    /// — the frame is then shown plain, because a ring in the wrong place is
+    /// worse than no ring.
+    let frameBox: [Double]?
+
+    /// True when the server says the full frame is still available. Checked
+    /// rather than assumed: candidates outlive events under a short
+    /// retention, and the alternative is a sheet that opens on a broken
+    /// image placeholder.
+    var hasFrame: Bool { eventId != nil }
 }
 
 /// GET /api/recognition/status — what recognition can currently do.

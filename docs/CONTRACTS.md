@@ -894,7 +894,7 @@ any event/count/notification.
 WebSocket:
 - `WS /api/ws?token=` — server pushes `{type:"event_new"|"event_update"|"event_end"|"doorbell", event:{...}}`, `{type:"camera_status", ...}`, and `{type:"model_status", key, tier, state, progress_pct, active, loaded}` for live UI updates.
 
-### Recognition — faces & plates (`/api/recognition`, schema v22)
+### Recognition — faces & plates (`/api/recognition`, schema v25)
 
 **ADMIN-ONLY, INCLUDING THE READS.** This is the one router that departs from
 "a viewer may read, an admin may write", and the reason is content rather than
@@ -922,9 +922,34 @@ scored.
 - `POST /api/recognition/profiles/{id}/enroll` `{candidate_ids:[...]}` → `{enrolled, sample_ids}`. **Atomic** across the batch, kind-checked (a face candidate into a vehicle profile → 400), and it **MOVES** each crop from the rolling candidate directory into the durable profile directory — copying would leave enrolled references in the directory the retention purge walks.
 - `GET /api/recognition/profiles/{id}/similar[?limit=]` → `{profile_id, threshold, candidates[]}` — unmatched crops that look like this profile, each with a `similarity`, best first. **A read: it applies nothing.** `POST .../enroll` also returns `similar[]` + `similar_threshold`, so the offer lands at the moment the operator is thinking about that person.
 - `DELETE /api/recognition/samples/{id}` → 204 (+ unlinks its image).
-- `GET /api/recognition/candidates[?kind=&camera=&limit=]` → unmatched crops **best-quality first**, because this list exists to be enrolled from and the shot worth enrolling is the legible one, not the most recent.
+- `GET /api/recognition/candidates[?kind=&camera=&limit=]` → unmatched crops **best-quality first**, because this list exists to be enrolled from and the shot worth enrolling is the legible one, not the most recent. Each row also carries `event_id`, `frame_url` and `frame_box` (see below); event ids are resolved for the whole page in ONE query, not one per row.
 - `DELETE /api/recognition/candidates/{id}` and `DELETE /api/recognition/candidates[?kind=]` → 204.
 - `GET /api/recognition/{samples,candidates}/{id}/image.jpg` — media-scope **admin** token.
+- `GET /api/recognition/candidates/{id}/frame.jpg` — same gate; the **whole frame** the crop was cut from.
+
+**Reviewing a candidate needs the frame, not the crop.** `image.jpg` is the
+aligned 112×112 the matcher reads: correct as an embedding input, and a poor
+basis for a human decision — it cannot say who else was in the shot or, on a
+doorstep with three people, which of them it is. Enrolling the wrong face is
+the one mistake here that persists (the gallery then matches a stranger as
+you), so clients review against the scene:
+
+- `frame_url` — the originating event's snapshot. **No new pixels are stored:**
+  the candidate already carried `event_fid`, so this is a lookup. `null`, and
+  the route 404s, once that event is purged — normal under a short retention,
+  and advertised in advance so a client never draws a link that cannot load.
+- `frame_box` — `[x0,y0,x1,y1]` in 0..1 of that frame, or `null`. Recorded by
+  the passes while the frame dimensions are still in hand; the shot's own box
+  is relative to an intermediate person/vehicle crop and locates nothing in
+  the original. Rows written before v25 carry `null` and are shown without a
+  rectangle — nothing backfills, because those coordinates were never recorded.
+- `event_id` — the numeric event, so a client can open it directly.
+
+Note for clients: these images are **small and admin-only**, so fetch them over
+the primary API host. Routing them down a LAN-preferred media path (which iOS
+does for video) fails wherever the LAN address resolves to something else — a
+same-numbered subnet at a café answers the reachability probe — and the symptom
+is rows that load beside images that never do.
 
 Camera fields `face_zones` / `plate_zones` (normalized polygons, same shape as
 `include_zones`) mark where a face or plate is actually legible. Unlike

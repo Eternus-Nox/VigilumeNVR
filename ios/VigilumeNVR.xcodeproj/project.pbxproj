@@ -70,6 +70,7 @@
 		E93A2AFA8919F09DF4F6EA9C /* KeychainHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7617C12846A1870E8C81340E /* KeychainHelper.swift */; };
 		EEB016BD8F517F1010E3DEDA /* PushCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD474004D572CDB08BC59D43 /* PushCrypto.swift */; };
 		FDEEE0760623008F43F8E941 /* MediaSaver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D6E0AE3FE36ED5D2FF78B9D /* MediaSaver.swift */; };
+		06BD6E08947840939DC59B2D /* CandidateReviewSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E89168ACEA74A3EA85F441C /* CandidateReviewSheet.swift */; };
 		1B03A91F05B545533AEBE709 /* RecognitionCandidatesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73B342379C66458A146CDE1E /* RecognitionCandidatesView.swift */; };
 		B4C826C6A697A7592D2450E2 /* RecognitionProfileDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAE1654E7A2DEBDDBF514492 /* RecognitionProfileDetailView.swift */; };
 		16A88067C89913344004FEA6 /* RecognitionProfilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9967B1CFACA4549E59117D1E /* RecognitionProfilesView.swift */; };
@@ -163,6 +164,7 @@
 		F78A71AE83D7D8F515283332 /* WHEPPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WHEPPlayer.swift; sourceTree = "<group>"; };
 		F7F3462BE7E9CFDDEDD8F19A /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		F881E7E34CE57C056A9C519E /* EventSocket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventSocket.swift; sourceTree = "<group>"; };
+		4E89168ACEA74A3EA85F441C /* CandidateReviewSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandidateReviewSheet.swift; sourceTree = "<group>"; };
 		73B342379C66458A146CDE1E /* RecognitionCandidatesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecognitionCandidatesView.swift; sourceTree = "<group>"; };
 		FAE1654E7A2DEBDDBF514492 /* RecognitionProfileDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecognitionProfileDetailView.swift; sourceTree = "<group>"; };
 		9967B1CFACA4549E59117D1E /* RecognitionProfilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecognitionProfilesView.swift; sourceTree = "<group>"; };
@@ -351,6 +353,7 @@
 				5700B8693D196B3820E3F22E /* PhonePushSettingsView.swift */,
 				61F64A9C6F5A596FEA1936F1 /* PrivacyModeView.swift */,
 				F57D205AD66D121CD9CEB397 /* PushManager.swift */,
+				4E89168ACEA74A3EA85F441C /* CandidateReviewSheet.swift */,
 				73B342379C66458A146CDE1E /* RecognitionCandidatesView.swift */,
 				FAE1654E7A2DEBDDBF514492 /* RecognitionProfileDetailView.swift */,
 				9967B1CFACA4549E59117D1E /* RecognitionProfilesView.swift */,
@@ -496,6 +499,7 @@
 				74B32DA5EE5E312825D7C508 /* PrivacyModeView.swift in Sources */,
 				189E6FD20F912685B828CF51 /* PushCrypto.swift in Sources */,
 				B7D48C6D32DCB6874E0F50D8 /* PushManager.swift in Sources */,
+				06BD6E08947840939DC59B2D /* CandidateReviewSheet.swift in Sources */,
 				1B03A91F05B545533AEBE709 /* RecognitionCandidatesView.swift in Sources */,
 				B4C826C6A697A7592D2450E2 /* RecognitionProfileDetailView.swift in Sources */,
 				16A88067C89913344004FEA6 /* RecognitionProfilesView.swift in Sources */,

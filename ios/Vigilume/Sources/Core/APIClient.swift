@@ -585,14 +585,44 @@ struct APIClient: Sendable {
         ))
     }
 
-    /// Enrolled reference image (Bearer-free media URL for AsyncImage).
-    func recognitionSampleImageURL(id: Int) -> URL {
-        mediaURL("api/recognition/samples/\(id)/image.jpg")
+    /// A Bearer-free URL on `apiBase` — NOT on `mediaBase`.
+    ///
+    /// AsyncImage cannot send an Authorization header, so the token has to
+    /// travel in the query like `mediaURL` does. What it must NOT inherit is
+    /// mediaBase's LAN preference: that exists so video takes the fat local
+    /// path, and these are a few kilobytes. The LAN route is chosen by probing
+    /// whether the address ANSWERS, which any device on a same-numbered subnet
+    /// at a café or an office will do — and the symptom then is precisely the
+    /// one this screen showed: the rows load (apiBase) and every image is a
+    /// broken placeholder (mediaBase). For an image this small, being right
+    /// everywhere beats being fast at home.
+    private func tokenURL(_ path: String) -> URL {
+        var components = URLComponents(
+            url: apiBase.appendingPathComponent(path),
+            resolvingAgainstBaseURL: false
+        )!
+        if let token {
+            components.queryItems = [URLQueryItem(name: "token", value: token)]
+        }
+        return components.url!
     }
 
-    /// Candidate crop (Bearer-free media URL for AsyncImage).
+    /// Enrolled reference image (Bearer-free URL for AsyncImage).
+    func recognitionSampleImageURL(id: Int) -> URL {
+        tokenURL("api/recognition/samples/\(id)/image.jpg")
+    }
+
+    /// Candidate crop (Bearer-free URL for AsyncImage).
     func recognitionCandidateImageURL(id: Int) -> URL {
-        mediaURL("api/recognition/candidates/\(id)/image.jpg")
+        tokenURL("api/recognition/candidates/\(id)/image.jpg")
+    }
+
+    /// The WHOLE FRAME a candidate was cut from — the originating event's
+    /// snapshot. Only meaningful while that event still exists; the candidate
+    /// says so via `hasFrame`, so callers check before offering it rather than
+    /// opening a sheet onto a 404.
+    func recognitionCandidateFrameURL(id: Int) -> URL {
+        tokenURL("api/recognition/candidates/\(id)/frame.jpg")
     }
 
     /// ADMIN: GET /api/recognition/heatmap/{camera} — the legibility map the
