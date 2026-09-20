@@ -276,6 +276,10 @@ struct RecognitionProfileDetailView: View {
             enabled = d.enabled
             strictness = d.threshold ?? 0
         } catch {
+            // A cancelled request is not a failure — SwiftUI cancels the
+            // .task when the view refreshes. Alerting on it turns pull-to-
+            // refresh into a scary "is the NVR reachable?".
+            if (error as? ApiError)?.isCancelled == true { return }
             activeAlert = .error((error as? ApiError)?.message ?? error.localizedDescription)
         }
     }
@@ -291,6 +295,10 @@ struct RecognitionProfileDetailView: View {
             )
             await onChange()
         } catch {
+            // A cancelled request is not a failure — SwiftUI cancels the
+            // .task when the view refreshes. Alerting on it turns pull-to-
+            // refresh into a scary "is the NVR reachable?".
+            if (error as? ApiError)?.isCancelled == true { return }
             activeAlert = .error((error as? ApiError)?.message ?? error.localizedDescription)
             await reload()   // put the controls back where the server says they are
         }
@@ -304,6 +312,10 @@ struct RecognitionProfileDetailView: View {
             await reload()
             await onChange()
         } catch {
+            // A cancelled request is not a failure — SwiftUI cancels the
+            // .task when the view refreshes. Alerting on it turns pull-to-
+            // refresh into a scary "is the NVR reachable?".
+            if (error as? ApiError)?.isCancelled == true { return }
             activeAlert = .error((error as? ApiError)?.message ?? error.localizedDescription)
         }
     }
@@ -315,6 +327,10 @@ struct RecognitionProfileDetailView: View {
             await reload()
             await onChange()
         } catch {
+            // A cancelled request is not a failure — SwiftUI cancels the
+            // .task when the view refreshes. Alerting on it turns pull-to-
+            // refresh into a scary "is the NVR reachable?".
+            if (error as? ApiError)?.isCancelled == true { return }
             activeAlert = .error((error as? ApiError)?.message ?? error.localizedDescription)
         }
     }
@@ -326,6 +342,10 @@ struct RecognitionProfileDetailView: View {
             await onChange()
             dismiss()
         } catch {
+            // A cancelled request is not a failure — SwiftUI cancels the
+            // .task when the view refreshes. Alerting on it turns pull-to-
+            // refresh into a scary "is the NVR reachable?".
+            if (error as? ApiError)?.isCancelled == true { return }
             activeAlert = .error((error as? ApiError)?.message ?? error.localizedDescription)
         }
     }

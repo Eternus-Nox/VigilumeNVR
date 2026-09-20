@@ -321,6 +321,10 @@ struct RecognitionProfilesView: View {
             // must not blank the profile list it just returned successfully.
             settings = try? await api.settingsDocument().recognition
         } catch {
+            // A cancelled request is not a failure — SwiftUI cancels the
+            // .task when the view refreshes. Alerting on it turns pull-to-
+            // refresh into a scary "is the NVR reachable?".
+            if (error as? ApiError)?.isCancelled == true { return }
             activeAlert = .error((error as? ApiError)?.message ?? error.localizedDescription)
         }
     }
@@ -348,6 +352,10 @@ struct RecognitionProfilesView: View {
             // re-read status rather than assuming the toggle took effect now.
             status = try? await api.recognitionStatus()
         } catch {
+            // A cancelled request is not a failure — SwiftUI cancels the
+            // .task when the view refreshes. Alerting on it turns pull-to-
+            // refresh into a scary "is the NVR reachable?".
+            if (error as? ApiError)?.isCancelled == true { return }
             activeAlert = .error((error as? ApiError)?.message ?? error.localizedDescription)
             settings = try? await api.settingsDocument().recognition
         }
@@ -360,6 +368,10 @@ struct RecognitionProfilesView: View {
             _ = try await api.createRecognitionProfile(kind: kind, name: name)
             await reload()
         } catch {
+            // A cancelled request is not a failure — SwiftUI cancels the
+            // .task when the view refreshes. Alerting on it turns pull-to-
+            // refresh into a scary "is the NVR reachable?".
+            if (error as? ApiError)?.isCancelled == true { return }
             activeAlert = .error((error as? ApiError)?.message ?? error.localizedDescription)
         }
     }

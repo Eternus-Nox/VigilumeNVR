@@ -273,6 +273,10 @@ struct RecognitionZoneEditor: View {
             await onSaved()
             dismiss()
         } catch {
+            // A cancelled request is not a failure — SwiftUI cancels the
+            // .task when the view refreshes. Alerting on it turns pull-to-
+            // refresh into a scary "is the NVR reachable?".
+            if (error as? ApiError)?.isCancelled == true { return }
             alert = .error((error as? ApiError)?.message ?? error.localizedDescription)
         }
     }
@@ -283,6 +287,10 @@ struct RecognitionZoneEditor: View {
             try await api.clearRecognitionHeatmap(camera: camera.name, kind: kind)
             heatmap = try? await api.recognitionHeatmap(camera: camera.name, kind: kind)
         } catch {
+            // A cancelled request is not a failure — SwiftUI cancels the
+            // .task when the view refreshes. Alerting on it turns pull-to-
+            // refresh into a scary "is the NVR reachable?".
+            if (error as? ApiError)?.isCancelled == true { return }
             alert = .error((error as? ApiError)?.message ?? error.localizedDescription)
         }
     }

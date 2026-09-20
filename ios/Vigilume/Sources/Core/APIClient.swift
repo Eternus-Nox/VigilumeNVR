@@ -12,8 +12,20 @@ struct ApiError: Error, LocalizedError, Sendable {
     var errorDescription: String? { message }
     var isUnauthorized: Bool { status == 401 }
 
+    /// The request was CANCELLED — not a failure, and never worth alerting on.
+    ///
+    /// SwiftUI cancels a `.task {}` when its view refreshes or goes away, which
+    /// cancels the URLSession task under it. Without this, pull-to-refresh
+    /// races its own in-flight request and the loser surfaces as
+    /// "is the NVR reachable?" — a frightening, wrong message for a server that
+    /// is perfectly healthy, on the one gesture most likely to trigger it.
+    var isCancelled: Bool { status == -1 }
+
     static func network(_ underlying: Error? = nil) -> ApiError {
-        ApiError(status: 0, message: "Network error — is the NVR reachable?")
+        if (underlying as? URLError)?.code == .cancelled || underlying is CancellationError {
+            return ApiError(status: -1, message: "Cancelled")
+        }
+        return ApiError(status: 0, message: "Network error — is the NVR reachable?")
     }
 
     /// Build from a non-2xx response body.

@@ -262,6 +262,10 @@ struct RecognitionCandidatesView: View {
             // enroll bar can never name rows that no longer exist.
             selected = selected.intersection(Set(candidates.map(\.id)))
         } catch {
+            // A cancelled request is not a failure — SwiftUI cancels the
+            // .task when the view refreshes. Alerting on it turns pull-to-
+            // refresh into a scary "is the NVR reachable?".
+            if (error as? ApiError)?.isCancelled == true { return }
             errorMessage = (error as? ApiError)?.message ?? error.localizedDescription
         }
     }
@@ -279,6 +283,10 @@ struct RecognitionCandidatesView: View {
             await onChange()
             await flash("Enrolled \(n) into \(profile.name)")
         } catch {
+            // A cancelled request is not a failure — SwiftUI cancels the
+            // .task when the view refreshes. Alerting on it turns pull-to-
+            // refresh into a scary "is the NVR reachable?".
+            if (error as? ApiError)?.isCancelled == true { return }
             errorMessage = (error as? ApiError)?.message ?? error.localizedDescription
         }
     }
@@ -291,6 +299,10 @@ struct RecognitionCandidatesView: View {
             await reload()
             await onChange()
         } catch {
+            // A cancelled request is not a failure — SwiftUI cancels the
+            // .task when the view refreshes. Alerting on it turns pull-to-
+            // refresh into a scary "is the NVR reachable?".
+            if (error as? ApiError)?.isCancelled == true { return }
             errorMessage = (error as? ApiError)?.message ?? error.localizedDescription
         }
     }
@@ -303,6 +315,10 @@ struct RecognitionCandidatesView: View {
             await reload()
             await onChange()
         } catch {
+            // A cancelled request is not a failure — SwiftUI cancels the
+            // .task when the view refreshes. Alerting on it turns pull-to-
+            // refresh into a scary "is the NVR reachable?".
+            if (error as? ApiError)?.isCancelled == true { return }
             errorMessage = (error as? ApiError)?.message ?? error.localizedDescription
         }
     }
