@@ -629,6 +629,8 @@ export interface RecognitionCandidate {
   camera: string;
   /** The event this crop came from, when it came from one. */
   event_fid: string;
+  /** That event's numeric id, or null once the event has been purged. */
+  event_id: number | null;
   plate: string;
   quality: number;
   /** Best similarity against the gallery at capture time, and to whom. */
@@ -637,6 +639,17 @@ export interface RecognitionCandidate {
   created_at: number;
   has_image: boolean;
   image_url: string | null;
+  /**
+   * The WHOLE SCENE this crop was cut from — the event's snapshot. The crop is
+   * an aligned 112px face, which is what the matcher needs and not enough to
+   * decide who someone is; this is the image the review dialog opens with.
+   * null when the originating event is gone, which is normal under a short
+   * retention: show the crop alone rather than a link that cannot load.
+   */
+  frame_url: string | null;
+  /** Where the crop sat in that frame, as [x0,y0,x1,y1] in 0..1. null for a
+   *  sighting recorded before the rectangle was captured. */
+  frame_box: [number, number, number, number] | null;
 }
 
 export interface RecognitionStatus {

@@ -3352,6 +3352,130 @@ label > select {
   white-space: nowrap;
 }
 
+/* The grid item positions the zoom button; the tile itself must not, or the
+   button would be inside its stacking context and clicks would fall through
+   to the selection toggle underneath. */
+.recog-candidate-grid > li {
+  position: relative;
+}
+
+.recog-candidate-zoom {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+  border: none;
+  border-radius: 7px;
+  font-size: 0.8rem;
+  line-height: 1;
+  color: #f8fafc;
+  /* Legible over any frame, light or dark, without dimming the crop. */
+  background: rgba(15, 23, 42, 0.68);
+  backdrop-filter: blur(2px);
+}
+
+.recog-candidate-zoom:hover,
+.recog-candidate-zoom:focus-visible {
+  background: rgba(15, 23, 42, 0.9);
+}
+
+/* --- Reviewing one sighting against its full frame -------------------- */
+
+.candidate-review {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(220px, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+@media (max-width: 720px) {
+  .candidate-review {
+    grid-template-columns: 1fr;
+  }
+}
+
+.candidate-review-frame {
+  min-width: 0;
+}
+
+.candidate-frame-holder {
+  position: relative;
+  line-height: 0;
+  border-radius: 10px;
+  overflow: hidden;
+  background: rgba(15, 23, 42, 0.5);
+}
+
+.candidate-frame-holder img {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+/* Positioned in PERCENTAGES by the component, so it tracks the image at any
+   rendered size with nothing to measure and no load event to wait for. */
+.candidate-frame-box {
+  position: absolute;
+  border: 2px solid var(--accent, #38bdf8);
+  border-radius: 4px;
+  box-shadow: 0 0 0 9999px rgba(15, 23, 42, 0.35);
+  pointer-events: none;
+}
+
+.candidate-review-side {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  min-width: 0;
+}
+
+.candidate-review-crop {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.candidate-review-crop img,
+.candidate-review-crop .recog-candidate-noimg {
+  width: 84px;
+  height: 84px;
+  flex: none;
+  object-fit: cover;
+  border-radius: 10px;
+  background: var(--surface-alt, rgba(148, 163, 184, 0.08));
+}
+
+.candidate-review-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.15rem 0.6rem;
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+.candidate-review-facts > div {
+  display: contents;
+}
+
+.candidate-review-facts dt {
+  color: var(--text-secondary, #94a3b8);
+}
+
+.candidate-review-facts dd {
+  margin: 0;
+}
+
+.candidate-review-actions {
+  flex-wrap: wrap;
+  margin-top: auto;
+}
+
 .recog-sample {
   position: relative;
   border-radius: 10px;

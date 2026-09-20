@@ -34,6 +34,7 @@ import {
   type RecognitionStatus,
 } from '../../lib/api';
 import AuthImage from '../../components/AuthImage';
+import CandidateReview from '../../components/CandidateReview';
 import { ConfirmDialog } from '../../components/Modal';
 import { useAppState } from '../../state/AppState';
 import { formatDateTime, titleCase } from '../../lib/format';
@@ -94,6 +95,11 @@ export default function RecognitionTab() {
     profileName: string;
     items: (RecognitionCandidate & { similarity: number })[];
   } | null>(null);
+  // The sighting open in the review dialog. Held as the row rather than an id
+  // so the dialog keeps rendering the thing that was clicked even after a
+  // reload has dropped it from `candidates` (which is exactly what an
+  // enrollment does).
+  const [reviewing, setReviewing] = useState<RecognitionCandidate | null>(null);
   const [newName, setNewName] = useState('');
   const [confirm, setConfirm] = useState<
     | { kind: 'profile'; id: number; name: string }
@@ -165,18 +171,28 @@ export default function RecognitionTab() {
     }
   };
 
-  const enroll = async (profileId: number) => {
-    if (selected.size === 0) return;
+  /**
+   * Add sightings to a profile. `ids` defaults to the tick-selection, which is
+   * the grid's bulk path; the review dialog passes the one crop it is showing.
+   * Both are the same call — there is no separate "review enroll" — so the
+   * lookalike offer and the refresh below happen either way.
+   */
+  const enroll = async (profileId: number, ids: number[] = [...selected]) => {
+    if (ids.length === 0) return;
     setBusy(true);
     try {
-      const result = await api.enrollRecognitionCandidates(profileId, [...selected]);
+      const result = await api.enrollRecognitionCandidates(profileId, ids);
       const { enrolled } = result;
       pushToast({
         kind: 'info',
         title: `Enrolled ${enrolled} ${enrolled === 1 ? 'shot' : 'shots'}`,
         body: '',
       });
-      setSelected(new Set());
+      setSelected((prev) => {
+        const done = new Set(ids);
+        return new Set([...prev].filter((id) => !done.has(id)));
+      });
+      setReviewing(null);
       // Offer the lookalikes at the one moment the operator is thinking about
       // this person, rather than expecting them to know to go looking later.
       const similar = result.similar ?? [];
@@ -285,6 +301,30 @@ export default function RecognitionTab() {
       if (openProfile?.id === suggested.profileId) await refreshOpen(suggested.profileId);
     } catch (e) {
       fail(e, 'Could not add those');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Discard one sighting from the review dialog. Not behind a confirmation:
+   * a candidate is a rolling, unenrolled crop that the purge would remove on
+   * its own, so dropping one costs nothing that a later sighting does not
+   * replace — unlike deleting a profile, which is guarded.
+   */
+  const discard = async (id: number) => {
+    setBusy(true);
+    try {
+      await api.deleteRecognitionCandidate(id);
+      setSelected((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      setReviewing(null);
+      await reload();
+    } catch (e) {
+      fail(e, 'Could not remove that sighting');
     } finally {
       setBusy(false);
     }
@@ -626,6 +666,7 @@ export default function RecognitionTab() {
             {isPerson ? 'Add a person' : 'Add a vehicle'}
             <div className="inline-form">
               <input
+                id="recog-new-name"
                 type="text"
                 value={newName}
                 placeholder={isPerson ? 'Name' : 'Vehicle name'}
@@ -795,6 +836,20 @@ export default function RecognitionTab() {
                         <span>{formatDateTime(c.created_at)}</span>
                       </span>
                     </button>
+                    {/* A SIBLING of the tile, not a child: a button inside a
+                        button is invalid, and nesting it would also make every
+                        "look closer" click toggle the selection. Ticking is
+                        for enrolling several at once; this is for deciding
+                        what one of them actually is. */}
+                    <button
+                      type="button"
+                      className="recog-candidate-zoom"
+                      onClick={() => setReviewing(c)}
+                      title="See the whole frame"
+                      aria-label="See the whole frame this was cut from"
+                    >
+                      <span aria-hidden="true">⤢</span>
+                    </button>
                   </li>
                 );
               })}
@@ -802,6 +857,25 @@ export default function RecognitionTab() {
           </>
         )}
       </section>
+
+      {reviewing && (
+        <CandidateReview
+          candidate={reviewing}
+          profiles={profiles}
+          busy={busy}
+          onEnroll={(profileId) => void enroll(profileId, [reviewing.id])}
+          onCreateProfile={() => {
+            // Send them to the name field with the crop still selected, so
+            // the new profile is one enroll away rather than a hunt back
+            // through the grid for the shot they were just looking at.
+            setSelected((prev) => new Set(prev).add(reviewing.id));
+            setReviewing(null);
+            document.getElementById('recog-new-name')?.focus();
+          }}
+          onDelete={() => void discard(reviewing.id)}
+          onClose={() => setReviewing(null)}
+        />
+      )}
 
       {confirm && (
         <ConfirmDialog
