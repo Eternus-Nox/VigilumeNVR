@@ -69,8 +69,8 @@ import numpy as np
 
 from . import zones as zonelib
 from .bestshot import (
-    KEEP_SHOTS, MIN_GAP_S, BestShotBuffer, Shot, clamp_setting, score_face,
-    shot_params,
+    KEEP_SHOTS, MIN_GAP_S, BestShotBuffer, Shot, clamp_setting, encode_frame_box,
+    score_face, shot_params,
 )
 from .recognition import Gallery, Match, to_blob
 from .heatmap import HeatmapAccumulator
@@ -328,13 +328,26 @@ class FacePass:
         # is the whole reason crop_with_origin exists. Getting it wrong would
         # not fail; it would paint a plausible map of the wrong places.
         fh, fw = frame_bgr.shape[:2]
+        frame_box: Optional[tuple[float, float, float, float]] = None
         if fw > 0 and fh > 0:
             cx = (ox + (face.box[0] + face.box[2]) / 2.0) / fw
             cy = (oy + (face.box[1] + face.box[3]) / 2.0) / fh
             self.heatmap.record(camera, "face", cx, cy, quality.total)
+            # Same translation, kept as a rectangle: this is what lets the
+            # review UI ring THIS face in the event snapshot rather than
+            # showing a 112px crop with no context. Normalized here, while the
+            # frame dimensions are still in hand — `finish()` runs long after
+            # the frame is gone.
+            frame_box = (
+                max(0.0, min(1.0, (ox + face.box[0]) / fw)),
+                max(0.0, min(1.0, (oy + face.box[1]) / fh)),
+                max(0.0, min(1.0, (ox + face.box[2]) / fw)),
+                max(0.0, min(1.0, (oy + face.box[3]) / fh)),
+            )
         if not st.buffer.offer(
             tracker_id=obs.tracker_id, kind="face", crop_bgr=aligned,
             box=face.box, frame_time=frame_time, quality=quality,
+            frame_box=frame_box,
         ):
             # Refused: under the quality floor, or too close in time to a
             # shot already held. Only the first is worth counting as a
@@ -440,11 +453,11 @@ class FacePass:
         match = st.match
         cur = await self._db.conn.execute(
             "INSERT INTO recognition_candidates (kind, camera, event_fid, embedding, dim, "
-            "plate, model_key, image_path, quality, best_score, best_profile_id, created_at) "
-            "VALUES ('face', ?, ?, ?, ?, '', ?, '', ?, ?, ?, ?)",
+            "plate, model_key, image_path, quality, frame_box, best_score, best_profile_id, "
+            "created_at) VALUES ('face', ?, ?, ?, ?, '', ?, '', ?, ?, ?, ?, ?)",
             (
                 st.camera, st.event_fid, to_blob(st.embedding), int(st.embedding.shape[0]),
-                self.model_key, float(shot.quality.total),
+                self.model_key, float(shot.quality.total), encode_frame_box(shot.frame_box),
                 float(match.score) if match is not None else 0.0,
                 None, now,
             ),

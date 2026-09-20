@@ -20,7 +20,7 @@ box could not heal itself. What the operator saw:
 
 — the entire events list and timeline dead, from a feature that was off.
 
-The fix runs `_RECOGNITION_SCHEMA` unconditionally, before the version branch.
+The fix runs `RECOGNITION_SCHEMA` unconditionally, before the version branch.
 That is what makes it repair an already-stamped database rather than only
 helping boxes that had not upgraded yet.
 
@@ -51,7 +51,7 @@ from app.db import SCHEMA_VERSION, Database  # noqa: E402
 _failures: list[str] = []
 _checks = 0
 
-#: Every table recognition needs. A name added to _RECOGNITION_SCHEMA and not
+#: Every table recognition needs. A name added to RECOGNITION_SCHEMA and not
 #: here is a table nothing verifies the existence of.
 RECOGNITION_TABLES = {
     "profiles",

@@ -40,6 +40,7 @@ import numpy as np
 BACKEND = str(Path(__file__).resolve().parents[1])
 sys.path.insert(0, BACKEND)
 
+from app.db import RECOGNITION_SCHEMA  # noqa: E402
 from app.native.plates import (  # noqa: E402
     PLATE_MODELS,
     PlateReader,
@@ -105,29 +106,10 @@ class FakeDB:
     def __init__(self, path):
         self._c = sqlite3.connect(path)
         self._c.row_factory = sqlite3.Row
-        self._c.executescript(
-            """
-            CREATE TABLE profiles (id INTEGER PRIMARY KEY, kind TEXT, name TEXT,
-                notes TEXT DEFAULT '', enabled INTEGER DEFAULT 1, threshold REAL,
-                created_at REAL DEFAULT 0, updated_at REAL DEFAULT 0);
-            CREATE TABLE profile_samples (id INTEGER PRIMARY KEY, profile_id INTEGER,
-                embedding BLOB, dim INTEGER DEFAULT 0, plate TEXT DEFAULT '',
-                model_key TEXT DEFAULT '', image_path TEXT DEFAULT '',
-                quality REAL DEFAULT 0, source_fid TEXT DEFAULT '', created_at REAL DEFAULT 0);
-            CREATE TABLE recognition_candidates (id INTEGER PRIMARY KEY, kind TEXT,
-                camera TEXT, event_fid TEXT DEFAULT '', embedding BLOB, dim INTEGER DEFAULT 0,
-                plate TEXT DEFAULT '', model_key TEXT DEFAULT '', image_path TEXT DEFAULT '',
-                quality REAL DEFAULT 0, best_score REAL DEFAULT 0, best_profile_id INTEGER,
-                created_at REAL DEFAULT 0);
-            CREATE TABLE event_recognitions (id INTEGER PRIMARY KEY, event_fid TEXT,
-                kind TEXT, profile_id INTEGER, name TEXT DEFAULT '', plate TEXT DEFAULT '',
-                score REAL DEFAULT 0, quality REAL DEFAULT 0, image_path TEXT DEFAULT '',
-                created_at REAL DEFAULT 0);
-            CREATE TABLE recognition_heatmap (camera TEXT, kind TEXT, cell INTEGER,
-                count REAL DEFAULT 0, quality_sum REAL DEFAULT 0, updated_at REAL,
-                PRIMARY KEY (camera, kind, cell));
-            """
-        )
+        # The REAL schema — see the same note in facepass_smoke.py. A local
+        # copy silently diverges from db.py and turns a missing column into
+        # "nothing was stored", which reads as a logic bug in the pass.
+        self._c.executescript(RECOGNITION_SCHEMA)
         self._c.commit()
         self.conn = self
 
@@ -270,8 +252,10 @@ async def pass_checks(reader: PlateReader) -> None:
           "...but both sightings are recorded as events")
 
     print("\nthe pass: an enrolled plate matches")
-    db._c.execute("INSERT INTO profiles (id, kind, name, enabled) VALUES (1,'vehicle','Truck',1)")
-    db._c.execute("INSERT INTO profile_samples (profile_id, plate) VALUES (1,'7ABC123')")
+    db._c.execute("INSERT INTO profiles (id, kind, name, enabled, created_at, updated_at) "
+                  "VALUES (1,'vehicle','Truck',1,0,0)")
+    db._c.execute("INSERT INTO profile_samples (profile_id, plate, created_at) "
+                  "VALUES (1,'7ABC123',0)")
     db._c.commit()
     await pp.reload_gallery()
 

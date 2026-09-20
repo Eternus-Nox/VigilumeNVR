@@ -44,7 +44,8 @@ import numpy as np
 
 from . import zones as zonelib
 from .bestshot import (
-    KEEP_SHOTS, MIN_GAP_S, BestShotBuffer, Shot, score_plate, shot_params,
+    KEEP_SHOTS, MIN_GAP_S, BestShotBuffer, Shot, encode_frame_box, score_plate,
+    shot_params,
 )
 from .heatmap import HeatmapAccumulator
 from .plates import OCR_MIN_CONFIDENCE, PlateReader, candidate_regions, deskew, is_vehicle
@@ -217,9 +218,24 @@ class PlatePass:
                 continue
             straight = await asyncio.to_thread(deskew, strip)
             quality = score_plate(straight)
+            # Where this strip sits in the FULL frame, for the review UI to
+            # ring. Computed before offering because `shot.box` stays in the
+            # vehicle crop's coordinates — see the heatmap note below for the
+            # same translation and the same trap.
+            frame_box = (
+                (
+                    max(0.0, min(1.0, (ox + x1) / fw)),
+                    max(0.0, min(1.0, (oy + y1) / fh)),
+                    max(0.0, min(1.0, (ox + x2) / fw)),
+                    max(0.0, min(1.0, (oy + y2) / fh)),
+                )
+                if fw > 0 and fh > 0
+                else None
+            )
             shot = st.buffer.offer(
                 tracker_id=obs.tracker_id, kind="plate", crop_bgr=straight,
                 box=(x1, y1, x2, y2), frame_time=frame_time, quality=quality,
+                frame_box=frame_box,
             )
             if shot is None:
                 continue
@@ -367,11 +383,12 @@ class PlatePass:
 
         cur = await self._db.conn.execute(
             "INSERT INTO recognition_candidates (kind, camera, event_fid, embedding, dim, "
-            "plate, model_key, image_path, quality, best_score, best_profile_id, created_at) "
-            "VALUES ('plate', ?, ?, NULL, 0, ?, '', '', ?, ?, ?, ?)",
+            "plate, model_key, image_path, quality, frame_box, best_score, best_profile_id, "
+            "created_at) VALUES ('plate', ?, ?, NULL, 0, ?, '', '', ?, ?, ?, ?, ?)",
             (
                 st.camera, st.event_fid, st.vote.text,
                 float(shot.quality.total) if shot is not None else 0.0,
+                encode_frame_box(shot.frame_box if shot is not None else None),
                 float(st.match.score) if st.match is not None else 0.0,
                 None, now,
             ),

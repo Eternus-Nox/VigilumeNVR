@@ -46,7 +46,9 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 
 from ..auth import require_admin, require_media_admin
+from ..db import column_or
 from ..native import accel
+from ..native.bestshot import decode_frame_box
 from ..native.timing import TIMINGS
 from ..native.heatmap import COLS, ROWS, suggest_zone
 from ..native.recognition import (
@@ -187,13 +189,21 @@ def _sample_out(row: Any) -> dict[str, Any]:
     }
 
 
-def _candidate_out(row: Any) -> dict[str, Any]:
+def _candidate_out(row: Any, event_id: Optional[int] = None) -> dict[str, Any]:
     has_image = bool(row["image_path"])
+    # The crop is a 112px aligned face: enough to match on, not enough to
+    # JUDGE. `frame_url` is the scene it was cut from, and `frame_box` says
+    # which subject in that scene it is — together they are what lets an
+    # operator decide "yes, that's Adam" before enrolling. Both are omitted
+    # rather than faked when the originating event is gone (the candidate
+    # store outlives events on a short retention), leaving the crop.
+    frame_box = decode_frame_box(column_or(row, "frame_box", ""))
     return {
         "id": row["id"],
         "kind": row["kind"],
         "camera": row["camera"],
         "event_fid": row["event_fid"],
+        "event_id": event_id,
         "plate": row["plate"],
         "quality": row["quality"],
         "best_score": row["best_score"],
@@ -203,7 +213,43 @@ def _candidate_out(row: Any) -> dict[str, Any]:
         "image_url": (
             f"/api/recognition/candidates/{row['id']}/image.jpg" if has_image else None
         ),
+        "frame_url": (
+            f"/api/recognition/candidates/{row['id']}/frame.jpg" if event_id else None
+        ),
+        "frame_box": frame_box,
     }
+
+
+async def _event_ids(db: Any, rows: Any) -> dict[str, int]:
+    """Map every candidate's `event_fid` to its numeric event id, in ONE query.
+
+    Resolved in a batch rather than per row because this feeds a list of up to
+    500 candidates, and a lookup per row is 500 round trips to answer a
+    question one `IN` clause answers. A fid with no surviving event simply
+    does not appear, and the candidate is served without a frame link.
+    """
+    fids = sorted({r["event_fid"] for r in rows if r["event_fid"]})
+    if not fids:
+        return {}
+    out: dict[str, int] = {}
+    # Chunked to stay clear of SQLITE_MAX_VARIABLE_NUMBER (999 on older builds).
+    for start in range(0, len(fids), 400):
+        chunk = fids[start : start + 400]
+        placeholders = ",".join("?" * len(chunk))
+        found = await (
+            await db.conn.execute(
+                f"SELECT id, frigate_id FROM events WHERE frigate_id IN ({placeholders})",
+                chunk,
+            )
+        ).fetchall()
+        for r in found:
+            out[r["frigate_id"]] = r["id"]
+    return out
+
+
+async def _candidates_out(db: Any, rows: Any) -> list[dict[str, Any]]:
+    ids = await _event_ids(db, rows)
+    return [_candidate_out(r, ids.get(r["event_fid"])) for r in rows]
 
 
 def _active_model_key(request: Request) -> str:
@@ -593,9 +639,14 @@ async def _similar_candidates(
         if score >= SUGGEST_FACE_COSINE:
             scored.append((score, row))
     scored.sort(key=lambda pair: pair[0], reverse=True)
+    top = scored[:limit]
+    ids = await _event_ids(db, [row for _, row in top])
     return [
-        {**_candidate_out(row), "similarity": round(float(score), 4)}
-        for score, row in scored[:limit]
+        {
+            **_candidate_out(row, ids.get(row["event_fid"])),
+            "similarity": round(float(score), 4),
+        }
+        for score, row in top
     ]
 
 
@@ -685,7 +736,7 @@ async def list_candidates(
     sql += " ORDER BY quality DESC, created_at DESC LIMIT ?"
     params.append(limit)
     rows = await (await db.conn.execute(sql, params)).fetchall()
-    return [_candidate_out(r) for r in rows]
+    return await _candidates_out(db, rows)
 
 
 @router.delete("/candidates/{candidate_id}", status_code=204)
@@ -740,6 +791,65 @@ async def candidate_image(candidate_id: int, request: Request) -> FileResponse:
     if path is None or not path.exists():
         raise HTTPException(status_code=404, detail="No image")
     return FileResponse(path, media_type="image/jpeg")
+
+
+@router.get("/candidates/{candidate_id}/frame.jpg", dependencies=[Depends(require_media_admin)])
+async def candidate_frame(candidate_id: int, request: Request):
+    """The WHOLE SCENE this candidate was cut from.
+
+    Reviewing a 112x112 aligned face is asking someone to identify a stranger
+    from a passport photo with the background removed: it is the right input
+    for the matcher and the wrong one for a person deciding whether to enroll
+    it. The frame answers the questions the crop cannot — who else was there,
+    what they were doing, whether this is even the right moment — which is why
+    this is the image the review sheet opens with, and the crop is the
+    thumbnail that got you there.
+
+    No new pixels are stored for this: the frame is the originating event's
+    snapshot, which already exists for the event list. The candidate carries
+    `event_fid`, so this is a lookup, not a capture.
+
+    404 when the event (or its snapshot) is gone — candidates can outlive
+    events under a short retention, and that is a normal end state, not a
+    fault. Clients are told in advance via `frame_url: null`.
+    """
+    db = request.app.state.db
+    row = await (
+        await db.conn.execute(
+            "SELECT event_fid FROM recognition_candidates WHERE id = ?", (candidate_id,)
+        )
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="No such candidate")
+    if not row["event_fid"]:
+        raise HTTPException(status_code=404, detail="No frame for this candidate")
+    event = await (
+        await db.conn.execute(
+            "SELECT id, frigate_id FROM events WHERE frigate_id = ?", (row["event_fid"],)
+        )
+    ).fetchone()
+    if event is None:
+        raise HTTPException(status_code=404, detail="Originating event is gone")
+
+    path = request.app.state.config.snapshots_dir / f"{event['id']}.jpg"
+    if path.is_file():
+        return FileResponse(path, media_type="image/jpeg")
+    # The annotated copy is written asynchronously after the event closes, so
+    # a very recent candidate can arrive here first. Fall back to the engine's
+    # clean best frame and mark it uncacheable — the saved copy lands at this
+    # same URL within seconds and a cached miss would hide it.
+    try:
+        jpeg = await request.app.state.media.event_snapshot(event["frigate_id"], retries=1)
+    except Exception:  # noqa: BLE001 — a media-layer failure is a 404 here, not a 500
+        log.exception("could not fetch the engine frame for candidate %d", candidate_id)
+        jpeg = None
+    if jpeg:
+        return Response(
+            content=jpeg,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "no-store"},
+        )
+    raise HTTPException(status_code=404, detail="Frame not available")
 
 
 # ---------------------------------------------------------------------------

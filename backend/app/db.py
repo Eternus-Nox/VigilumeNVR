@@ -15,10 +15,10 @@ import aiosqlite
 
 from .config import DEFAULT_DETECT_OBJECTS
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 
 
-def _col_or(row: Any, name: str, default: Any) -> Any:
+def column_or(row: Any, name: str, default: Any) -> Any:
     """Read a column that a row might not have, without exploding.
 
     `sqlite3.Row` raises IndexError for a name it does not carry rather than
@@ -49,7 +49,7 @@ def _col_or(row: Any, name: str, default: Any) -> Any:
 #: no-op statements at startup — and that is precisely what repairs a database
 #: already stamped v23 with the tables missing. Add a recognition table HERE,
 #: never to _SCHEMA.
-_RECOGNITION_SCHEMA = """
+RECOGNITION_SCHEMA = """
 -- ── Recognition: profiles, enrolled samples, candidates, event matches ──────
 --
 -- A profile is a NAMED IDENTITY the operator curates by hand: a person whose
@@ -107,6 +107,13 @@ CREATE TABLE IF NOT EXISTS recognition_candidates (
     model_key       TEXT NOT NULL DEFAULT '',
     image_path      TEXT NOT NULL DEFAULT '',
     quality         REAL NOT NULL DEFAULT 0,
+    -- Where this crop sat in the FULL FRAME, as JSON "[x0,y0,x1,y1]" in 0..1.
+    -- The crop alone is a 112x112 aligned face with no context: it answers
+    -- "who is this?" and not "which of the three people at the door is this?".
+    -- Keeping the rectangle lets the review UI draw the event snapshot with
+    -- this face ringed, which is what makes a candidate judgeable. '' means
+    -- unknown (a row written before v25, or a pass that had no frame dims).
+    frame_box       TEXT NOT NULL DEFAULT '',
     -- Best similarity against the gallery at capture time, and who it was
     -- nearest to. Lets the app sort "almost matched Adam" above total
     -- strangers, which is the list you actually want to enroll from.
@@ -360,8 +367,8 @@ class Database:
         # Recognition tables FIRST, and unconditionally — before the version
         # branch, not inside it. On a fresh DB this is what creates them; on an
         # existing one it is what repairs a box that took the broken v22/v23
-        # migrations and got stamped without them. See _RECOGNITION_SCHEMA.
-        await self.conn.executescript(_RECOGNITION_SCHEMA)
+        # migrations and got stamped without them. See RECOGNITION_SCHEMA.
+        await self.conn.executescript(RECOGNITION_SCHEMA)
         if version < 1:
             await self.conn.executescript(_SCHEMA)
         else:
@@ -728,7 +735,7 @@ class Database:
                 # match rows. Plus two more normalized-polygon columns on
                 # cameras (face_zones / plate_zones).
                 #
-                # The four tables come from _RECOGNITION_SCHEMA, executed
+                # The four tables come from RECOGNITION_SCHEMA, executed
                 # unconditionally at the top of this method, so this block only
                 # carries the ALTERs an existing cameras table needs; both
                 # default to '[]', which means "whole frame", so an upgraded box
@@ -761,12 +768,12 @@ class Database:
             if version < 23:
                 # v23: recognition_heatmap — where faces/plates were actually
                 # seen, and how legible they were. Created by
-                # _RECOGNITION_SCHEMA at the top of this method, so there is
+                # RECOGNITION_SCHEMA at the top of this method, so there is
                 # nothing to do here; the version bump only records the step.
                 #
                 # As shipped this was a `pass` resting on the same false premise
                 # as v22 — that _SCHEMA runs every boot — which is why the table
-                # was missing on every upgraded box. See _RECOGNITION_SCHEMA.
+                # was missing on every upgraded box. See RECOGNITION_SCHEMA.
                 pass
             if version < 24:
                 # v24: per-camera recognition switches. Until now the zones were
@@ -794,6 +801,35 @@ class Database:
                                 f"ALTER TABLE cameras ADD COLUMN {_col} "
                                 "INTEGER NOT NULL DEFAULT 1"
                             )
+            if version < 25:
+                # v25: recognition_candidates.frame_box — where the crop came
+                # from in the full frame, so the review UI can show the whole
+                # scene with this face ringed instead of a context-free 112px
+                # thumbnail.
+                #
+                # RECOGNITION_SCHEMA above creates the table with the column
+                # on a FRESH box, but its CREATE IF NOT EXISTS is a no-op on an
+                # upgraded one — so the ALTER here is what actually adds it
+                # there. Existing rows keep '' (unknown) and simply render
+                # without a rectangle; nothing backfills, because the frame
+                # coordinates were never recorded and cannot be recovered.
+                cur = await self.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='recognition_candidates'"
+                )
+                if await cur.fetchone() is not None:
+                    existing = [
+                        r[1] for r in await (
+                            await self.conn.execute(
+                                "PRAGMA table_info(recognition_candidates)"
+                            )
+                        ).fetchall()
+                    ]
+                    if "frame_box" not in existing:
+                        await self.conn.execute(
+                            "ALTER TABLE recognition_candidates ADD COLUMN "
+                            "frame_box TEXT NOT NULL DEFAULT ''"
+                        )
         if version < SCHEMA_VERSION:
             await self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         await self.conn.commit()
@@ -833,8 +869,8 @@ class Database:
             # WHETHER this camera recognizes, as opposed to where it looks.
             # Keyed off the row with a default of True so a camera row read
             # back from a pre-v24 fixture still answers.
-            "face_recognition": bool(_col_or(row, "face_recognition", 1)),
-            "plate_recognition": bool(_col_or(row, "plate_recognition", 1)),
+            "face_recognition": bool(column_or(row, "face_recognition", 1)),
+            "plate_recognition": bool(column_or(row, "plate_recognition", 1)),
             "detect_width": row["detect_width"],
             "detect_height": row["detect_height"],
             "detect_fps": row["detect_fps"],

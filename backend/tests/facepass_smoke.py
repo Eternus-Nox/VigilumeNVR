@@ -40,6 +40,7 @@ sys.path.insert(0, BACKEND)
 
 import cv2  # noqa: E402
 
+from app.db import RECOGNITION_SCHEMA  # noqa: E402
 from app.native.bestshot import score_face  # noqa: E402
 from app.native.facepass import FacePass  # noqa: E402
 from app.native.recognition import to_blob  # noqa: E402
@@ -122,26 +123,12 @@ def make_db(path: Path) -> FakeDB:
     import sqlite3
 
     c = sqlite3.connect(path)
-    c.executescript(
-        """
-        CREATE TABLE profiles (id INTEGER PRIMARY KEY, kind TEXT, name TEXT,
-            notes TEXT DEFAULT '', enabled INTEGER DEFAULT 1, threshold REAL,
-            created_at REAL DEFAULT 0, updated_at REAL DEFAULT 0);
-        CREATE TABLE profile_samples (id INTEGER PRIMARY KEY, profile_id INTEGER,
-            embedding BLOB, dim INTEGER DEFAULT 0, plate TEXT DEFAULT '',
-            model_key TEXT DEFAULT '', image_path TEXT DEFAULT '',
-            quality REAL DEFAULT 0, source_fid TEXT DEFAULT '', created_at REAL DEFAULT 0);
-        CREATE TABLE recognition_candidates (id INTEGER PRIMARY KEY, kind TEXT,
-            camera TEXT, event_fid TEXT DEFAULT '', embedding BLOB, dim INTEGER DEFAULT 0,
-            plate TEXT DEFAULT '', model_key TEXT DEFAULT '', image_path TEXT DEFAULT '',
-            quality REAL DEFAULT 0, best_score REAL DEFAULT 0, best_profile_id INTEGER,
-            created_at REAL DEFAULT 0);
-        CREATE TABLE event_recognitions (id INTEGER PRIMARY KEY, event_fid TEXT,
-            kind TEXT, profile_id INTEGER, name TEXT DEFAULT '', plate TEXT DEFAULT '',
-            score REAL DEFAULT 0, quality REAL DEFAULT 0, image_path TEXT DEFAULT '',
-            created_at REAL DEFAULT 0);
-        """
-    )
+    # THE REAL SCHEMA, not a hand-rolled echo of it. A copy here drifts the
+    # moment a column is added to db.py: the pass writes the new column, this
+    # fixture does not have it, and the INSERT fails inside an `except` that
+    # logs and moves on — so the test failed as "no candidate was stored",
+    # several steps from the cause. Importing it makes that impossible.
+    c.executescript(RECOGNITION_SCHEMA)
     c.commit()
     c.close()
     return FakeDB(path)
@@ -262,10 +249,12 @@ async def main() -> int:
 
     print("\nthe pass: an enrolled face matches and does NOT become a candidate")
     db._c.execute(
-        "INSERT INTO profiles (id, kind, name, enabled) VALUES (1, 'person', 'Sample', 1)"
+        "INSERT INTO profiles (id, kind, name, enabled, created_at, updated_at) "
+        "VALUES (1, 'person', 'Sample', 1, 0, 0)"
     )
     db._c.execute(
-        "INSERT INTO profile_samples (profile_id, embedding, dim, model_key) VALUES (?,?,?,?)",
+        "INSERT INTO profile_samples (profile_id, embedding, dim, model_key, created_at) "
+        "VALUES (?,?,?,?,0)",
         (1, to_blob(vec), 128, EMBEDDING_MODEL_KEY),
     )
     db._c.commit()

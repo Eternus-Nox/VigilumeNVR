@@ -71,6 +71,7 @@ def login(client: TestClient) -> dict[str, str]:
 def seed_candidate(
     client: TestClient, *, kind: str = "face", quality: float = 0.8,
     plate: str = "", with_image: bool = True, camera: str = "front",
+    event_fid: str = "fid-1", frame_box: str = "",
 ) -> int:
     """Insert a candidate the way the engine's recognition pass would."""
     cfg = app.state.config
@@ -81,9 +82,9 @@ def seed_candidate(
     async def _insert() -> int:
         cur = await db.conn.execute(
             "INSERT INTO recognition_candidates (kind, camera, event_fid, embedding, dim, "
-            "plate, model_key, image_path, quality, best_score, best_profile_id, created_at) "
-            "VALUES (?, ?, 'fid-1', ?, ?, ?, 'test-model', '', ?, 0.0, NULL, 1000.0)",
-            (kind, camera, blob, 8 if blob else 0, plate, quality),
+            "plate, model_key, image_path, quality, frame_box, best_score, best_profile_id, "
+            "created_at) VALUES (?, ?, ?, ?, ?, ?, 'test-model', '', ?, ?, 0.0, NULL, 1000.0)",
+            (kind, camera, event_fid, blob, 8 if blob else 0, plate, quality, frame_box),
         )
         cid = cur.lastrowid
         if with_image:
@@ -295,6 +296,87 @@ def enroll_checks(client: TestClient, h: dict, adam: dict, truck: dict) -> None:
     client.delete("/api/recognition/candidates", headers=h)
     check(len(client.get("/api/recognition/candidates", headers=h).json()) == 0,
           "clearing with no filter empties the store")
+
+
+def frame_review_checks(client: TestClient, h: dict) -> None:
+    """The full-frame review path: a candidate is judgeable, not just matchable.
+
+    An aligned 112x112 crop is the right input for the matcher and the wrong
+    one for a person deciding whether to enroll it — it has no context, and on
+    a doorstep with three people it does not even say WHICH of them it is. So
+    every candidate that still has its originating event must carry a link to
+    that event's frame plus the rectangle to ring in it, and a candidate whose
+    event is gone must say so with a null rather than a link that 404s only
+    once the UI has already drawn a broken image.
+    """
+    print("\ncandidate review: the full frame, not just the crop")
+    db = app.state.db
+    cfg = app.state.config
+
+    async def _seed_event() -> int:
+        cur = await db.conn.execute(
+            "INSERT INTO events (frigate_id, camera, label, count, score, start_time, "
+            "has_clip, has_snapshot, zones, box, labels) "
+            "VALUES ('native.frame-1','front','person',1,0.9,1000.0,0,1,'[]','[]','[]')"
+        )
+        eid = cur.lastrowid
+        await db.conn.commit()
+        return eid
+
+    eid = _run(_seed_event())
+    cfg.snapshots_dir.mkdir(parents=True, exist_ok=True)
+    (cfg.snapshots_dir / f"{eid}.jpg").write_bytes(b"\xff\xd8\xff\xdb-full-frame")
+
+    linked = seed_candidate(
+        client, event_fid="native.frame-1", frame_box="[0.4,0.1,0.55,0.3]",
+    )
+    orphan = seed_candidate(client, event_fid="native.gone-forever")
+
+    rows = {c["id"]: c for c in client.get("/api/recognition/candidates", headers=h).json()}
+    got = rows.get(linked)
+    check(got is not None and got["event_id"] == eid,
+          "a candidate resolves to the numeric id of the event it came from")
+    check(got["frame_url"] == f"/api/recognition/candidates/{linked}/frame.jpg",
+          f"...and carries the frame link (got {got['frame_url']!r})")
+    check(got["frame_box"] == [0.4, 0.1, 0.55, 0.3],
+          f"...and the rectangle to ring in it (got {got['frame_box']!r})")
+
+    missing = rows.get(orphan)
+    check(missing is not None and missing["event_id"] is None
+          and missing["frame_url"] is None,
+          "a candidate whose event is gone advertises NO frame — the UI shows "
+          "the crop alone instead of drawing a link that cannot load")
+    check(missing["frame_box"] is None,
+          "...and no rectangle either, rather than '' or a zero box that would "
+          "paint a ring in the top-left corner")
+
+    r = client.get(f"/api/recognition/candidates/{linked}/frame.jpg", headers=h)
+    check(r.status_code == 200 and r.content == b"\xff\xd8\xff\xdb-full-frame",
+          f"the frame route serves the EVENT's snapshot (got {r.status_code})")
+    check(r.headers.get("content-type") == "image/jpeg", "...as a JPEG")
+
+    r = client.get(f"/api/recognition/candidates/{orphan}/frame.jpg", headers=h)
+    check(r.status_code == 404,
+          f"a candidate with no surviving event is a 404, not a 500 (got {r.status_code})")
+    r = client.get("/api/recognition/candidates/999999/frame.jpg", headers=h)
+    check(r.status_code == 404, "and so is a candidate that never existed")
+
+    # The frame is a picture of whoever the cameras caught: it is exactly as
+    # sensitive as the crop, and must be gated exactly as hard.
+    r = client.get(f"/api/recognition/candidates/{linked}/frame.jpg")
+    check(r.status_code in (401, 403),
+          f"the frame needs auth like every other image here (got {r.status_code})")
+
+    # A row written before frame_box existed carries '' — it must degrade to
+    # "no rectangle", never to an exception on the LIST that serves every
+    # candidate, including the ones that are fine.
+    legacy = seed_candidate(client, event_fid="native.frame-1", frame_box="")
+    rows = {c["id"]: c for c in client.get("/api/recognition/candidates", headers=h).json()}
+    check(rows[legacy]["frame_box"] is None and rows[legacy]["frame_url"] is not None,
+          "a pre-v25 row still offers its frame, just without a rectangle")
+
+    for cid in (linked, orphan, legacy):
+        client.delete(f"/api/recognition/candidates/{cid}", headers=h)
 
 
 def traversal_checks(client: TestClient, h: dict) -> None:
@@ -526,6 +608,7 @@ def main() -> int:
         h = login(client)
         adam, truck = profile_checks(client, h)
         enroll_checks(client, h, adam, truck)
+        frame_review_checks(client, h)
         traversal_checks(client, h)
         roi_zone_checks(client, h)
         event_recognition_checks(client, h)

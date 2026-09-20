@@ -52,6 +52,7 @@ tuned against real footage without re-running inference.
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional, Sequence
@@ -81,6 +82,48 @@ MIN_GAP_S = 0.4
 #: point `best()` correctly returns nothing and the event carries no
 #: recognition, rather than a confident reading of a smear.
 MIN_QUALITY = 0.25
+
+
+def encode_frame_box(box: Optional[Sequence[float]]) -> str:
+    """A frame box as the compact JSON the candidate row stores, or ''.
+
+    '' is the honest answer for "not known", and it is also what every row
+    written before this column existed carries — so a reader only ever has to
+    handle one absent case.
+    """
+    if box is None or len(box) != 4:
+        return ""
+    try:
+        values = [float(v) for v in box]
+    except (TypeError, ValueError):
+        return ""
+    if any(v != v for v in values):  # NaN — it would serialize as invalid JSON
+        return ""
+    return json.dumps([round(v, 5) for v in values])
+
+
+def decode_frame_box(raw: Any) -> Optional[list[float]]:
+    """The stored JSON back as four floats, or None for anything unusable.
+
+    Hand-edited rows, a truncated write, and the '' default all land in the
+    same place: no rectangle, which the UI renders as a plain frame rather
+    than a box in the wrong spot.
+    """
+    if not raw:
+        return None
+    try:
+        values = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(values, list) or len(values) != 4:
+        return None
+    try:
+        out = [float(v) for v in values]
+    except (TypeError, ValueError):
+        return None
+    if any(v != v for v in out):
+        return None
+    return out
 
 
 def clamp_setting(value: Any, default: float, lo: float, hi: float) -> float:
@@ -190,6 +233,13 @@ class Shot:
     box: tuple[float, float, float, float]
     tracker_id: int
     kind: str
+    #: The same region expressed as 0..1 of the FULL FRAME, when the caller
+    #: knew the frame it came from. `box` above can be relative to an
+    #: intermediate crop (the face pass scores a face inside a PERSON crop),
+    #: so it cannot be used to locate the shot in the original frame — which
+    #: is what the review UI needs to ring the right subject. None when the
+    #: caller had no frame dimensions to normalize against.
+    frame_box: Optional[tuple[float, float, float, float]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -494,6 +544,7 @@ class BestShotBuffer:
         frame_time: float,
         landmarks: Optional[Sequence[Sequence[float]]] = None,
         quality: Optional[Quality] = None,
+        frame_box: Optional[Sequence[float]] = None,
     ) -> Optional[Shot]:
         """Offer one crop. Returns the retained Shot, or None if it was dropped.
 
@@ -516,6 +567,11 @@ class BestShotBuffer:
             box=tuple(float(v) for v in box),  # type: ignore[assignment]
             tracker_id=int(tracker_id),
             kind=kind,
+            frame_box=(
+                tuple(float(v) for v in frame_box)  # type: ignore[assignment]
+                if frame_box is not None and len(frame_box) == 4
+                else None
+            ),
         )
 
         # A shot too close in time to one already held REPLACES it when better,
