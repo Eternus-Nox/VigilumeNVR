@@ -398,6 +398,10 @@ class _CameraState:
     # row from before the switches existed behaves as it always did.
     face_recognition: bool = True
     plate_recognition: bool = True
+    # Per-camera override for settings.detection.ignore_stationary. None (the
+    # default) means follow the global setting — which is what keeps the
+    # global control meaningful for every camera nobody has pinned.
+    ignore_stationary: Optional[bool] = None
     # tracker_id -> (hit count, last seen epoch)
     hits: dict[int, tuple[int, float]] = field(default_factory=dict)
     # Per-track motion state: what is moving, what arrived and settled, and
@@ -586,6 +590,12 @@ class DetectionEngine:
             # what makes the switch take effect on the next reload.
             state.face_recognition = bool(row.get("face_recognition", True))
             state.plate_recognition = bool(row.get("plate_recognition", True))
+            # THREE-STATE: None means "follow settings.detection". Read with a
+            # default of None rather than coerced with bool(), which would turn
+            # "inherit" into "off for this camera" the moment the row came from
+            # a fixture or a backend that predates the column.
+            stationary = row.get("ignore_stationary")
+            state.ignore_stationary = None if stationary is None else bool(stationary)
             geometry_key = (
                 repr(row.get("include_zones") or []),
                 repr(row.get("cross_lines") or []),
@@ -801,7 +811,7 @@ class DetectionEngine:
         # included: it is what gets boxed on the saved snapshot, and a picture
         # that omits the parked car is a picture that lies about the frame.
         scene = confirmed
-        if self._ignore_stationary():
+        if self._ignore_stationary(cam):
             cam.stillness.stationary_after_s = self._stationary_after()
             # FED FROM `obs`, FILTERED ON `confirmed`. Motion history has to
             # start when a track is first SEEN, not when it confirms: fed from
@@ -1156,8 +1166,17 @@ class DetectionEngine:
         value = detection.get(key)
         return default if value is None else value
 
-    def _ignore_stationary(self) -> bool:
-        """Whether motionless objects are held back from the event layer."""
+    def _ignore_stationary(self, cam: _CameraState) -> bool:
+        """Whether motionless objects are held back for THIS camera.
+
+        The camera's own value wins when it has one; None — the default, and
+        what every camera has until somebody pins it — falls through to
+        settings.detection. That order is what lets a driveway ignore parked
+        cars while a back gate reports every sighting, without either choice
+        being disturbed when the global default is changed.
+        """
+        if cam.ignore_stationary is not None:
+            return cam.ignore_stationary
         return bool(self._detection_setting("ignore_stationary", True))
 
     def _stationary_after(self) -> float:

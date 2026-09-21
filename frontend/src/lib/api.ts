@@ -334,6 +334,15 @@ export interface Camera {
    */
   face_recognition?: boolean;
   plate_recognition?: boolean;
+  /**
+   * Per-camera override for `detection.ignore_stationary`.
+   *
+   * THREE-STATE: `null`/undefined means "follow the global setting", which is
+   * what every camera does until someone pins it. Never coerce this to a
+   * boolean — `!!null` is false, and that turns inherit into "off for this
+   * camera", silently and permanently.
+   */
+  ignore_stationary?: boolean | null;
   detect: { enabled: boolean };
   record: { enabled: boolean };
   /**
@@ -1677,6 +1686,18 @@ export const api = {
    * recording pipeline. This one writes two integers and re-reads the camera
    * rows, which is all the recognition passes need.
    */
+  /**
+   * Pin ONE camera's stationary handling, or pass null to go back to
+   * inheriting the global setting. Lightweight like setCameraRecognition:
+   * `PUT /api/cameras/{name}` probes the device and restarts the recorder,
+   * which is absurd for a flag only the detection loop reads.
+   */
+  setCameraStationary: (name: string, ignoreStationary: boolean | null) =>
+    request<{ name: string; ignore_stationary: boolean | null }>(
+      `/api/cameras/${encodeURIComponent(name)}/stationary`,
+      { method: 'PUT', body: JSON.stringify({ ignore_stationary: ignoreStationary }) },
+    ),
+
   setCameraRecognition: (name: string, body: { face?: boolean; plate?: boolean }) =>
     request<{
       name: string;

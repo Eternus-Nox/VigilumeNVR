@@ -939,6 +939,30 @@ afterwards, so a suppressed event costs a clip, never a recording — which is
 what makes it safe to be this aggressive. Set `ignore_stationary: false` to
 restore the old behaviour exactly.
 
+**Per camera** (`cameras.ignore_stationary`, schema v26):
+`PUT /api/cameras/{name}/stationary` `{ignore_stationary: true|false|null}` →
+`{name, ignore_stationary}`. Lightweight for the same reason as the
+recognition toggle: no device probe, no go2rtc regeneration, no recorder
+restart — one nullable integer and an `engine.reload()`.
+
+**THREE-STATE, and `null` is a real one**: "follow `settings.detection`", which
+is what every camera does until somebody pins it. The column is nullable with
+no default so the migration decides nothing on behalf of an existing box and a
+later change to the global still moves every camera nobody touched; a
+`NOT NULL DEFAULT 1` would have pinned every camera to the global's value at
+upgrade time and turned the global control into a no-op. `engine._ignore_stationary(cam)`
+takes the camera's value when it has one and falls through to the setting
+otherwise — a drive can ignore parked cars while a back gate reports every
+sighting.
+
+The hazard the whole design is arranged against is `bool(None)`, which is
+`False`: anything that coerces this column, this JSON field or this TS type to
+a boolean turns *inherit* into *off for this camera*, silently, on the first
+read. Hence `db._tri_state`, `Optional[bool]` on `_CameraState`, `boolean | null`
+in `api.ts`, and `?? null` (never `||`) at the control. The full camera update
+does not write this column at all, so an unrelated camera save cannot un-pin a
+camera somebody deliberately pinned.
+
 WebSocket:
 - `WS /api/ws?token=` — server pushes `{type:"event_new"|"event_update"|"event_end"|"doorbell", event:{...}}`, `{type:"camera_status", ...}`, and `{type:"model_status", key, tier, state, progress_pct, active, loaded}` for live UI updates.
 

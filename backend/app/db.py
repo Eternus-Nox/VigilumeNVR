@@ -18,7 +18,17 @@ from .config import DEFAULT_DETECT_OBJECTS
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 25
+
+def _tri_state(value: Any) -> Optional[bool]:
+    """A nullable INTEGER column as True / False / None.
+
+    `bool(None)` is False, which is exactly the bug this exists to prevent: it
+    turns "follow the global setting" into "off for this camera", and does it
+    silently on the first read.
+    """
+    return None if value is None else bool(value)
+
+SCHEMA_VERSION = 26
 
 
 def column_or(row: Any, name: str, default: Any) -> Any:
@@ -200,6 +210,17 @@ CREATE TABLE IF NOT EXISTS cameras (
     sub_url         TEXT NOT NULL DEFAULT '',
     ir_state        TEXT NOT NULL DEFAULT '{}',
     detect_mode     TEXT,
+    -- Per-camera override for settings.detection.ignore_stationary.
+    --
+    -- THREE-STATE, and NULL is the point of it: NULL means "follow the global
+    -- setting", so the column can be added without deciding anything on behalf
+    -- of an existing box, and changing the global later still moves every
+    -- camera that was never touched. 1/0 pin this camera regardless.
+    --
+    -- Nullable rather than NOT NULL DEFAULT 1 for that reason alone: a default
+    -- of 1 would silently pin every existing camera to today's global value and
+    -- make the global control a no-op from then on.
+    ignore_stationary INTEGER,
     audio_codec     TEXT NOT NULL DEFAULT 'g711a',
     smart_spotlight INTEGER NOT NULL DEFAULT 0,
     spotlight_hold_seconds INTEGER NOT NULL DEFAULT 60,
@@ -833,6 +854,29 @@ class Database:
                             "ALTER TABLE recognition_candidates ADD COLUMN "
                             "frame_box TEXT NOT NULL DEFAULT ''"
                         )
+            if version < 26:
+                # v26: cameras.ignore_stationary — a per-camera override for
+                # settings.detection.ignore_stationary.
+                #
+                # NULLABLE WITH NO DEFAULT, which is the whole design. NULL
+                # means "follow the global setting", so this migration decides
+                # nothing on behalf of an existing box and a later change to
+                # the global still moves every camera nobody has touched. A
+                # `NOT NULL DEFAULT 1` would pin every camera to today's global
+                # value and quietly turn the global control into a no-op.
+                cur = await self.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cameras'"
+                )
+                if await cur.fetchone() is not None:
+                    existing = [
+                        r[1] for r in await (
+                            await self.conn.execute("PRAGMA table_info(cameras)")
+                        ).fetchall()
+                    ]
+                    if "ignore_stationary" not in existing:
+                        await self.conn.execute(
+                            "ALTER TABLE cameras ADD COLUMN ignore_stationary INTEGER"
+                        )
         if version < SCHEMA_VERSION:
             await self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         await self.conn.commit()
@@ -874,6 +918,10 @@ class Database:
             # back from a pre-v24 fixture still answers.
             "face_recognition": bool(column_or(row, "face_recognition", 1)),
             "plate_recognition": bool(column_or(row, "plate_recognition", 1)),
+            # None = follow settings.detection.ignore_stationary. Deliberately
+            # NOT coerced to a bool here: the three states have to survive the
+            # trip to the client, or "inherit" becomes "off" on the first save.
+            "ignore_stationary": _tri_state(column_or(row, "ignore_stationary", None)),
             "detect_width": row["detect_width"],
             "detect_height": row["detect_height"],
             "detect_fps": row["detect_fps"],
@@ -1041,6 +1089,26 @@ class Database:
         )
         await self.conn.commit()
         return added["labels"] if added else []
+
+    async def set_camera_stationary(
+        self, name: str, ignore_stationary: Optional[bool]
+    ) -> None:
+        """Pin one camera's stationary-object handling, or clear it to inherit.
+
+        `None` writes SQL NULL, which is "follow settings.detection", NOT
+        "off" — the caller has to be able to express all three states or the
+        UI's Inherit option cannot round-trip.
+
+        A targeted UPDATE for the same reason as `set_camera_recognition`:
+        `upsert_camera` rewrites every column, so driving a checkbox through it
+        would let this click silently win a race against any other edit in
+        flight.
+        """
+        await self.conn.execute(
+            "UPDATE cameras SET ignore_stationary = ? WHERE name = ?",
+            (None if ignore_stationary is None else int(ignore_stationary), name),
+        )
+        await self.conn.commit()
 
     #: What each recognition pass needs to be detecting before it can run.
     #:

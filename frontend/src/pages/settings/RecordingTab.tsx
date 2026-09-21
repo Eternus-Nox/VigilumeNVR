@@ -6,7 +6,9 @@
  */
 import { useEffect, useState } from 'react';
 import {
+  api,
   CORAL_MODELS,
+  type Camera,
   type CoralModel,
   type DetectionBackend,
   type DetectMode,
@@ -116,6 +118,65 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
   useAdoptSaved(savedRecognition, (v) => {
     if (v) setRecognition(v);
   });
+
+  // Per-camera stationary overrides. NOT part of the draft: these are
+  // immediate calls against /api/cameras/{name}/stationary, and reporting them
+  // through onDraftChange would light the shell's Save bar for edits that were
+  // already saved.
+  const [cameras, setCameras] = useState<Camera[]>([]);
+  const [camBusy, setCamBusy] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    let live = true;
+    void api
+      .cameras()
+      .then((list) => {
+        if (live) setCameras(list);
+      })
+      // The global control above is the one that matters; a camera list that
+      // failed to load must not take this whole tab down with it.
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  /**
+   * Pin or un-pin one camera. `next` of null means "go back to following the
+   * global setting" — a real third state, not a missing value.
+   *
+   * OPTIMISTIC: the control moves at once and rolls back if the save fails.
+   * The round trip is short (no device probe, no recorder restart) but it is
+   * still a round trip, and a control that waits for the network before it
+   * moves reads as broken.
+   */
+  const setCameraStationary = async (cam: Camera, next: boolean | null) => {
+    const previous = cam.ignore_stationary ?? null;
+    setCameras((prev) =>
+      prev.map((c) => (c.name === cam.name ? { ...c, ignore_stationary: next } : c)),
+    );
+    setCamBusy((prev) => new Set(prev).add(cam.name));
+    try {
+      const saved = await api.setCameraStationary(cam.name, next);
+      setCameras((prev) =>
+        prev.map((c) =>
+          c.name === cam.name ? { ...c, ignore_stationary: saved.ignore_stationary } : c,
+        ),
+      );
+    } catch {
+      setCameras((prev) =>
+        prev.map((c) =>
+          c.name === cam.name ? { ...c, ignore_stationary: previous } : c,
+        ),
+      );
+    } finally {
+      setCamBusy((prev) => {
+        const nextSet = new Set(prev);
+        nextSet.delete(cam.name);
+        return nextSet;
+      });
+    }
+  };
 
   // Report this tab's slice up on every edit; the shell's single Save button
   // persists it together with every other tab's pending changes.
@@ -762,6 +823,58 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
             </span>
           </label>
         </div>
+
+        {cameras.length > 0 && (
+          <>
+            <h3>Per camera</h3>
+            <p className="muted small">
+              Cameras follow the setting above unless you pin them here. A drive full of
+              parked cars and a back gate where every sighting matters want opposite
+              answers, and <em>Follow</em> means a camera keeps tracking whatever you
+              change above later.
+            </p>
+            <table className="camera-choice-table">
+              <thead>
+                <tr>
+                  <th>Camera</th>
+                  <th>Stationary objects</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cameras.map((c) => {
+                  // ?? null, never ||: `false` is a real pinned state and must
+                  // not collapse into "Follow".
+                  const value = c.ignore_stationary ?? null;
+                  return (
+                    <tr key={c.name}>
+                      <td>{c.friendly_name || c.name}</td>
+                      <td>
+                        <select
+                          value={value === null ? 'inherit' : value ? 'on' : 'off'}
+                          disabled={camBusy.has(c.name)}
+                          onChange={(e) =>
+                            void setCameraStationary(
+                              c,
+                              e.target.value === 'inherit'
+                                ? null
+                                : e.target.value === 'on',
+                            )
+                          }
+                        >
+                          <option value="inherit">
+                            Follow the setting above ({ignoreStationary ? 'ignore' : 'report'})
+                          </option>
+                          <option value="on">Always ignore them here</option>
+                          <option value="off">Always report them here</option>
+                        </select>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </>
+        )}
       </section>
 
       <section className="card">

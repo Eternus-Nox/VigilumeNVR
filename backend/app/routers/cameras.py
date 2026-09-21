@@ -1098,6 +1098,44 @@ async def set_camera_recognition(
     }
 
 
+class StationaryOverride(BaseModel):
+    """Per-camera stationary handling. `null` = follow the global setting."""
+
+    ignore_stationary: Optional[bool] = None
+
+
+@router.put("/{name}/stationary", dependencies=[Depends(require_admin)])
+async def set_camera_stationary(
+    name: str, body: StationaryOverride, request: Request
+) -> dict[str, Any]:
+    """Pin this camera's stationary-object handling, or clear it to inherit.
+
+    THREE STATES, and `null` is a real one — "follow settings.detection" — not
+    a missing value. That is why the body is an explicit field rather than an
+    optional patch key: a client has to be able to SEND null to go back to
+    inheriting, and a scheme where omitting the key means "leave alone" leaves
+    no way to say it.
+
+    Lightweight for the same reason as `PUT /{name}/recognition`: the full
+    camera update probes the physical device over the network, regenerates the
+    go2rtc config and restarts the recorder's ffmpeg writers, which is absurd
+    for a flag only the detection loop reads. This writes one nullable integer
+    and reloads the engine.
+    """
+    await _get_cam_or_404(request, name)
+    state = request.app.state
+    await state.db.set_camera_stationary(name, body.ignore_stationary)
+    try:
+        await state.engine.reload()
+    except Exception:  # noqa: BLE001 — a skeleton engine must not fail the save
+        log.exception("engine reload after a stationary toggle on %s failed", name)
+    cam = await _get_cam_or_404(request, name)
+    return {
+        "name": name,
+        "ignore_stationary": cam.get("ignore_stationary"),
+    }
+
+
 @router.put("/{name}/settings", dependencies=[Depends(require_admin)])
 async def put_device_settings(name: str, body: DeviceSettingsPatch, request: Request) -> dict[str, Any]:
     cam = await _get_cam_or_404(request, name)

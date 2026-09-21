@@ -311,6 +311,85 @@ async def engine_cases() -> None:
           "operator who wants every sighting can have it")
 
 
+async def per_camera_checks() -> None:
+    """A per-camera override, and the three states it has to keep straight.
+
+    The trap this guards is `bool(None)`. The column is nullable because NULL
+    means "follow the global setting" — anything that coerces it with bool()
+    turns inherit into OFF, silently, on the first read, and from then on the
+    global control does nothing for that camera.
+    """
+    print("\nper-camera override: inherit / on / off")
+    parked = box_at(200.0, 300.0, w=180.0, h=120.0)
+
+    async def car_events(ignore_global: bool, per_camera) -> list[str]:
+        engine = DetectionEngine(db=None, detector=None, recorder=None,
+                                 settings=Settings(ignore_stationary=ignore_global),
+                                 config=Config())
+        pipe = Pipe()
+        engine.set_pipeline(pipe)
+        state = _CameraState(
+            row={"name": "drive", "detect_objects": ["car"], "record_enabled": True}
+        )
+        state.ignore_stationary = per_camera
+        engine._cameras["drive"] = state
+        t = time.time()
+        for i in range(MIN_HITS + 3):
+            await engine.process("drive", t + i * 0.2,
+                                 [Observation("car", 1, 0.9, parked)], frame_bgr=None)
+        return kinds(pipe, "car")
+
+    check(await car_events(True, None) == [],
+          "inherit + global ON: the parked car is held back")
+    check("new" in await car_events(False, None),
+          "inherit + global OFF: it is reported — the camera follows the global "
+          "setting, which is what `inherit` has to mean")
+    check(await car_events(False, True) == [],
+          "a camera pinned ON overrides a global OFF — one driveway can ignore "
+          "parked cars while the rest of the system reports everything")
+    check("new" in await car_events(True, False),
+          "and a camera pinned OFF overrides a global ON, which is the back "
+          "gate that must report every sighting")
+
+    print("\nthe three states survive storage")
+    import tempfile
+
+    from app.db import Database
+
+    root = Path(tempfile.mkdtemp(prefix="vigilume-stationary-"))
+    db = Database(root / "nvr.db")
+    await db.connect()
+    await db.upsert_camera({
+        "name": "drive", "friendly_name": "Drive", "model": "IP5M-T1277EW-AI",
+        "ip": "127.0.0.1", "username": "u", "password": "p",
+        "detect_objects": ["car"], "detect_width": 640, "detect_height": 480,
+        "detect_fps": 5, "detect_enabled": True, "record_enabled": True,
+        "capabilities": {}, "created_at": time.time(),
+    })
+    cam = await db.get_camera("drive")
+    check(cam["ignore_stationary"] is None,
+          "a new camera INHERITS — the column decides nothing on its behalf, so "
+          "changing the global later still moves it")
+
+    for value in (True, False, None):
+        await db.set_camera_stationary("drive", value)
+        got = (await db.get_camera("drive"))["ignore_stationary"]
+        check(got is value,
+              f"{value!r} round-trips as {got!r} — False must not read back as "
+              "None, and None must not read back as False")
+
+    # The one that actually bites: a full camera save must not silently reset
+    # the override, because the camera editor does not manage this field.
+    await db.set_camera_stationary("drive", False)
+    row = await db.get_camera("drive")
+    await db.upsert_camera({**row, "friendly_name": "Front Drive"})
+    after = await db.get_camera("drive")
+    check(after["ignore_stationary"] is False,
+          "editing the camera elsewhere leaves the override alone — an unrelated "
+          "save must not un-pin a camera somebody deliberately pinned")
+    await db.close()
+
+
 def settings_checks() -> None:
     print("\nthe settings model carries the knobs")
     from app.routers.settings import AppSettings, DetectionSettings
@@ -346,6 +425,7 @@ def main() -> int:
     state_checks()
     clamp_checks()
     asyncio.run(engine_cases())
+    asyncio.run(per_camera_checks())
     settings_checks()
     print()
     if _failures:

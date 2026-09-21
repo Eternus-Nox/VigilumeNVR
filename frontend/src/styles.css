@@ -3526,6 +3526,40 @@ label > select {
 
 /* Which cameras recognize. A table, not a card grid: the question is "compare
    these two columns down a list of names", which is what a table is for. */
+/* A camera list whose second column is a CHOICE, not a checkbox — so it is
+   left-aligned and wide enough for a select, unlike .recog-camera-table whose
+   narrow centered columns exist for tick boxes. */
+.camera-choice-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 0.6rem;
+  font-size: 0.85rem;
+}
+
+.camera-choice-table th,
+.camera-choice-table td {
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border, rgba(148, 163, 184, 0.2));
+}
+
+.camera-choice-table th {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary, #94a3b8);
+  font-weight: 600;
+}
+
+.camera-choice-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.camera-choice-table select {
+  width: 100%;
+  max-width: 22rem;
+}
+
 .recog-camera-table {
   width: 100%;
   border-collapse: collapse;
