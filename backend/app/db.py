@@ -7,6 +7,7 @@ migrations run on boot keyed off PRAGMA user_version.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -14,6 +15,8 @@ from typing import Any, Optional, Sequence
 import aiosqlite
 
 from .config import DEFAULT_DETECT_OBJECTS
+
+log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 25
 
@@ -981,13 +984,41 @@ class Database:
 
     async def set_camera_recognition(
         self, name: str, *, face: Optional[bool] = None, plate: Optional[bool] = None
-    ) -> None:
-        """Flip one camera's recognition switches, touching nothing else.
+    ) -> list[str]:
+        """Flip one camera's recognition switches. Returns labels auto-added.
 
         A targeted UPDATE rather than a read-modify-upsert. `upsert_camera`
         rewrites every column, so using it here would make a checkbox tick race
         with any other edit in flight and silently win — the classic lost
-        update. Two integers is all this needs to write.
+        update.
+
+        TURNING RECOGNITION ON ALSO TURNS ON THE OBJECT IT NEEDS
+        --------------------------------------------------------
+        Recognition never sees a frame directly. It is fed from the engine's
+        CONFIRMED detections, which are filtered by `detect_objects` first
+        (native/engine.py: `obs = [o for o in observations if o.label in
+        wanted]`), so plate reading on a camera that does not detect vehicles
+        finds no vehicles and returns — and face recognition on a camera that
+        does not detect people never runs. Nothing errors and nothing is
+        logged: the pass correctly concludes there was nothing to look at.
+
+        That combination is unreachable as an intention — nobody switches plate
+        reading on for a camera and means "but do not look at cars" — so the
+        prerequisite is added here rather than left as a trap with a warning
+        next to it.
+
+        ONLY EVER ADDITIVE, and only on the way ON. Switching recognition back
+        OFF leaves `detect_objects` alone: detection is its own feature that
+        the operator configured for their own reasons (events, notifications,
+        recording), and silently removing `car` from a driveway camera because
+        someone stopped reading plates would break something they never touched.
+        `person` is likewise never removed.
+
+        An EMPTY `detect_objects` — "record only, detect nothing", which is
+        reachable only by emptying the object picker on purpose — is treated
+        the same way. Two explicit choices are in conflict there and the newer
+        one wins, which is why the labels added come back to the caller: the
+        operator is told, on the click, that this camera now detects people.
         """
         sets, params = [], []
         if face is not None:
@@ -997,12 +1028,74 @@ class Database:
             sets.append("plate_recognition = ?")
             params.append(int(plate))
         if not sets:
-            return
+            return []
+
+        added = await self._recognition_prereqs(name, face=face, plate=plate)
+        if added:
+            sets.append("detect_objects = ?")
+            params.append(json.dumps(added["objects"]))
+
         params.append(name)
         await self.conn.execute(
             f"UPDATE cameras SET {', '.join(sets)} WHERE name = ?", params
         )
         await self.conn.commit()
+        return added["labels"] if added else []
+
+    #: What each recognition pass needs to be detecting before it can run.
+    #:
+    #: ONE label each, not the pass's whole accepted set. The plate pass reads
+    #: any of car/truck/bus/motorcycle/motorbike/van, but adding six labels to
+    #: a camera because someone ticked one box is a far bigger change than they
+    #: asked for — every one of them also produces events and notifications.
+    #: `car` is the one that makes the feature work on the driveway it was
+    #: turned on for; the rest stay a deliberate choice in the object picker.
+    _RECOGNITION_PREREQ = {"face": "person", "plate": "car"}
+
+    async def _recognition_prereqs(
+        self, name: str, *, face: Optional[bool], plate: Optional[bool]
+    ) -> Optional[dict[str, Any]]:
+        """The camera's detect_objects with any missing prerequisite appended.
+
+        Returns None when there is nothing to add, so the caller can leave the
+        column out of the UPDATE entirely rather than rewriting it with its own
+        value — which would clobber a concurrent edit to the object picker for
+        no reason.
+        """
+        wanted = [
+            label for flag, label in (
+                (face, self._RECOGNITION_PREREQ["face"]),
+                (plate, self._RECOGNITION_PREREQ["plate"]),
+            ) if flag  # only on the way ON; False and None both skip
+        ]
+        if not wanted:
+            return None
+        row = await (
+            await self.conn.execute(
+                "SELECT detect_objects FROM cameras WHERE name = ?", (name,)
+            )
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            objects = json.loads(row["detect_objects"] or "[]")
+        except (TypeError, ValueError):
+            # A corrupt list is not something to silently replace with a
+            # two-label one: that would delete every object this camera
+            # detects. Leave it for the camera editor to repair.
+            log.warning("camera %s has an unreadable detect_objects; not touching it", name)
+            return None
+        if not isinstance(objects, list):
+            return None
+        added = [label for label in wanted if label not in objects]
+        if not added:
+            return None
+        log.info(
+            "enabling recognition on %s also enables detection of %s — the "
+            "passes are fed from detect_objects and would otherwise see nothing",
+            name, ", ".join(added),
+        )
+        return {"objects": objects + added, "labels": added}
 
     async def upsert_camera(self, cam: dict[str, Any]) -> None:
         await self.conn.execute(

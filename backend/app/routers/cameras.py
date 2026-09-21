@@ -1066,12 +1066,19 @@ async def set_camera_recognition(
     So this route writes two integers and calls `engine.reload()` — a re-read of
     the camera rows, which is the only thing needed for the passes to see the
     change. No device I/O, no go2rtc, no recorder restart, no dropped frames.
+
+    Switching a pass ON may also add the object it reads from (`person` for
+    faces, `car` for plates) to this camera's `detect_objects`, because the
+    passes are fed from confirmed DETECTIONS and would otherwise be handed
+    nothing at all. Whatever was added comes back in `added_objects` so the UI
+    can say so — an adjacent setting that changes itself silently is worse
+    than the trap it is fixing.
     """
     await _get_cam_or_404(request, name)
     if body.face is None and body.plate is None:
         raise HTTPException(status_code=400, detail="Nothing to change")
     state = request.app.state
-    await state.db.set_camera_recognition(name, face=body.face, plate=body.plate)
+    added = await state.db.set_camera_recognition(name, face=body.face, plate=body.plate)
     # Engine only. It re-reads the camera rows, which is what makes the switch
     # take effect; every other reconciler in _apply_camera_change is about
     # streams, and no stream is affected by this.
@@ -1084,6 +1091,10 @@ async def set_camera_recognition(
         "name": name,
         "face_recognition": bool(cam.get("face_recognition", True)),
         "plate_recognition": bool(cam.get("plate_recognition", True)),
+        # What this click ALSO turned on, so the client can report it. Empty
+        # in the ordinary case where the camera already detected the object.
+        "added_objects": added,
+        "detect_objects": cam.get("detect_objects") or [],
     }
 
 

@@ -955,6 +955,54 @@ Camera fields `face_zones` / `plate_zones` (normalized polygons, same shape as
 `include_zones`) mark where a face or plate is actually legible. Unlike
 `include_zones` they do **not** filter detection; `[]` means the whole frame.
 
+#### Which cameras run a pass — and the object each pass needs
+
+`PUT /api/cameras/{name}/recognition` `{face?, plate?}` → `{name,
+face_recognition, plate_recognition, added_objects[], detect_objects[]}`.
+Omitted = leave alone; an empty body → 400. Both columns default to **1**
+(schema v24), so adding them changed nothing on an existing box: the operator
+turns cameras OFF rather than finding recognition silently stopped.
+
+**A SEPARATE ROUTE FROM `PUT /api/cameras/{name}`, deliberately.** The full
+update probes the physical device over the network, regenerates the go2rtc
+config, reloads the engine, restarts the recorder's ffmpeg writers and resyncs
+doorbell watchers. That is right for an IP change and wrong for a checkbox —
+driving it from one made the click take seconds and bounced the recording
+pipeline. This route writes the integers and calls `engine.reload()`, which is
+the only thing the passes need to see the change.
+
+**Recognition is fed from confirmed DETECTIONS, not from frames.**
+`native/engine.py` filters observations by `detect_objects` before anything
+else (`obs = [o for o in observations if o.label in wanted]`), then narrows to
+objects confirmed over `MIN_HITS` frames, and *that* is what reaches the
+passes. So the three gates are, in order:
+
+1. a usable label is in the camera's `detect_objects` — `person` for faces
+   (plus the vehicle labels when `recognition.face_on_vehicles` is on), any of
+   car/truck/bus/motorcycle/motorbike/van for plates;
+2. the object is **confirmed** — a plate read off one-frame flicker belongs to
+   no vehicle;
+3. the per-camera switch is on.
+
+Gates 1 and 3 are independent, and a camera failing only gate 1 produces no
+error and no log line: the pass correctly concludes there was nothing to look
+at, which is indistinguishable from "no cars came past". Since nobody enables
+plate reading and means "but ignore cars", **turning a switch ON also adds the
+prerequisite** (`db.set_camera_recognition`): `person` for faces, `car` for
+plates. One label per pass, not the pass's whole accepted set — six new object
+classes, each raising its own events and notifications, is a far bigger change
+than the box that was ticked.
+
+It is **additive and one-way**. Turning a switch back OFF never removes a
+label: detection is its own feature, configured for events, notifications and
+recording, and silently dropping `car` from a driveway camera would break
+something the operator never touched. An empty `detect_objects` ("record only,
+detect nothing") is treated the same way — two explicit choices conflict there
+and the newer one wins. Whatever was added comes back as `added_objects` so
+the client can say so; an adjacent setting that moves silently is worse than
+the trap it fixes. An unreadable `detect_objects` is left alone rather than
+replaced with a one-label list that would delete the camera's real config.
+
 **Quality is not detector confidence** (`native/bestshot.py`). The engine's
 existing `best_frame` is picked by "is this a person?", which a large, centred,
 motion-blurred subject answers very well and which is precisely what an embedding

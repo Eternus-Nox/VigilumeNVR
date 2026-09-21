@@ -19,10 +19,18 @@ client can write badly. They are read on a MAINTENANCE TICK, so a raise there
 takes recognition down — every malformed shape must degrade to the shipped
 default instead.
 
-Offline-runnable; no models, no network, no database.
+Switching a pass ON also has to turn on the object it reads from — the passes
+are fed from confirmed DETECTIONS, so plate reading on a camera that does not
+detect vehicles finds nothing and returns, silently and correctly. Turning it
+back off must NOT take the object away again.
+
+Offline-runnable; no models and no network. The prerequisite checks use a real
+temporary SQLite file, because the behaviour under test is a conditional UPDATE
+and a fake would only restate it.
 """
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -210,11 +218,102 @@ def route_checks() -> None:
           "not a weakening of the real one")
 
 
+async def prereq_checks() -> None:
+    """Switching a pass ON turns on the object it reads from.
+
+    Recognition never sees a frame directly — it is fed the engine's CONFIRMED
+    detections, which `detect_objects` filters first. So plate reading on a
+    camera that does not detect vehicles finds nothing and returns, silently
+    and correctly, which is indistinguishable from "no cars came past". Nobody
+    ticks plate reading and means "but ignore cars", so the prerequisite is
+    added rather than left as a trap.
+
+    The other half matters just as much: turning a pass back OFF must not take
+    the object away again. Detection is its own feature, configured for events
+    and notifications, and quietly removing `car` from a driveway camera would
+    break something the operator never touched.
+    """
+    import tempfile
+    import time
+
+    from app.db import Database
+
+    print("\nenabling a pass enables the object it needs")
+    root = Path(tempfile.mkdtemp(prefix="vigilume-prereq-"))
+    db = Database(root / "nvr.db")
+    await db.connect()
+
+    async def make(name: str, objects: list[str]) -> None:
+        await db.upsert_camera({
+            "name": name, "friendly_name": name, "model": "IP5M-T1277EW-AI",
+            "ip": "127.0.0.1", "username": "u", "password": "p",
+            "detect_objects": objects, "detect_width": 640, "detect_height": 480,
+            "detect_fps": 5, "detect_enabled": True, "record_enabled": True,
+            "capabilities": {}, "created_at": time.time(),
+        })
+
+    async def objects_of(name: str) -> list[str]:
+        return (await db.get_camera(name)).get("detect_objects") or []
+
+    await make("drive", ["person"])
+    added = await db.set_camera_recognition("drive", plate=True)
+    check(added == ["car"],
+          f"plate reading on a person-only camera reports adding car (got {added})")
+    check(await objects_of("drive") == ["person", "car"],
+          "...and appends it, keeping what was already there")
+
+    await make("porch", ["dog", "cat"])
+    added = await db.set_camera_recognition("porch", face=True)
+    check(added == ["person"], f"face recognition adds person (got {added})")
+    check(await objects_of("porch") == ["dog", "cat", "person"],
+          "...appended, not replacing the camera's own choices")
+
+    added = await db.set_camera_recognition("porch", face=True)
+    check(added == [],
+          "a second click adds nothing and reports nothing — the label is "
+          "already there, so there is nothing to tell anyone about")
+
+    # Only ONE label per pass. The plate pass reads six (car/truck/bus/...),
+    # but turning on six object classes — each of which also raises events and
+    # notifications — is a much bigger change than the box that was ticked.
+    await make("gate", [])
+    added = await db.set_camera_recognition("gate", plate=True)
+    check(added == ["car"],
+          f"one label per pass, not the pass's whole accepted set (got {added})")
+
+    await make("both", [])
+    added = await db.set_camera_recognition("both", face=True, plate=True)
+    check(added == ["person", "car"],
+          f"both switches in one call add both prerequisites (got {added})")
+
+    print("\n...and turning it OFF leaves detection alone")
+    await make("side", ["person", "car"])
+    added = await db.set_camera_recognition("side", face=False, plate=False)
+    check(added == [], "switching both off adds nothing")
+    check(await objects_of("side") == ["person", "car"],
+          "and removes nothing — detection is its own feature, configured for "
+          "events and recording, not a thing recognition may take back")
+    cam = await db.get_camera("side")
+    check(not cam["face_recognition"] and not cam["plate_recognition"],
+          "...while the switches themselves did go off")
+
+    print("\nthe column is only rewritten when it actually changes")
+    await make("quiet", ["person", "car"])
+    added = await db.set_camera_recognition("quiet", face=True, plate=True)
+    check(added == [],
+          "a camera already detecting both needs no change, so detect_objects "
+          "is left out of the UPDATE entirely rather than rewritten with its "
+          "own value over a concurrent edit to the object picker")
+
+    await db.close()
+
+
 def main() -> int:
     clamp_checks()
     label_checks()
     gate_checks()
     route_checks()
+    asyncio.run(prereq_checks())
     settings_model_checks()
     print()
     if _failures:

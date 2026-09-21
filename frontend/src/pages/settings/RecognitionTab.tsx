@@ -263,10 +263,23 @@ export default function RecognitionTab() {
                 ...c,
                 face_recognition: saved.face_recognition,
                 plate_recognition: saved.plate_recognition,
+                detect_objects: saved.detect_objects,
               }
             : c,
         ),
       );
+      // SAY SO when the server had to turn on the object this pass reads
+      // from. The tick is on one row of this table and the change lands on
+      // another page entirely (the camera's object picker) — an adjacent
+      // setting that moves silently is worse than the trap it is fixing.
+      if (saved.added_objects.length > 0) {
+        pushToast({
+          kind: 'info',
+          title: `Also detecting ${saved.added_objects.join(' and ')} on ${titleCase(cam.name)}`,
+          body:
+            'Recognition reads from detected objects, so it would have found nothing without this. Turning recognition back off leaves it on.',
+        });
+      }
     } catch (e) {
       fail(e, 'Could not update the camera');
       setCameras((prev) =>

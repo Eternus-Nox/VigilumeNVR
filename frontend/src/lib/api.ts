@@ -1665,10 +1665,22 @@ export const api = {
    * rows, which is all the recognition passes need.
    */
   setCameraRecognition: (name: string, body: { face?: boolean; plate?: boolean }) =>
-    request<{ name: string; face_recognition: boolean; plate_recognition: boolean }>(
-      `/api/cameras/${encodeURIComponent(name)}/recognition`,
-      { method: 'PUT', body: JSON.stringify(body) },
-    ),
+    request<{
+      name: string;
+      face_recognition: boolean;
+      plate_recognition: boolean;
+      /**
+       * Objects this click ALSO turned on, because the passes are fed from
+       * confirmed detections: faces need `person`, plates need `car`, and
+       * without them the pass runs and is handed nothing. Usually empty. Never
+       * populated on the way OFF — detection is not taken back.
+       */
+      added_objects: string[];
+      detect_objects: string[];
+    }>(`/api/cameras/${encodeURIComponent(name)}/recognition`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
 
   updateCamera: (name: string, cam: CameraInput) =>
     request<Camera>(`/api/cameras/${encodeURIComponent(name)}`, {
