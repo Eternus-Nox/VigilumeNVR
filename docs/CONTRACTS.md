@@ -891,6 +891,54 @@ unwanted detections, draw **exempt zones** on the camera snapshot (see the
 `exempt_zones` camera field) — a foot-center in a drawn polygon is masked before
 any event/count/notification.
 
+#### Stationary objects (`settings.detection.ignore_stationary`, ON by default)
+
+A detector has no notion of news: it answers "is there a car here?" on every
+frame, so a parked car is detected five times a second for as long as it is
+parked. Events are keyed `(camera, label)` and end only on ABSENCE, so that
+parked car's event never ends, heartbeats an `update` every 10 s forever — and
+**while it is open no new `car` event can be.** A car pulling into the drive
+arrives as a count change on a stale event rather than as a new event, which
+makes the arrival the least visible thing on the screen. That last one is a
+missed detection, not noise, and it is why this defaults on.
+
+`native/stillness.py` keeps per-track motion state, fed from `obs` (every seen
+track) and applied to `confirmed`. Displacement is measured from an **anchor** —
+the position where the track was last judged to be moving — never between
+consecutive frames: jitter is bounded and cannot accumulate, while a slow walk
+accumulates and crosses the threshold in a second or two. Both the box CENTRE
+moving and the box SIZE changing count, because a subject walking straight at
+the lens barely moves their centre while their box doubles. The threshold is
+12% of the box's own diagonal (floor `MIN_MOVE_PX`), so it scales with distance.
+
+Two cases, deliberately not the same:
+
+| track | treated as | effect |
+|---|---|---|
+| never moved since first seen | furniture — a parked car, a bin read as a person, anything already there at startup | **no event at all**, ever, and no recognition pass |
+| moved, then stopped | a real subject at rest | keeps its event; the 10 s heartbeat is held back; after `stationary_after_s` (default 180, range 10–3600) it stops sustaining the event |
+
+Moving again clears both and opens a **new** event — the correct reading of a
+parked car pulling out. Only the HEARTBEAT is suppressed while subjects are
+still: a score improvement, a count change and a line crossing each still emit,
+so "someone is standing at the door" never becomes "nothing is reported".
+
+Two safety properties are asserted from several directions in
+`tests/stillness_smoke.py` and must not regress: a track the motion state has
+**no opinion about reads as ACTIVE** (no opinion must mean detect, never
+suppress), and a subject that ARRIVED always gets its event even if it then
+stands still for an hour.
+
+`scene` — what gets boxed on the saved snapshot — keeps **every** confirmed
+object, dormant ones included. Suppression decides what is an *event*, not what
+the camera saw; an image that omitted the parked car would misrepresent the
+frame it claims to be.
+
+None of this touches footage. Recording is continuous and clips are cut from it
+afterwards, so a suppressed event costs a clip, never a recording — which is
+what makes it safe to be this aggressive. Set `ignore_stationary: false` to
+restore the old behaviour exactly.
+
 WebSocket:
 - `WS /api/ws?token=` — server pushes `{type:"event_new"|"event_update"|"event_end"|"doorbell", event:{...}}`, `{type:"camera_status", ...}`, and `{type:"model_status", key, tier, state, progress_pct, active, loaded}` for live UI updates.
 

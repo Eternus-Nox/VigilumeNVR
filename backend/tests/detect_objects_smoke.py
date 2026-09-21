@@ -83,6 +83,24 @@ def check(cond: bool, msg: str) -> None:
 
 # The background capability probe would hang on a blackholed IP; the object
 # semantics don't need it — stub it out so CRUD returns instantly.
+def _nudge(box, i: int, step: float = 10.0):
+    """One box, shifted on alternate frames.
+
+    A track that has NEVER moved is furniture (native/stillness.py): it opens
+    no event, on purpose, because a detector reports a parked car five times a
+    second forever. So a fixture that feeds one fixed box is feeding a parked
+    car, and would assert that furniture raises an alarm.
+
+    Oscillating rather than drifting keeps the foot-center within `step` px of
+    where the case put it — these suites are about zones, labels and
+    annotation, and a box that wandered out of its zone would break them for a
+    reason that has nothing to do with what they test.
+    """
+    dx = step if i % 2 else 0.0
+    x1, y1, x2, y2 = box
+    return (x1 + dx, y1, x2 + dx, y2)
+
+
 async def _no_probe(cam: dict) -> dict:
     return {}
 
@@ -216,7 +234,7 @@ async def _engine_cases() -> None:
     box = (10.0, 10.0, 40.0, 40.0)
     t0 = 1000.0
     for i in range(MIN_HITS + 2):  # plenty to confirm a track
-        obs = [Observation("person", 7, 0.9, box)]
+        obs = [Observation("person", 7, 0.9, _nudge(box, i))]
         await engine.process("rec", t0 + i * 0.2, obs, frame_bgr=None)
         await engine.process("det", t0 + i * 0.2, obs, frame_bgr=None)
 

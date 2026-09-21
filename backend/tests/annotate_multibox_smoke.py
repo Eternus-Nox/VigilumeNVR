@@ -252,14 +252,27 @@ async def _engine_scene_cases() -> None:
     )
 
     frame = np.full((480, 640, 3), BG, dtype=np.uint8)
-    obs = [
-        Observation("person", 0, 0.90, (50.0, 50.0, 150.0, 300.0)),
-        Observation("person", 1, 0.80, (250.0, 60.0, 360.0, 320.0)),
-        Observation("dog", 2, 0.95, (450.0, 200.0, 600.0, 400.0)),
-    ]
+    def scene_at(i: int):
+        # Shift every box on alternate frames. A track that NEVER moves is
+        # furniture (native/stillness.py) and opens no event by design, so
+        # three fixed boxes would be three parked cars and nothing would be
+        # emitted to annotate at all.
+        #
+        # 40 px because the threshold scales with the box: it is 12% of the
+        # diagonal, and these boxes are ~270 px across the diagonal, so a
+        # 10 px shuffle reads as wobble. Alternating (rather than drifting)
+        # also means the frame that OPENS the event — the third, once the
+        # tracks confirm — is an even one, carrying the original coordinates
+        # these assertions are written against.
+        dx = 40.0 if i % 2 else 0.0
+        return [
+            Observation("person", 0, 0.90, (50.0 + dx, 50.0, 150.0 + dx, 300.0)),
+            Observation("person", 1, 0.80, (250.0 + dx, 60.0, 360.0 + dx, 320.0)),
+            Observation("dog", 2, 0.95, (450.0 + dx, 200.0, 600.0 + dx, 400.0)),
+        ]
     t0 = time.time()
     for i in range(4):  # >= MIN_HITS frames so all three tracks confirm
-        await engine.process("cam", t0 + i * 0.2, obs, frame_bgr=frame)
+        await engine.process("cam", t0 + i * 0.2, scene_at(i), frame_bgr=frame)
 
     new_person = [
         p for p in cap.payloads if p["type"] == "new" and p["after"]["label"] == "person"
@@ -374,14 +387,27 @@ async def _pipeline_multibox_cases() -> None:
     )
 
     frame = np.full((480, 640, 3), BG, dtype=np.uint8)
-    obs = [
-        Observation("person", 0, 0.90, (50.0, 50.0, 150.0, 300.0)),
-        Observation("person", 1, 0.80, (250.0, 60.0, 360.0, 320.0)),
-        Observation("dog", 2, 0.95, (450.0, 200.0, 600.0, 400.0)),
-    ]
+    def scene_at(i: int):
+        # Shift every box on alternate frames. A track that NEVER moves is
+        # furniture (native/stillness.py) and opens no event by design, so
+        # three fixed boxes would be three parked cars and nothing would be
+        # emitted to annotate at all.
+        #
+        # 40 px because the threshold scales with the box: it is 12% of the
+        # diagonal, and these boxes are ~270 px across the diagonal, so a
+        # 10 px shuffle reads as wobble. Alternating (rather than drifting)
+        # also means the frame that OPENS the event — the third, once the
+        # tracks confirm — is an even one, carrying the original coordinates
+        # these assertions are written against.
+        dx = 40.0 if i % 2 else 0.0
+        return [
+            Observation("person", 0, 0.90, (50.0 + dx, 50.0, 150.0 + dx, 300.0)),
+            Observation("person", 1, 0.80, (250.0 + dx, 60.0, 360.0 + dx, 320.0)),
+            Observation("dog", 2, 0.95, (450.0 + dx, 200.0, 600.0 + dx, 400.0)),
+        ]
     t0 = time.time()
     for i in range(4):
-        await engine.process("cam", t0 + i * 0.2, obs, frame_bgr=frame)
+        await engine.process("cam", t0 + i * 0.2, scene_at(i), frame_bgr=frame)
 
     st = engine._events[("cam", "person")]
     row = await db.get_event_by_frigate_id(st.fid)

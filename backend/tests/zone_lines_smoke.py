@@ -249,9 +249,16 @@ def main() -> int:  # noqa: C901 — a checklist, not a branchy algorithm
             self.counts[(camera, label)] = count
 
     async def drive(engine, camera, foot_x, foot_y, frames=MIN_HITS + 2, tid=9, t0=1000.0):
+        # Shuffle the foot 10 px between frames. A track that NEVER moves is
+        # furniture (native/stillness.py) and opens no event on purpose, so a
+        # fixed foot would be feeding a parked car and asserting it alarms.
+        # Alternating rather than drifting keeps the foot on the side of the
+        # include zone this case put it on, which is what is under test.
         for i in range(frames):
             await engine.process(
-                camera, t0 + i * 0.2, [obs(foot_x, foot_y, tid=tid)], frame_bgr=None
+                camera, t0 + i * 0.2,
+                [obs(foot_x + (10.0 if i % 2 else 0.0), foot_y, tid=tid)],
+                frame_bgr=None,
             )
 
     async def cases():

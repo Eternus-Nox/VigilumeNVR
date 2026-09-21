@@ -44,6 +44,16 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
   const [absenceTimeout, setAbsenceTimeout] = useState<number>(
     pending.detection?.absence_timeout_s ?? settings.detection.absence_timeout_s ?? 5,
   );
+  // Hold motionless objects back from the event layer. Absent on a backend
+  // that predates it -> true, which is the shipped default: what it replaces
+  // is a parked car holding its label's event open and blocking every later
+  // arrival on that camera, not merely some extra rows.
+  const [ignoreStationary, setIgnoreStationary] = useState<boolean>(
+    pending.detection?.ignore_stationary ?? settings.detection.ignore_stationary ?? true,
+  );
+  const [stationaryAfter, setStationaryAfter] = useState<number>(
+    pending.detection?.stationary_after_s ?? settings.detection.stationary_after_s ?? 180,
+  );
   // Night contrast boost on the detector's frame only. Absent on an older
   // backend -> "off", which is also the shipped default: it changes what the
   // model sees, so it is opt-in.
@@ -95,6 +105,8 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
   useAdoptSaved(settings.detection.backend ?? 'auto', setBackend);
   useAdoptSaved(settings.detection.coral_model ?? 'ssdlite_mobiledet', setCoralModel);
   useAdoptSaved(settings.detection.absence_timeout_s ?? 5, setAbsenceTimeout);
+  useAdoptSaved(settings.detection.ignore_stationary ?? true, setIgnoreStationary);
+  useAdoptSaved(settings.detection.stationary_after_s ?? 180, setStationaryAfter);
   useAdoptSaved(settings.detection.night_boost ?? 'off', setNightBoost);
   useAdoptSaved(settings.detection.night_boost_threshold ?? 60, setNightBoostThreshold);
   useAdoptSaved(settings.detection.smoothing ?? false, setSmoothing);
@@ -113,6 +125,7 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
       detection: {
         confidence, default_mode: defaultMode, backend, coral_model: coralModel,
         absence_timeout_s: absenceTimeout,
+        ignore_stationary: ignoreStationary, stationary_after_s: stationaryAfter,
         night_boost: nightBoost, night_boost_threshold: nightBoostThreshold,
         smoothing, smoothing_frames: smoothingFrames,
       },
@@ -120,6 +133,7 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
     });
   }, [
     recording, confidence, defaultMode, backend, coralModel, absenceTimeout,
+    ignoreStationary, stationaryAfter,
     nightBoost, nightBoostThreshold, smoothing, smoothingFrames,
     hasRecognition, recognition, onDraftChange,
   ]);
@@ -694,6 +708,57 @@ export default function RecordingTab({ settings, onDraftChange, pending }: TabPr
             <span className="control-hint">
               Clips are only cut once the event ends, so this also delays when a clip
               appears.
+            </span>
+          </label>
+        </div>
+      </section>
+
+      <section className="card">
+        <h2>Things that aren't doing anything</h2>
+        <p className="muted small">
+          A detector has no sense of what's new — it answers "is there a car here?" on
+          every frame, so a car parked in the drive is detected five times a second for
+          as long as it's parked. Because there's one open event per object type per
+          camera, that parked car's event never ends, and{' '}
+          <strong>while it's open the car that pulls in can't open one of its own.</strong>{' '}
+          So this isn't only about noise — leaving it off costs you arrivals.
+        </p>
+        <div className="form-stack">
+          <label className="checkbox">
+            <input
+              type="checkbox"
+              checked={ignoreStationary}
+              onChange={(e) => setIgnoreStationary(e.target.checked)}
+            />
+            <span>Ignore objects that aren't moving</span>
+          </label>
+          <p className="control-hint">
+            Something that has <em>never</em> moved since it was first seen is treated as
+            furniture — a parked car, a wheelie bin the detector reads as a person,
+            anything already sitting there when the system started. It raises no event at
+            all. It's still tracked, so the moment it moves it becomes news again.
+          </p>
+          <label>
+            Give up on something that stopped moving after (seconds)
+            <input
+              type="number"
+              min={10}
+              max={3600}
+              step={10}
+              value={stationaryAfter}
+              disabled={!ignoreStationary}
+              onChange={(e) =>
+                setStationaryAfter(
+                  Math.min(3600, Math.max(10, Math.floor(Number(e.target.value) || 10))),
+                )
+              }
+            />
+            <span className="control-hint">
+              Applies only to something that <em>arrived</em> and then settled. It keeps
+              its event for this long — someone standing at a door is exactly the sighting
+              worth keeping — and simply stops repeating itself. None of this touches
+              recording: footage is continuous, so anything suppressed here is still on
+              disk to scrub back to.
             </span>
           </label>
         </div>

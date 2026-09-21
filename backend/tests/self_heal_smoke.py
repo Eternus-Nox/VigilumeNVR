@@ -83,6 +83,23 @@ def check(cond: bool, msg: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _nudge(box, i: int, step: float = 10.0):
+    """One box, shifted on alternate frames.
+
+    A track that has NEVER moved is furniture (native/stillness.py): it opens
+    no event, on purpose, because a detector reports a parked car five times a
+    second forever. So a fixture feeding one fixed box is feeding a parked car,
+    and would be asserting that furniture raises an alarm.
+
+    Oscillating rather than drifting keeps the foot-center within `step` px of
+    where the case put it — this suite is about self-healing, not geometry, and
+    a box that wandered somewhere new would break it for an unrelated reason.
+    """
+    dx = step if i % 2 else 0.0
+    x1, y1, x2, y2 = box
+    return (x1 + dx, y1, x2 + dx, y2)
+
+
 class RecordingPipeline:
     """Minimal EventsPipeline stand-in: records payloads + live counts."""
 
@@ -239,7 +256,7 @@ async def _heartbeat_case() -> None:
     t0 = time.time()
     box = (10.0, 10.0, 40.0, 40.0)
     for i in range(4):  # >= MIN_HITS frames carrying tracker_id 5 -> confirmed
-        obs = [Observation("person", 5, 0.9, box)]
+        obs = [Observation("person", 5, 0.9, _nudge(box, i))]
         await engine.process("cam", t0 + i * 0.2, obs, frame_bgr=None)
     st = engine._events.get(("cam", "person"))
     check(st is not None, "a confirmed person track opened an event")

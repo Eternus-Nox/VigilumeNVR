@@ -277,6 +277,17 @@ class DetectionSettings(BaseModel):
     # clip is not cut until the event ends, and an event that never closes is
     # an event whose footage never arrives.
     absence_timeout_s: int = Field(default=5, ge=1, le=300)
+    # Hold motionless objects back from the event layer entirely — see
+    # native/stillness.py. ON by default, because the behaviour it replaces is
+    # not "a bit noisy": a parked car holds its label's event open, and while
+    # that event is open the car that PULLS IN cannot open one of its own.
+    ignore_stationary: bool = True
+    # How long something that HAS moved may sit still before it stops
+    # sustaining its event. Floor of 10 s so a subject who pauses mid-driveway
+    # is not chopped into two events; ceiling of an hour, past which this is
+    # just "off" spelled the long way. Something that has NEVER moved is
+    # furniture and is held back regardless of this number.
+    stationary_after_s: int = Field(default=180, ge=10, le=3600)
     # Night contrast boost on the DETECTOR's frame only — never on recordings,
     # clips, live view or the event snapshot. See native/enhance.py for the two
     # honest limits (it cannot create signal in a black frame, and the model was

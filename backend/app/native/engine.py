@@ -51,6 +51,7 @@ import numpy as np
 
 from . import zones as zonelib
 from .coco_labels import ID_TO_LABEL
+from .stillness import STATIONARY_AFTER_S, Stillness, clamp_stationary_after
 
 if TYPE_CHECKING:  # pragma: no cover
     import supervision as sv
@@ -399,6 +400,10 @@ class _CameraState:
     plate_recognition: bool = True
     # tracker_id -> (hit count, last seen epoch)
     hits: dict[int, tuple[int, float]] = field(default_factory=dict)
+    # Per-track motion state: what is moving, what arrived and settled, and
+    # what was already sitting there. Only `active` tracks reach the event
+    # layer. Per camera because tracker_ids are only unique within one.
+    stillness: Stillness = field(default_factory=Stillness)
     latest_frame: Optional[np.ndarray] = None
     latest_frame_time: Optional[float] = None
     frame_times: deque = field(default_factory=lambda: deque(maxlen=600))
@@ -757,6 +762,13 @@ class DetectionEngine:
         for tid in forgotten:
             del cam.hits[tid]
             cam.traces.pop(tid, None)
+        if forgotten:
+            # Motion state is per track and must retire with it, or a
+            # road-facing camera accumulates a dict entry per passing car
+            # forever — and a REUSED tracker id would inherit the previous
+            # occupant's "has moved" history, which is how a parked car
+            # inherits a pedestrian's right to open an event.
+            cam.stillness.forget(forgotten)
         if forgotten and cam.cross_lines:
             # sv.LineZone never prunes its own per-track crossing history. Ours
             # is forgotten here, so theirs is too — otherwise a camera watching
@@ -774,6 +786,39 @@ class DetectionEngine:
             for tid in forgotten:
                 await self._plates.finish(camera, tid)
         confirmed = [o for o in obs if cam.hits[o.tracker_id][0] >= MIN_HITS]
+
+        # --- stillness: which of these are actually DOING anything ---
+        #
+        # A detector answers "is there a car here?" on every frame, so a parked
+        # car is detected five times a second forever. In an event model keyed
+        # on (camera, label) that does not merely make noise — it holds the
+        # label's event open, which means the car that PULLS IN arrives as a
+        # count change on a stale event instead of as a new event. The arrival
+        # is the thing worth telling someone about and it was the least visible
+        # thing on the screen. See native/stillness.py.
+        #
+        # `scene` below deliberately keeps EVERY confirmed object, dormant ones
+        # included: it is what gets boxed on the saved snapshot, and a picture
+        # that omits the parked car is a picture that lies about the frame.
+        scene = confirmed
+        if self._ignore_stationary():
+            cam.stillness.stationary_after_s = self._stationary_after()
+            # FED FROM `obs`, FILTERED ON `confirmed`. Motion history has to
+            # start when a track is first SEEN, not when it confirms: fed from
+            # `confirmed` instead, a track arrives at the event layer having
+            # been watched for zero frames, so it has by definition never moved
+            # and is held back until its NEXT step — which delays every real
+            # subject's event by a frame and moves its start time off the
+            # moment they actually arrived.
+            for o in obs:
+                cam.stillness.update(o.tracker_id, o.box, frame_time)
+            active: list[Observation] = []
+            for o in confirmed:
+                if cam.stillness.is_active(o.tracker_id, frame_time):
+                    active.append(o)
+                else:
+                    cam.stillness.count_drop(o.tracker_id)
+            confirmed = active
 
         # --- traces + line crossings (confirmed objects only) ---
         # Both are fed from `confirmed`, not `obs`: a crossing is only meaningful
@@ -856,7 +901,7 @@ class DetectionEngine:
         # label's event adopts as its best — every counted object, all labels.
         for label, group in by_label.items():
             await self._observe_label(
-                cam, label, group, frame_time, frame_bgr, confirmed,
+                cam, label, group, frame_time, frame_bgr, scene,
                 zone_names, crossed_by_label.get(label, ()),
             )
 
@@ -914,12 +959,25 @@ class DetectionEngine:
         if count_changed:
             self._update_count(camera, label, count)
 
+        # The HEARTBEAT is held back while every subject of this event is
+        # motionless: an event whose people are all standing still has nothing
+        # new to say every 10 seconds, and on a camera watching a parked car
+        # that heartbeat is the entire content of the event log.
+        #
+        # Only the heartbeat. A score improvement, a count change and a line
+        # crossing are new information no matter who is moving, and each still
+        # emits — this must not become "nothing is reported while someone
+        # stands at the door".
+        heartbeat_due = frame_time - st.last_emit_time >= UPDATE_HEARTBEAT_S
+        if heartbeat_due and cam.stillness.all_still(o.tracker_id for o in group):
+            heartbeat_due = False
+
         if (
             st.best_score - st.last_emit_score >= UPDATE_SCORE_DELTA
             or count != st.last_emit_count
             or crossed  # a line crossing is the sharpest signal here — don't sit
                         # on it for up to a heartbeat before the row records it
-            or frame_time - st.last_emit_time >= UPDATE_HEARTBEAT_S
+            or heartbeat_due
         ):
             await self._emit("update", st, frame_time)
 
@@ -1083,6 +1141,29 @@ class DetectionEngine:
         detection = self._settings.detection if self._settings is not None else {}
         configured = (detection or {}).get("absence_timeout_s")
         return ABSENCE_TIMEOUT_S if configured is None else max(0.5, float(configured))
+
+    def _detection_setting(self, key: str, default: Any) -> Any:
+        """One `settings.detection` value, None-safe.
+
+        Same contract as `_absence_timeout`: read per frame so a change lands
+        on the next one, and an engine built WITHOUT a settings store (every
+        offline engine test) must read as "the default" rather than raise five
+        times a second per camera.
+        """
+        if self._settings is None:
+            return default
+        detection = self._settings.detection or {}
+        value = detection.get(key)
+        return default if value is None else value
+
+    def _ignore_stationary(self) -> bool:
+        """Whether motionless objects are held back from the event layer."""
+        return bool(self._detection_setting("ignore_stationary", True))
+
+    def _stationary_after(self) -> float:
+        return clamp_stationary_after(
+            self._detection_setting("stationary_after_s", STATIONARY_AFTER_S)
+        )
 
     async def _housekeeping(self) -> None:
         while True:

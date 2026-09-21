@@ -467,6 +467,31 @@ DEFAULT_SETTINGS: dict = {
         # once the event ends). Raise it for scenes with cover — cars behind a
         # hedge, someone stepping out of frame and back.
         "absence_timeout_s": 5,
+        # STATIONARY OBJECTS are held back from the event layer (see
+        # native/stillness.py). A detector has no notion of news: it answers
+        # "is there a car here?" every frame, so a parked car is detected five
+        # times a second for as long as it is parked. Because events are keyed
+        # (camera, label) and end only on ABSENCE, that car's event never ends
+        # — and while it is open, the car that PULLS IN arrives as a count
+        # change on a stale event rather than as a new event. The arrival is
+        # the thing worth reporting and it was the least visible thing on the
+        # screen, so this defaults ON.
+        #
+        # Two cases, treated differently on purpose:
+        #   never moved  — furniture (a parked car, a bin the detector reads as
+        #                  a person, anything already there at startup). Never
+        #                  opens an event at all.
+        #   moved, then  — a real subject at rest. Keeps its event, stops
+        #   stopped        heartbeating, and after stationary_after_s stops
+        #                  sustaining it.
+        # Moving again clears both, and opens a NEW event — which is the right
+        # reading of a parked car pulling out.
+        #
+        # Nothing here touches footage: recording is continuous and clips are
+        # cut from it afterwards, so a suppressed event costs a clip, never a
+        # recording.
+        "ignore_stationary": True,
+        "stationary_after_s": 180,
         # NIGHT CONTRAST BOOST for the detector's input frame only (see
         # native/enhance.py). For a camera run WITHOUT IR, where the scene is
         # dim rather than dark and the model has little to work with.

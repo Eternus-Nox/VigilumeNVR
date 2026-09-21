@@ -928,6 +928,19 @@ export interface AppSettings {
      */
     absence_timeout_s: number;
     /**
+     * Hold motionless objects back from the event layer. ON by default: a
+     * detector reports a parked car every frame, and because events are keyed
+     * (camera, label) that car's event never ends — which blocks the NEXT car
+     * from opening one at all.
+     */
+    ignore_stationary: boolean;
+    /**
+     * How long something that HAS moved may sit still before it stops
+     * sustaining its event. Something that never moved is furniture and is
+     * held back regardless of this.
+     */
+    stationary_after_s: number;
+    /**
      * Night contrast boost on the DETECTOR's input frame only — never on
      * recordings, clips, live view or the saved snapshot. `auto` boosts only
      * frames darker than `night_boost_threshold` (mean luma 0–255).
