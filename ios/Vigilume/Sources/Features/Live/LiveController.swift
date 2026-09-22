@@ -95,7 +95,7 @@ final class LiveController: ObservableObject {
 
     @Published private(set) var rung: Rung = .low
     /// True once a promotion to the full-res rung has been TRIED and failed —
-    /// the candidate never decoded a frame inside `candidateWindow`. Drives the
+    /// the candidate never decoded a frame inside `climbCandidateWindow`. Drives the
     /// "SD (compat)" badge on the WebRTC path, so a view that is stuck on the
     /// substream says so instead of just looking soft. Cleared by a successful
     /// switch, a fresh attach, and the HD retry button.
@@ -119,6 +119,10 @@ final class LiveController: ObservableObject {
     /// Has the high rung ever failed on THIS attach? Until it has, there is no
     /// evidence to be cautious about, so the first climb is fast and unthrottled.
     private var hasDemoted = false
+    /// Consecutive climb attempts that ran out of window without the candidate
+    /// ever painting. Cleared by a climb that succeeds — a main that makes it
+    /// once has earned its forgiveness back.
+    private var climbTimeouts = 0
 
     /// Demote after this long degraded — short, because the picture is already
     /// bad and waiting helps nobody.
@@ -137,9 +141,36 @@ final class LiveController: ObservableObject {
     /// Never switch more often than this — but only ONCE the link has misbehaved
     /// (`hasDemoted`); it must not throttle the first climb.
     private static let minSwitchInterval: TimeInterval = 25
-    /// A candidate rung gets this long to produce a real frame before we give up
-    /// and stay where we are.
-    private static let candidateWindow: TimeInterval = 6
+    /// A DEMOTE candidate gets this long to produce a real frame. Short is
+    /// right here: the substream's keyframe interval is provisioned to ~1 s
+    /// (amcrest.provision_substream_gop), so a sub that has not painted in 6 s
+    /// is not going to.
+    private static let demoteCandidateWindow: TimeInterval = 6
+    /// A CLIMB candidate gets considerably longer, and the asymmetry is the
+    /// point.
+    ///
+    /// `provision_substream_gop` deliberately shortens the SUB stream's
+    /// keyframe interval and leaves MAIN alone, because shortening main's GOP
+    /// would inflate everything the 24/7 recorder stores. Its comment reasoned
+    /// that main's keyframe wait "is never seen" because something is already
+    /// on screen — which was true when the climb had no deadline, and is false
+    /// now. go2rtc caches no GOP for a newly attached consumer, so a climb
+    /// cannot paint until main's NEXT keyframe: the camera's own GOP (commonly
+    /// 2xFPS, and operators set it longer) plus WHEP negotiation and the RTSP
+    /// pull. Six seconds failed that race on perfectly healthy LANs, and
+    /// because each failure widens `promoteWindow`, the view then settled on
+    /// the substream for good — bandwidth never came into it.
+    ///
+    /// The cost of being generous is one off-screen RTSP session for a few
+    /// extra seconds on a climb that was going to fail anyway. The cost of
+    /// being stingy is a permanently soft fullscreen view.
+    private static let climbCandidateWindow: TimeInterval = 14
+    /// How many climb TIMEOUTS are forgiven before they are charged like an
+    /// outright refusal. Two, because the case being rescued is a main stream
+    /// whose keyframe lands just outside one window — that resolves on the next
+    /// attempt or not at all. A rung that is genuinely unreachable still backs
+    /// off, just half a minute later than a refusal does.
+    private static let freeClimbTimeouts = 2
     private static let promoteWindowMax: TimeInterval = 120
 
     /// Dedupe key so repeated `play(...)` calls (SwiftUI onChange storms) don't
@@ -296,6 +327,7 @@ final class LiveController: ObservableObject {
         cleanSince = nil
         promoteWindow = Self.initialPromoteWindow
         hasDemoted = false
+        climbTimeouts = 0
         highRungUnavailable = false
         lastSwitchAt = ProcessInfo.processInfo.systemUptime
     }
@@ -402,7 +434,10 @@ final class LiveController: ObservableObject {
         candidate.start(url: url)
 
         switchTask = Task { [weak self] in
-            let deadline = ProcessInfo.processInfo.systemUptime + Self.candidateWindow
+            let window = target == .high
+                ? Self.climbCandidateWindow
+                : Self.demoteCandidateWindow
+            let deadline = ProcessInfo.processInfo.systemUptime + window
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 200_000_000)
                 if Task.isCancelled { return }
@@ -411,9 +446,15 @@ final class LiveController: ObservableObject {
                     self.commitSwitch(to: target, candidate: candidate)
                     return
                 }
-                if candidate.state == .failed
-                    || ProcessInfo.processInfo.systemUptime > deadline {
-                    self.abandonSwitch(candidate, target: target)
+                // A rung that REFUSED and a rung that was merely slow are not
+                // the same evidence, and charging them alike is what pinned a
+                // healthy link to the substream.
+                if candidate.state == .failed {
+                    self.abandonSwitch(candidate, target: target, refused: true)
+                    return
+                }
+                if ProcessInfo.processInfo.systemUptime > deadline {
+                    self.abandonSwitch(candidate, target: target, refused: false)
                     return
                 }
             }
@@ -434,7 +475,10 @@ final class LiveController: ObservableObject {
         whepTrack = candidate.videoTrack
         state = .playing
         rung = target
-        if target == .high { highRungUnavailable = false }
+        if target == .high {
+            highRungUnavailable = false
+            climbTimeouts = 0
+        }
         whepURL = url(for: target)
         lastSwitchAt = ProcessInfo.processInfo.systemUptime
         degradedSince = nil
@@ -444,7 +488,11 @@ final class LiveController: ObservableObject {
     }
 
     /// Candidate never produced a frame (or failed): drop it and stay put.
-    private func abandonSwitch(_ candidate: WHEPPlayer, target: Rung) {
+    ///
+    /// - Parameter refused: the candidate reported `.failed` — the rung is
+    ///   genuinely broken. `false` means it simply ran out of window, which is
+    ///   much weaker evidence and is charged much less.
+    private func abandonSwitch(_ candidate: WHEPPlayer, target: Rung, refused: Bool) {
         guard standby === candidate else { return }
         standby = nil
         switchTask = nil
@@ -464,11 +512,32 @@ final class LiveController: ObservableObject {
         // recovers. A failed DEMOTE is not evidence about climbing, so it is
         // charged nothing beyond the rate limit above.
         guard target == .high else { return }
+        highRungUnavailable = true
+        // A TIMEOUT is not a refusal, but it is not free either.
+        //
+        // Main's first keyframe can legitimately arrive late (see
+        // climbCandidateWindow), and treating "slow" as "broken" is what made
+        // one unlucky climb permanent: promoteWindow jumped to 20 s,
+        // `hasDemoted` armed the 25 s rate limiter, and every later attempt was
+        // throttled on a link that was never the problem.
+        //
+        // Charging a timeout NOTHING is the opposite mistake, and it is the one
+        // the back-off was originally written to prevent: a main that never
+        // comes up but never reports `.failed` either would be re-dialled every
+        // few seconds for as long as the view stayed open — a new WHEP session
+        // and a new RTSP pull off the camera each time, all invisible.
+        //
+        // So a climb gets `freeClimbTimeouts` cheap retries — enough for a slow
+        // keyframe to land on the second or third go — and after that a timeout
+        // is charged exactly like a refusal.
+        if !refused {
+            climbTimeouts += 1
+            guard climbTimeouts > Self.freeClimbTimeouts else { return }
+        }
         promoteWindow = hasDemoted
             ? min(promoteWindow * 2, Self.promoteWindowMax)
             : Self.cautiousPromoteWindow
         hasDemoted = true
-        highRungUnavailable = true
     }
 
     private func cancelSwitch() {

@@ -123,6 +123,48 @@ its G.711 audio is filtered out by the fMP4 codec filter → **video-only** —
 exactly right for muted grid tiles, and it rides the single shared RTSP
 session Vigilume already opens per substream.
 
+#### 2.1.2 The WebRTC rung ladder, and why a climb needs longer than a drop
+
+On the WHEP path `LiveController` runs its own two-rung ladder — `{camera}_sub`
+(low) and `{camera}` (high) — independent of the HLS fallback above. Fullscreen
+**always opens low** so a frame appears fast, then climbs once the link proves
+clean for `promoteWindow` (4 s initially). Switches are make-before-break: a
+second, off-screen WHEP session is built and only swapped in once it has
+decoded a real frame, so a failed switch never costs the stream already
+playing.
+
+**The two candidate windows are deliberately asymmetric.** A demote gets 6 s,
+which is generous — `amcrest.provision_substream_gop` pins the substream's
+keyframe interval at ~1 s, so a sub that has not painted by then is not coming.
+A climb gets **14 s**, because main's GOP is deliberately *not* shortened:
+shortening it would inflate everything the 24/7 recorder stores. go2rtc caches
+no GOP for a newly attached consumer, so a climb cannot paint until main's next
+keyframe — the camera's own interval (commonly 2×FPS, often longer) plus WHEP
+negotiation plus the RTSP pull.
+
+`provision_substream_gop` reasoned that main's keyframe wait "is never seen"
+because something is already on screen. That was true when the climb had no
+deadline and is false now: the wait is exactly what decides whether HD ever
+arrives. A 6 s window lost that race on healthy LANs, and since every failure
+widened `promoteWindow`, the view then settled on the substream permanently —
+with bandwidth never involved.
+
+**A timeout is not a refusal.** `.failed` means the rung is genuinely broken (an
+HEVC main, which no WebRTC decoder on iOS can carry; or a camera out of RTSP
+session slots) and arms the back-off immediately. Running out of window is much
+weaker evidence, so it is forgiven `freeClimbTimeouts` (2) times before being
+charged the same. Charging a timeout nothing at all is the opposite mistake and
+the one the back-off was written to prevent: a main that never comes up and
+never reports `.failed` would be re-dialled every few seconds for as long as
+the view stayed open.
+
+When a climb does prove hopeless the badge appears, and its **HD** button
+re-dials main directly, falling through to HLS if WebRTC still cannot carry it
+— which is what rescues an HEVC main, since AVPlayer decodes it and a WebRTC
+decoder cannot. That fall-through is deliberately manual: HLS latency is far
+worse than WebRTC's, and a live security view should not silently trade
+seconds of delay for sharpness.
+
 ### 2.2 Proxy-path correctness (relative URIs — verified)
 
 The master playlist references the media playlist and segments with
