@@ -17,6 +17,12 @@ So `require_admin` gates the whole router, and the imagery uses
 so media-scope alone would let any authenticated token walk the entire
 biometric store one integer at a time.
 
+The imagery is therefore on a SECOND router (`media_router`) with no
+router-level dependency — a router-level gate runs before the route's own, and
+`require_admin` takes a token only from a header, so it made
+`require_media_admin` unreachable and 401'd every header-less fetch. That is
+invisible on the web and total on iOS. See the note above `media_router`.
+
 ENROLLMENT IS APPEND-ONLY AND REVERSIBLE
 ----------------------------------------
 There is no training step. Enrolling copies a candidate's embedding into
@@ -64,6 +70,27 @@ router = APIRouter(
     tags=["recognition"],
     dependencies=[Depends(require_admin)],
 )
+
+#: THE IMAGERY LIVES ON ITS OWN ROUTER, AND IT HAS TO.
+#:
+#: `require_admin` above accepts a token ONLY from an `Authorization: Bearer`
+#: header. A router-level dependency runs on every route beneath it, BEFORE the
+#: route's own — so putting the image endpoints on `router` meant their
+#: `require_media_admin` (which exists precisely so an `<img>`/AsyncImage can
+#: pass `?token=` with no headers) could never be reached. Every header-less
+#: fetch 401'd at the router gate.
+#:
+#: That is invisible on the web, where AuthImage fetches the bytes itself and
+#: CAN set a header. It is total on iOS, where AsyncImage cannot: every
+#: unknown-face crop came back 401 and the grid showed a column of broken
+#: thumbnails, with no way to judge a face before enrolling it.
+#:
+#: This router carries NO router-level dependency, so each image route's own
+#: `require_media_admin` is the gate — still admin-only, still refusing
+#: media-scope tokens (the kind that ship out in notifications and retained
+#: MQTT), just reachable without a header. Do NOT add a `dependencies=` here;
+#: it would silently re-break the iOS grid. `image_auth_smoke.py` asserts it.
+media_router = APIRouter(prefix="/api/recognition", tags=["recognition"])
 
 #: The two kinds of identity a profile can carry. Deliberately closed: a third
 #: kind is a schema change plus a matcher, not a new string.
@@ -690,7 +717,7 @@ async def delete_sample(sample_id: int, request: Request) -> Response:
     return Response(status_code=204)
 
 
-@router.get("/samples/{sample_id}/image.jpg", dependencies=[Depends(require_media_admin)])
+@media_router.get("/samples/{sample_id}/image.jpg", dependencies=[Depends(require_media_admin)])
 async def sample_image(sample_id: int, request: Request) -> FileResponse:
     db = request.app.state.db
     row = await (
@@ -777,7 +804,7 @@ async def clear_candidates(
     return Response(status_code=204)
 
 
-@router.get("/candidates/{candidate_id}/image.jpg", dependencies=[Depends(require_media_admin)])
+@media_router.get("/candidates/{candidate_id}/image.jpg", dependencies=[Depends(require_media_admin)])
 async def candidate_image(candidate_id: int, request: Request) -> FileResponse:
     db = request.app.state.db
     row = await (
@@ -793,7 +820,7 @@ async def candidate_image(candidate_id: int, request: Request) -> FileResponse:
     return FileResponse(path, media_type="image/jpeg")
 
 
-@router.get("/candidates/{candidate_id}/frame.jpg", dependencies=[Depends(require_media_admin)])
+@media_router.get("/candidates/{candidate_id}/frame.jpg", dependencies=[Depends(require_media_admin)])
 async def candidate_frame(candidate_id: int, request: Request):
     """The WHOLE SCENE this candidate was cut from.
 

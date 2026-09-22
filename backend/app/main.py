@@ -681,6 +681,10 @@ app.include_router(settings_router.router)
 app.include_router(privacy_router.router)
 app.include_router(detection_router.router)
 app.include_router(profiles_router.router)
+# Recognition IMAGERY, on its own router with no router-level gate so its
+# per-route require_media_admin can accept `?token=` from a header-less
+# <img>/AsyncImage. See the long note in routers/profiles.py.
+app.include_router(profiles_router.media_router)
 app.include_router(integrations_router.router)
 # Unauthenticated by necessity: a cloud provider redirects a bare browser
 # here to finish an OAuth sign-in, carrying no Authorization header. The
