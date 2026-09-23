@@ -3624,3 +3624,94 @@ label > select {
 .recog-suggested-actions .btn {
   align-self: flex-start;
 }
+
+/* --- Settings search ---------------------------------------------------- */
+
+.settings-search {
+  position: relative;
+  margin-left: auto;
+  min-width: min(360px, 100%);
+}
+
+.settings-search input {
+  width: 100%;
+}
+
+.settings-search-results {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  border-radius: 10px;
+  background: var(--surface, #111827);
+  border: 1px solid var(--border, rgba(148, 163, 184, 0.25));
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.settings-search-hit {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  padding: 7px 9px;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+}
+
+.settings-search-hit.is-active {
+  background: var(--surface-alt, rgba(148, 163, 184, 0.14));
+}
+
+.settings-search-label {
+  font-size: 0.85rem;
+  color: var(--text-primary, #e2e8f0);
+}
+
+.settings-search-where {
+  font-size: 0.7rem;
+  color: var(--text-secondary, #94a3b8);
+}
+
+.settings-search-empty {
+  padding: 8px 10px;
+  font-size: 0.8rem;
+  color: var(--text-secondary, #94a3b8);
+}
+
+/* The card a search result landed on. Brief, and a ring rather than a fill:
+   the eye needs to find the card, not lose the controls inside it. */
+.card-found {
+  animation: card-found-flash 1.6s ease-out;
+}
+
+@keyframes card-found-flash {
+  0%, 60% {
+    box-shadow: 0 0 0 2px var(--accent, #38bdf8);
+  }
+  100% {
+    box-shadow: 0 0 0 2px transparent;
+  }
+}
+
+/* The page head now carries the search box beside the title. */
+.page-head {
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+@media (max-width: 640px) {
+  .settings-search {
+    margin-left: 0;
+    width: 100%;
+  }
+}

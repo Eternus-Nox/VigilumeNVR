@@ -6,9 +6,10 @@
   "scripts": {
     "dev": "vite",
     "prebuild": "node scripts/gen-icons.mjs",
-    "build": "tsc --noEmit && vite build",
+    "build": "node scripts/check-settings-index.mjs && tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "check:settings": "node scripts/check-settings-index.mjs"
   },
   "dependencies": {
     "hls.js": "^1.5.20",

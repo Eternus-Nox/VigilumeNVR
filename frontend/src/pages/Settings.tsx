@@ -19,6 +19,8 @@ import GroupsTab from './settings/GroupsTab';
 import IntegrationsTab from './settings/IntegrationsTab';
 import NotificationsTab from './settings/NotificationsTab';
 import RecognitionTab from './settings/RecognitionTab';
+import SettingsSearch from '../components/SettingsSearch';
+import DetectionTab from './settings/DetectionTab';
 import RecordingTab from './settings/RecordingTab';
 import SystemTab from './settings/SystemTab';
 import UsersTab from './settings/UsersTab';
@@ -31,6 +33,7 @@ const ADMIN_TABS = [
   { id: 'cameras', label: 'Cameras' },
   { id: 'groups', label: 'Groups' },
   { id: 'integrations', label: 'Integrations' },
+  { id: 'detection', label: 'Detection' },
   { id: 'recording', label: 'Recording' },
   { id: 'faces', label: 'Faces & plates' },
   { id: 'excluded', label: 'Excluded objects' },
@@ -51,6 +54,7 @@ type TabId =
   | 'groups'
   | 'notifications'
   | 'recording'
+  | 'detection'
   | 'integrations'
   | 'system'
   | 'excluded'
@@ -205,6 +209,7 @@ export default function Settings() {
     if (!settings) return <div className="page-loading">Loading settings…</div>;
     const shared = { settings, onDraftChange, pending, saving };
     if (activeTab === 'recording') return <RecordingTab {...shared} />;
+    if (activeTab === 'detection') return <DetectionTab {...shared} />;
     // Each renders its own .settings-section, so they stay visually distinct
     // cards (see the `.settings-section + .settings-section` rule) rather than
     // reading as one merged notifications+MQTT box.
@@ -220,12 +225,20 @@ export default function Settings() {
 
   /** True on the tabs whose edits the single Save button owns. */
   const isSettingsTab =
-    isAdmin && ['notifications', 'recording', 'integrations', 'system'].includes(activeTab);
+    isAdmin &&
+    ['notifications', 'recording', 'detection', 'integrations', 'system'].includes(activeTab);
 
   return (
     <div className="page">
       <div className="page-head">
         <h1>Settings</h1>
+        {/* Search rather than more tabs. Nine tabs and ~50 cards is already
+            past what anyone scans, and the word people reach for is usually
+            the symptom ("parked car") rather than the heading. */}
+        <SettingsSearch
+          isAdmin={isAdmin}
+          onGo={(next) => navigate(`/settings/${next}`)}
+        />
       </div>
 
       <div className="tabs" role="tablist" aria-label="Settings sections">
