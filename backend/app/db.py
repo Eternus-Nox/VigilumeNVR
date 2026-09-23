@@ -28,7 +28,7 @@ def _tri_state(value: Any) -> Optional[bool]:
     """
     return None if value is None else bool(value)
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 
 
 def column_or(row: Any, name: str, default: Any) -> Any:
@@ -81,6 +81,21 @@ CREATE TABLE IF NOT EXISTS profiles (
     threshold   REAL,
     created_at  REAL NOT NULL,
     updated_at  REAL NOT NULL,
+    -- What a sighting of THIS profile should do to notifications, on top of
+    -- the global rules.
+    --
+    --   'default' — follow settings.notifications / recognition.notify_mode
+    --   'mute'    — never alert for this profile. The household case: you do
+    --               not want a push every time you walk to your own door.
+    --   'alert'   — always alert, even where the global rules would suppress.
+    --               The watchlist case, and the reason this is not just a
+    --               boolean: "mute everyone I know" and "tell me the moment
+    --               THIS person shows up" are opposite intents and an operator
+    --               needs both at once.
+    --
+    -- Text rather than an integer so a fourth mode does not need a migration
+    -- to be readable, and so a row is self-describing in a sqlite shell.
+    alert_mode  TEXT NOT NULL DEFAULT 'default',
     UNIQUE(kind, name)
 );
 
@@ -876,6 +891,29 @@ class Database:
                     if "ignore_stationary" not in existing:
                         await self.conn.execute(
                             "ALTER TABLE cameras ADD COLUMN ignore_stationary INTEGER"
+                        )
+            if version < 27:
+                # v27: profiles.alert_mode — per-profile notification policy.
+                #
+                # 'default' for every existing row, so this migration changes
+                # no behaviour: an upgraded box alerts exactly as it did
+                # yesterday and the operator opts individual people in or out.
+                # RECOGNITION_SCHEMA above creates the column on a fresh box;
+                # its CREATE IF NOT EXISTS is a no-op on an upgraded one, so
+                # the ALTER here is what actually adds it there.
+                cur = await self.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='profiles'"
+                )
+                if await cur.fetchone() is not None:
+                    existing = [
+                        r[1] for r in await (
+                            await self.conn.execute("PRAGMA table_info(profiles)")
+                        ).fetchall()
+                    ]
+                    if "alert_mode" not in existing:
+                        await self.conn.execute(
+                            "ALTER TABLE profiles ADD COLUMN alert_mode "
+                            "TEXT NOT NULL DEFAULT 'default'"
                         )
         if version < SCHEMA_VERSION:
             await self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

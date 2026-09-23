@@ -397,6 +397,7 @@ class FacePass:
                 name=st.match.name,
                 profile_id=st.match.profile_id,
                 score=st.match.score,
+                alert_mode=st.match.alert_mode,
             )
         except Exception:
             log.exception("could not announce a face recognition")

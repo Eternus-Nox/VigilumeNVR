@@ -108,10 +108,15 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
   // ---- Faces & plates --------------------------------------------------
   {
     tab: 'faces', card: 'Faces & plates', admin: true,
-    label: 'Enrolled people and vehicles, and unknown faces',
+    label: 'Enrolled people and vehicles, and who to be alerted about',
     terms: ['face', 'person', 'people', 'name', 'enroll', 'recognise',
             'recognize', 'who', 'unknown face', 'identify', 'plate', 'licence',
-            'license', 'number plate', 'vehicle', 'anpr', 'lpr'],
+            'license', 'number plate', 'vehicle', 'anpr', 'lpr',
+            // The per-profile alert policy lives inside a profile, so these
+            // are the words that lead to it.
+            'mute', 'silence', 'stop notifying me about me', 'watchlist',
+            'always alert', 'my own door', 'household', 'family',
+            'notify for one person'],
   },
   {
     tab: 'faces', card: 'Which cameras', admin: true,

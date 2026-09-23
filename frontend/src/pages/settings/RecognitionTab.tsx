@@ -19,8 +19,11 @@
  * This tab does NOT report a draft to the settings shell. Everything here is an
  * immediate API call against /api/recognition, not a slice of the settings
  * document, so it must never call onDraftChange — doing so would light the
- * shell's Save bar for edits that were already saved. The enable/alert-mode
- * controls, which ARE settings, live on the Recording tab.
+ * shell's Save bar for edits that were already saved. The GLOBAL recognition
+ * tuning, which IS part of the settings document, lives on the Detection tab;
+ * the per-profile alert policy is here because it belongs to a profile rather
+ * than to the settings document, and saves immediately like everything else on
+ * this page.
  */
 import { useCallback, useEffect, useState } from 'react';
 import {
@@ -29,6 +32,7 @@ import {
   type CandidateKind,
   type ProfileKind,
   type RecognitionCandidate,
+  type AlertMode,
   type RecognitionProfile,
   type RecognitionProfileDetail,
   type RecognitionStatus,
@@ -338,6 +342,23 @@ export default function RecognitionTab() {
       await reload();
     } catch (e) {
       fail(e, 'Could not remove that sighting');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Set one profile's notification policy. Immediate, like every other edit
+   * on this tab — this is not part of the settings draft.
+   */
+  const setAlertMode = async (p: RecognitionProfile, mode: AlertMode) => {
+    setBusy(true);
+    try {
+      await api.updateRecognitionProfile(p.id, { alert_mode: mode });
+      await reload();
+      if (openProfile?.id === p.id) await refreshOpen(p.id);
+    } catch (e) {
+      fail(e, 'Could not change how this profile alerts');
     } finally {
       setBusy(false);
     }
@@ -767,6 +788,7 @@ export default function RecognitionTab() {
                     busy={busy}
                     onAddPlate={(plate) => void setPlate(p.id, plate)}
                     onDeleteSample={(id) => setConfirm({ kind: 'sample', id })}
+                    onAlertMode={(mode) => void setAlertMode(p, mode)}
                   />
                 )}
               </li>
@@ -919,17 +941,42 @@ function ProfileDetail({
   busy,
   onAddPlate,
   onDeleteSample,
+  onAlertMode,
 }: {
   profile: RecognitionProfileDetail;
   busy: boolean;
   onAddPlate: (plate: string) => void;
   onDeleteSample: (id: number) => void;
+  onAlertMode: (mode: AlertMode) => void;
 }) {
   const [plate, setPlate] = useState('');
   const isVehicle = profile.kind === 'vehicle';
+  const who = isVehicle ? 'this vehicle' : profile.name || 'this person';
 
   return (
     <div className="recog-profile-detail">
+      <div className="form-stack">
+        <label>
+          When {who} is recognised
+          <select
+            value={profile.alert_mode ?? 'default'}
+            disabled={busy}
+            onChange={(e) => onAlertMode(e.target.value as AlertMode)}
+          >
+            <option value="default">Follow the normal notification rules</option>
+            <option value="mute">Never notify me — this one is expected</option>
+            <option value="alert">Always notify me, even if muted elsewhere</option>
+          </select>
+          <span className="control-hint">
+            <strong>Never notify</strong> is for the people who live here: no push every
+            time you walk to your own door. <strong>Always notify</strong> overrides the
+            global rules for one person, so you can mute the household and still be told
+            the moment someone specific turns up. A muted person walking in beside
+            someone you haven't enrolled <em>still</em> alerts — a mute only ever silences
+            that person on their own.
+          </span>
+        </label>
+      </div>
       {isVehicle && (
         <div className="form-stack">
           <label>

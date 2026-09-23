@@ -58,9 +58,9 @@ from ..native.bestshot import decode_frame_box
 from ..native.timing import TIMINGS
 from ..native.heatmap import COLS, ROWS, suggest_zone
 from ..native.recognition import (
-    FACE_THRESHOLD, MIN_MARGIN, SUGGEST_FACE_COSINE, SUGGEST_LIMIT,
-    PLATE_MAX_DISTANCE, cosine, from_blob, normalize, normalize_plate,
-    plate_distance,
+    ALERT_MODES, FACE_THRESHOLD, MIN_MARGIN, SUGGEST_FACE_COSINE, SUGGEST_LIMIT,
+    PLATE_MAX_DISTANCE, cosine, from_blob, normalize, normalize_alert_mode,
+    normalize_plate, plate_distance,
 )
 
 log = logging.getLogger(__name__)
@@ -111,6 +111,19 @@ class ProfileCreate(BaseModel):
     notes: str = Field(default="", max_length=MAX_NOTES)
     enabled: bool = True
     threshold: Optional[float] = None
+    alert_mode: str = "default"
+
+    @field_validator("alert_mode")
+    @classmethod
+    def _alert_mode(cls, v: str) -> str:
+        # REJECTED, not normalized away. A client sending "muted" instead of
+        # "mute" means to silence someone; quietly storing "default" would
+        # leave them believing it worked and hearing about that person for
+        # months. The reader normalizes (a stored value must never raise on the
+        # alert path); the writer refuses.
+        if v not in ALERT_MODES:
+            raise ValueError(f"alert_mode must be one of {ALERT_MODES}")
+        return v
 
     @field_validator("kind")
     @classmethod
@@ -143,6 +156,9 @@ class ProfileUpdate(BaseModel):
     notes: Optional[str] = Field(default=None, max_length=MAX_NOTES)
     enabled: Optional[bool] = None
     threshold: Optional[float] = None
+    alert_mode: Optional[str] = None
+
+    _alert_mode = field_validator("alert_mode")(ProfileCreate._alert_mode.__func__)  # type: ignore[attr-defined]
 
     _name = field_validator("name")(ProfileCreate._name.__func__)  # type: ignore[attr-defined]
     _threshold = field_validator("threshold")(ProfileCreate._threshold.__func__)  # type: ignore[attr-defined]
@@ -187,6 +203,10 @@ def _profile_out(row: Any, sample_count: int, usable_count: int) -> dict[str, An
         "notes": row["notes"],
         "enabled": bool(row["enabled"]),
         "threshold": row["threshold"],
+        # Normalized on the way OUT as well as in: a row written by a newer
+        # build, or edited by hand, must read as a policy this build actually
+        # implements rather than be echoed back as one it does not.
+        "alert_mode": normalize_alert_mode(column_or(row, "alert_mode", "default")),
         "sample_count": sample_count,
         # Samples embedded by the CURRENTLY ACTIVE model. When this is 0 but
         # sample_count is not, every sample was embedded by a different model
@@ -332,8 +352,9 @@ async def create_profile(body: ProfileCreate, request: Request) -> dict[str, Any
     try:
         cur = await db.conn.execute(
             "INSERT INTO profiles (kind, name, notes, enabled, threshold, "
-            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (body.kind, body.name, body.notes, int(body.enabled), body.threshold, now, now),
+            "alert_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (body.kind, body.name, body.notes, int(body.enabled), body.threshold,
+             body.alert_mode, now, now),
         )
         await db.conn.commit()
     except Exception as exc:  # aiosqlite surfaces the UNIQUE(kind, name) here

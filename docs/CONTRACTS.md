@@ -966,7 +966,7 @@ camera somebody deliberately pinned.
 WebSocket:
 - `WS /api/ws?token=` — server pushes `{type:"event_new"|"event_update"|"event_end"|"doorbell", event:{...}}`, `{type:"camera_status", ...}`, and `{type:"model_status", key, tier, state, progress_pct, active, loaded}` for live UI updates.
 
-### Recognition — faces & plates (`/api/recognition`, schema v25)
+### Recognition — faces & plates (`/api/recognition`, schema v27)
 
 **ADMIN-ONLY, INCLUDING THE READS.** This is the one router that departs from
 "a viewer may read, an admin may write", and the reason is content rather than
@@ -986,7 +986,7 @@ scored.
 
 - `GET /api/recognition/status` → `{model_key, ready, profiles:{kind:n}, candidates:{kind:n}, stale_samples, defaults:{face_threshold, min_margin}}`. `stale_samples` > 0 means some profiles have silently stopped matching after a model change and need re-enrolling.
 - `GET /api/recognition/profiles[?kind=person|vehicle]` → profiles with `sample_count` and `usable_sample_count` (samples the ACTIVE model can still compare).
-- `POST /api/recognition/profiles` `{kind, name, notes?, enabled?, threshold?}` → 201. Duplicate `(kind, name)` → 409. `threshold` outside 0..1 → 422 (refused, not clamped).
+- `POST /api/recognition/profiles` `{kind, name, notes?, enabled?, threshold?, alert_mode?}` → 201. Duplicate `(kind, name)` → 409. `threshold` outside 0..1 → 422 (refused, not clamped).
 - `GET /api/recognition/profiles/{id}` → profile + its `samples[]`.
 - `PUT /api/recognition/profiles/{id}` — partial. An **omitted** `threshold` means "leave it alone"; an explicit **null** clears the per-profile override back to the server default. An empty patch → 400.
 - `DELETE /api/recognition/profiles/{id}` → 204, and deletes its samples AND their reference images from disk.
@@ -994,6 +994,36 @@ scored.
 - `POST /api/recognition/profiles/{id}/enroll` `{candidate_ids:[...]}` → `{enrolled, sample_ids}`. **Atomic** across the batch, kind-checked (a face candidate into a vehicle profile → 400), and it **MOVES** each crop from the rolling candidate directory into the durable profile directory — copying would leave enrolled references in the directory the retention purge walks.
 - `GET /api/recognition/profiles/{id}/similar[?limit=]` → `{profile_id, threshold, candidates[]}` — unmatched crops that look like this profile, each with a `similarity`, best first. **A read: it applies nothing.** `POST .../enroll` also returns `similar[]` + `similar_threshold`, so the offer lands at the moment the operator is thinking about that person.
 - `DELETE /api/recognition/samples/{id}` → 204 (+ unlinks its image).
+
+**Per-profile alert policy** (`profiles.alert_mode`, schema v27). One of
+`default` | `mute` | `alert`; settable on create and on `PUT`. The global
+`recognition.notify_mode` is all-or-nothing, and the thing operators actually
+want is two opposite instructions at once: *stop telling me when it is me* AND
+*tell me the moment this person turns up*.
+
+`events_pipeline._recognition_gate` applies it **before** the global mode,
+because the per-profile setting is the specific instruction and the global one
+is the general one. The ordering is arranged so ambiguity always resolves
+towards alerting:
+
+| situation | outcome |
+|---|---|
+| any recognized profile is `alert` | **send**, named after that profile — beats `unknown_only` and beats everybody else's mute |
+| every recognized profile is `mute` **and** nothing unmatched is in frame | suppress permanently (`notified = True`) |
+| a `mute` profile beside a stranger, or beside a non-muted profile | **send** |
+| all `default` | the global `notify_mode` decides, as before |
+
+`mute` is the only outcome that suppresses. An unmatched sighting always
+carries `alert_mode: "default"`, which is what stops an unknown inheriting an
+enrolled profile's mute.
+
+The policy rides the `Match` out of the gallery rather than being looked up per
+alert — `Gallery.build` reads it off the profile row, so the notification path
+never touches the database. **Reads normalize, writes reject**: a stored value
+that is not a known mode reads as `default` (`normalize_alert_mode`), because
+an unknown policy must never silently mute somebody; but `POST`/`PUT` return
+422 on one, because a client sending `"muted"` means to silence a person and
+storing `default` would leave them believing it worked.
 - `GET /api/recognition/candidates[?kind=&camera=&limit=]` → unmatched crops **best-quality first**, because this list exists to be enrolled from and the shot worth enrolling is the legible one, not the most recent. Each row also carries `event_id`, `frame_url` and `frame_box` (see below); event ids are resolved for the whole page in ONE query, not one per row.
 - `DELETE /api/recognition/candidates/{id}` and `DELETE /api/recognition/candidates[?kind=]` → 204.
 - `GET /api/recognition/{samples,candidates}/{id}/image.jpg` — media-scope **admin** token.

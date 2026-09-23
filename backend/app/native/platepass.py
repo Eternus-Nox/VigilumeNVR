@@ -305,6 +305,7 @@ class PlatePass:
                 profile_id=st.match.profile_id if (st.match and st.match.matched) else None,
                 plate=st.vote.text,
                 score=st.match.score if st.match else 0.0,
+                alert_mode=st.match.alert_mode if st.match else "default",
             )
         except Exception:
             log.exception("could not announce a plate recognition")

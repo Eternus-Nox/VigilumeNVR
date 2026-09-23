@@ -22,6 +22,7 @@ from . import annotate
 from .auth import AuthService
 from .db import Database
 from .native.media import MediaProvider
+from .native.recognition import normalize_alert_mode
 from .notify.ntfy import NTFY_ICON_DEFAULT, NTFY_ICON_DOORBELL, ntfy_icon
 from .notify.push import PushService
 from .settings_store import SettingsStore
@@ -551,6 +552,7 @@ class EventsPipeline:
         profile_id: Optional[int] = None,
         plate: str = "",
         score: float = 0.0,
+        alert_mode: str = "default",
     ) -> None:
         """A recognition pass identified something on a LIVE event.
 
@@ -570,6 +572,11 @@ class EventsPipeline:
             "profile_id": profile_id,
             "plate": plate,
             "score": float(score),
+            # The matched profile's own notification policy, carried here so
+            # the gate below never has to hit the database on the alert path.
+            # Defaults on anything unmatched, which is what stops an unknown
+            # from inheriting somebody else's mute.
+            "alert_mode": normalize_alert_mode(alert_mode),
         })
         if state.get("snap_time") is not None and not state.get("enriching"):
             # The snapshot was written before this recognition arrived, so it
@@ -635,6 +642,41 @@ class EventsPipeline:
         recognitions = state.get("recognitions") or []
         known = [r for r in recognitions if r.get("profile_id") is not None]
         if known:
+            # PER-PROFILE POLICY FIRST, because it is the specific instruction
+            # and the global mode is the general one. Someone who muted their
+            # own household and watchlisted one person has said something the
+            # single global switch cannot express, and either global setting
+            # would otherwise overrule them.
+            modes = [normalize_alert_mode(r.get("alert_mode")) for r in known]
+
+            # ALERT WINS OVER EVERYTHING, including a mute on somebody else in
+            # the same frame. Two people at the door, one watchlisted and one
+            # muted, is exactly when you want to be told.
+            if "alert" in modes:
+                named = next(
+                    (r for r, m in zip(known, modes) if m == "alert"), known[0]
+                )
+                log.info(
+                    "alert FORCED on %s — %s is watchlisted",
+                    after.get("camera"), named.get("name") or "a known subject",
+                )
+                return True, named.get("name") or ""
+
+            # Muted only when EVERY recognized subject is muted. A muted
+            # resident walking in beside a stranger must not silence the
+            # stranger — and the stranger is an unmatched recognition, which is
+            # not in `known` at all, so this also has to hold when `known` is a
+            # strict subset of what was seen.
+            unmatched = [r for r in recognitions if r.get("profile_id") is None]
+            if modes and all(m == "mute" for m in modes) and not unmatched:
+                state["notified"] = True
+                log.info(
+                    "alert suppressed on %s — %s is muted",
+                    after.get("camera"),
+                    ", ".join(r.get("name") or "?" for r in known),
+                )
+                return False, ""
+
             if str(rs.get("notify_mode") or "all") == "unknown_only":
                 # Suppress PERMANENTLY, not defer: this subject is enrolled and
                 # the operator asked not to hear about enrolled subjects. Marking

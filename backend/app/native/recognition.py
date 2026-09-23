@@ -298,6 +298,24 @@ class Sample:
     plate: str = ""
 
 
+#: What a sighting of one profile does to notifications. Closed on purpose:
+#: an unknown string must read as "default" rather than as a fourth policy
+#: nobody implemented, so `normalize_alert_mode` funnels everything through it.
+ALERT_MODES = ("default", "mute", "alert")
+
+
+def normalize_alert_mode(value: Any) -> str:
+    """A stored alert_mode as one of ALERT_MODES.
+
+    Anything unrecognised — None, a typo, a value written by a newer build and
+    read back by an older one — becomes "default". That is the only safe
+    fallback in both directions: an unknown mode must never silently MUTE a
+    profile (a missed alert) and must never silently escalate one either.
+    """
+    text = str(value or "").strip().lower()
+    return text if text in ALERT_MODES else "default"
+
+
 @dataclass
 class Profile:
     profile_id: int
@@ -305,6 +323,10 @@ class Profile:
     name: str
     enabled: bool = True
     threshold: Optional[float] = None
+    #: See ALERT_MODES. Carried on the profile so it can ride the Match out to
+    #: the events pipeline, rather than costing a database lookup on the
+    #: notification path for every sighting.
+    alert_mode: str = "default"
     samples: list[Sample] = field(default_factory=list)
 
 
@@ -321,6 +343,10 @@ class Match:
     #: Why an unknown is unknown — "below threshold" vs "too close to call"
     #: are different problems with different fixes.
     reason: str
+    #: The matched profile's notification policy (ALERT_MODES). Always
+    #: "default" on an unknown, which is what makes the gate's job simple:
+    #: an unmatched sighting can never be muted by somebody else's setting.
+    alert_mode: str = "default"
 
     @property
     def matched(self) -> bool:
@@ -375,6 +401,7 @@ class Gallery:
                 name=str(r["name"]),
                 enabled=bool(r.get("enabled", 1)),
                 threshold=r.get("threshold"),
+                alert_mode=normalize_alert_mode(r.get("alert_mode")),
             )
 
         skipped = 0
@@ -445,7 +472,7 @@ class Gallery:
                 None, "", top_score, margin,
                 f"too close to call ({top.name} vs {scored[1][1].name})",
             )
-        return Match(top.profile_id, top.name, top_score, margin, "matched")
+        return Match(top.profile_id, top.name, top_score, margin, "matched", top.alert_mode)
 
     def match_plate(self, text: str) -> Match:
         """Nearest enrolled vehicle by folded edit distance."""
@@ -472,7 +499,7 @@ class Gallery:
         score = max(0.0, 1.0 - distance / max(len(plate), 1))
         if distance > PLATE_MAX_DISTANCE:
             return Match(None, "", score, 0.0, f"nearest is {distance} edits away")
-        return Match(prof.profile_id, prof.name, score, 0.0, "matched")
+        return Match(prof.profile_id, prof.name, score, 0.0, "matched", prof.alert_mode)
 
     # -- introspection --------------------------------------------------
 

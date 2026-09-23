@@ -593,6 +593,8 @@ export type CandidateKind = 'face' | 'plate';
  * deletes one, and the model on disk never changes. Accuracy scales with sample
  * DIVERSITY (angles, light, time of day) rather than with count.
  */
+export type AlertMode = 'default' | 'mute' | 'alert';
+
 export interface RecognitionProfile {
   id: number;
   kind: ProfileKind;
@@ -601,6 +603,17 @@ export interface RecognitionProfile {
   enabled: boolean;
   /** Per-profile match threshold; null inherits the server default for the kind. */
   threshold: number | null;
+  /**
+   * What a sighting of THIS profile does to notifications.
+   *
+   *   'default' — follow the global notification rules
+   *   'mute'    — never alert for this profile (you, at your own door)
+   *   'alert'   — always alert, even where the global rules would suppress
+   *
+   * Not a boolean on purpose: "mute everyone I know" and "tell me the moment
+   * THIS person shows up" are opposite intents and both are wanted at once.
+   */
+  alert_mode: AlertMode;
   sample_count: number;
   /**
    * Samples the ACTIVE embedding model can still compare. When this is 0 while
@@ -2017,6 +2030,7 @@ export const api = {
     name: string;
     notes?: string;
     enabled?: boolean;
+    alert_mode?: AlertMode;
   }) =>
     request<RecognitionProfile>('/api/recognition/profiles', {
       method: 'POST',
@@ -2030,7 +2044,13 @@ export const api = {
    */
   updateRecognitionProfile: (
     id: number,
-    body: { name?: string; notes?: string; enabled?: boolean; threshold?: number | null },
+    body: {
+      name?: string;
+      notes?: string;
+      enabled?: boolean;
+      threshold?: number | null;
+      alert_mode?: AlertMode;
+    },
   ) =>
     request<RecognitionProfile>(`/api/recognition/profiles/${id}`, {
       method: 'PUT',
