@@ -76,15 +76,16 @@ struct SettingsHomeView: View {
                     adminSection(webURL: webURL)
                 }
                 if session.isAdmin {
+                    // Ordered to mirror the web's settings tabs: cameras, then
+                    // what the AI does with them, then storage, then who gets
+                    // told, then accounts. One mental model across both
+                    // clients — the same setting should not have a different
+                    // address depending on which screen you reached for.
+                    camerasSection
                     detectionSection
-                }
-                if session.isAdmin {
+                    recordingSection
                     alertsSection
-                }
-                if session.isAdmin {
                     usersSection
-                }
-                if session.isAdmin {
                     dangerZoneSection
                 }
                 signOutSection
@@ -599,8 +600,12 @@ struct SettingsHomeView: View {
 
     // MARK: Admin link-out
 
+    /// The one thing the phone deliberately does not do. Model downloads are
+    /// long, resumable and progress-heavy, and belong on a screen you are not
+    /// going to lock mid-transfer. Integrations used to share this heading;
+    /// it now sits with the alert channels, which is what it is.
     private func adminSection(webURL: URL) -> some View {
-        Section("Administration") {
+        Section("On the web") {
             Link(destination: webURL) {
                 HStack(alignment: .center) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -619,20 +624,22 @@ struct SettingsHomeView: View {
                         .foregroundStyle(Theme.textSecondary)
                 }
             }
-            NavigationLink {
-                IntegrationsView()
-            } label: {
-                Label("Integrations", systemImage: "house.fill")
-                    .foregroundStyle(Theme.textPrimary)
-            }
         }
         .listRowBackground(Theme.surface)
     }
 
     // MARK: Detection (admin-only)
 
-    private var detectionSection: some View {
-        Section("Cameras & Detection") {
+    /// CAMERAS — the physical devices and whether they are capturing at all.
+    ///
+    /// Split out of a single "Cameras & Detection" section that also held
+    /// Recording, System and the detector self-test. Seven unrelated rows
+    /// under one heading is a list you read end to end every time, and it
+    /// disagreed with the web, so the same setting had a different address on
+    /// each platform. These four sections mirror the web's tabs deliberately:
+    /// one mental model, two clients.
+    private var camerasSection: some View {
+        Section("Cameras") {
             NavigationLink {
                 CamerasAdminView()
             } label: {
@@ -645,6 +652,13 @@ struct SettingsHomeView: View {
                 Label("Privacy Mode", systemImage: "eye.slash.fill")
                     .foregroundStyle(Theme.textPrimary)
             }
+        }
+        .listRowBackground(Theme.surface)
+    }
+
+    /// DETECTION — what the AI looks for and what it ignores.
+    private var detectionSection: some View {
+        Section("Detection") {
             NavigationLink {
                 SuppressionsView()
             } label: {
@@ -662,6 +676,21 @@ struct SettingsHomeView: View {
                     .foregroundStyle(Theme.textPrimary)
             }
             NavigationLink {
+                DetectorStatusView()
+            } label: {
+                Label("Detector status", systemImage: "cpu.fill")
+                    .foregroundStyle(Theme.textPrimary)
+            }
+        }
+        .listRowBackground(Theme.surface)
+    }
+
+    /// RECORDING & SYSTEM — storage, retention and the server itself. Two rows
+    /// rather than two sections: both answer "how is the box set up", and a
+    /// section per row is its own kind of clutter.
+    private var recordingSection: some View {
+        Section("Recording & system") {
+            NavigationLink {
                 RecordingSettingsView()
             } label: {
                 Label("Recording", systemImage: "externaldrive.fill")
@@ -671,12 +700,6 @@ struct SettingsHomeView: View {
                 SystemSettingsView()
             } label: {
                 Label("System", systemImage: "gearshape.2.fill")
-                    .foregroundStyle(Theme.textPrimary)
-            }
-            NavigationLink {
-                DetectorStatusView()
-            } label: {
-                Label("Detector status", systemImage: "cpu.fill")
                     .foregroundStyle(Theme.textPrimary)
             }
         }
@@ -699,11 +722,21 @@ struct SettingsHomeView: View {
     /// reason died with `direct` mode: the block is now a toggle and a relay
     /// URL, with no secret in it.
     private var alertsSection: some View {
-        Section("Alerts") {
+        Section("Alerts & integrations") {
             NavigationLink {
                 PhonePushSettingsView()
             } label: {
                 Label("Phone push", systemImage: "bell.badge.fill")
+                    .foregroundStyle(Theme.textPrimary)
+            }
+            // Home Assistant sits WITH the alert channels rather than under a
+            // generic "Administration" heading: both are "how Vigilume tells
+            // something else that something happened", which is the same
+            // grouping the web's Integrations tab uses.
+            NavigationLink {
+                IntegrationsView()
+            } label: {
+                Label("Home Assistant", systemImage: "house.fill")
                     .foregroundStyle(Theme.textPrimary)
             }
         }

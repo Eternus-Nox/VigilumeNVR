@@ -123,6 +123,35 @@ its G.711 audio is filtered out by the fMP4 codec filter → **video-only** —
 exactly right for muted grid tiles, and it rides the single shared RTSP
 session Vigilume already opens per substream.
 
+#### 2.0 Settings layout — one mental model, two clients
+
+The admin rows used to sit under a single **Cameras & Detection** heading that
+also held Recording, System and the detector self-test: seven unrelated rows you
+read end to end every time. Worse, it disagreed with the web, so the same
+setting had a different address depending on which screen you reached for.
+
+The sections now mirror the web's settings tabs in the same order:
+
+| iOS section | web tab |
+|---|---|
+| Cameras | Cameras |
+| Detection | Detection |
+| Recording & system | Recording + System |
+| Alerts & integrations | Integrations |
+| Users / Danger zone | Users |
+
+Home Assistant moved out of a generic "Administration" heading and in with the
+alert channels, because both are "how Vigilume tells something else that
+something happened" — the same grouping the web's Integrations tab uses. What
+is left under **On the web** is the one thing the phone deliberately does not
+do: model downloads, which are long, resumable and progress-heavy and belong on
+a screen you are not going to lock mid-transfer.
+
+There is no settings SEARCH on iOS, unlike the web. The web has ~50 cards
+across nine tabs and needed one; iOS has about fifteen rows, where the grouping
+is the whole problem and a search field would be a second way to do what
+scrolling already does.
+
 #### 2.1.2 The WebRTC rung ladder, and why a climb needs longer than a drop
 
 On the WHEP path `LiveController` runs its own two-rung ladder — `{camera}_sub`
