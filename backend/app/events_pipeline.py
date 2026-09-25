@@ -543,6 +543,73 @@ class EventsPipeline:
     #: (a dog, a parcel) must never wait on a recognition that will not come.
     RECOGNIZABLE_LABELS = ("person", "car", "truck", "bus", "motorcycle", "van")
 
+    def note_dwell(self, fid: str, label: str, seconds: int) -> None:
+        """A subject has been at this camera long enough to be worth saying so.
+
+        A SECOND notification on an event that has usually already sent one —
+        which is the entire point, and why it does not go through
+        `_maybe_notify_object`. That path is gated on `state["notified"]` and
+        on the per-(camera,label) cooldown, both of which exist to stop one
+        subject producing a stream of alerts; a loitering alert is a different
+        statement about the same subject ("still there"), not a repeat of the
+        first one, so it deliberately bypasses both.
+
+        Once per event, enforced by the engine. Best-effort and never raises.
+        """
+        state = self._active.get(fid)
+        if state is None or state.get("dwell_notified"):
+            return
+        state["dwell_notified"] = True
+        self._spawn(self._send_dwell(fid, label, seconds))
+
+    async def _send_dwell(self, fid: str, label: str, seconds: int) -> None:
+        state = self._active.get(fid)
+        if state is None:
+            return
+        ns = self._settings.notifications
+        if not ns.get("enabled", True):
+            return
+        # The SAME label filter as ordinary alerts, deliberately reusing an
+        # existing control rather than adding a second list to keep in step. If
+        # you do not want to hear about cats, you do not want to hear that a cat
+        # is still there either.
+        if label not in (ns.get("labels") or []):
+            return
+
+        after = state.get("last_after") or {}
+        camera = after.get("camera") or state.get("camera") or ""
+        friendly = await self._friendly_name(camera) if camera else camera
+
+        # A muted profile must silence this too. Someone who muted themselves
+        # does not want "Adam is still at the front door" either — and without
+        # this, the loitering alert would be a way for a muted subject to
+        # generate notifications anyway.
+        send_now, recognized_name = self._recognition_gate(
+            {"label": label, "camera": camera}, dict(state)
+        )
+        if not send_now:
+            return
+
+        minutes = seconds // 60
+        how_long = f"{minutes} min" if minutes >= 1 else f"{seconds}s"
+        who = recognized_name or label.replace("_", " ").capitalize()
+        try:
+            await self._send_notification(
+                title=f"{who} still at {friendly}",
+                body=f"Still there after {how_long}",
+                event_id=state.get("event_id"),
+                # A DIFFERENT tag from the arrival alert, so a phone shows it
+                # as a new notification rather than silently replacing the one
+                # that said somebody arrived.
+                tag=f"vigilume-dwell-{camera}-{label}",
+                icon=ntfy_icon([label]),
+                with_image=state.get("snap_time") is not None,
+                camera=camera,
+                camera_label=friendly,
+            )
+        except Exception:
+            log.exception("dwell notification failed for %s", fid)
+
     def note_recognition(
         self,
         fid: str,

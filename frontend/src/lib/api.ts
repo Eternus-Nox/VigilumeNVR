@@ -343,6 +343,13 @@ export interface Camera {
    * camera", silently and permanently.
    */
   ignore_stationary?: boolean | null;
+  /**
+   * Per-camera loitering threshold in seconds. THREE meanings, all reachable:
+   * null/undefined follows the global setting, 0 means no loitering alerts on
+   * this camera, and a positive number pins it. Never coerce — `0 || global`
+   * would silently turn "off here" back into "follow the global".
+   */
+  dwell_seconds?: number | null;
   detect: { enabled: boolean };
   record: { enabled: boolean };
   /**
@@ -949,6 +956,8 @@ export interface AppSettings {
      * as one event or several, and the clip is only cut once the event ends.
      */
     absence_timeout_s: number;
+    /** Seconds before a "still there" alert. 0 = off (the default). */
+    dwell_alert_seconds: number;
     /**
      * Hold motionless objects back from the event layer. ON by default: a
      * detector reports a parked car every frame, and because events are keyed
@@ -1716,6 +1725,14 @@ export const api = {
    * `PUT /api/cameras/{name}` probes the device and restarts the recorder,
    * which is absurd for a flag only the detection loop reads.
    */
+  /** Pin ONE camera's loitering threshold; null goes back to inheriting, 0
+   *  turns loitering alerts off for that camera specifically. */
+  setCameraDwell: (name: string, dwellSeconds: number | null) =>
+    request<{ name: string; dwell_seconds: number | null }>(
+      `/api/cameras/${encodeURIComponent(name)}/dwell`,
+      { method: 'PUT', body: JSON.stringify({ dwell_seconds: dwellSeconds }) },
+    ),
+
   setCameraStationary: (name: string, ignoreStationary: boolean | null) =>
     request<{ name: string; ignore_stationary: boolean | null }>(
       `/api/cameras/${encodeURIComponent(name)}/stationary`,

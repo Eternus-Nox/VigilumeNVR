@@ -63,6 +63,11 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
   const [stationaryAfter, setStationaryAfter] = useState<number>(
     pending.detection?.stationary_after_s ?? settings.detection.stationary_after_s ?? 180,
   );
+  // Loitering. 0 = off, which is the shipped default and what a backend
+  // predating the setting should read as — this ADDS alerts, so it is opt-in.
+  const [dwellSeconds, setDwellSeconds] = useState<number>(
+    pending.detection?.dwell_alert_seconds ?? settings.detection.dwell_alert_seconds ?? 0,
+  );
   // Night contrast boost on the detector's frame only. Absent on an older
   // backend -> "off", which is also the shipped default: it changes what the
   // model sees, so it is opt-in.
@@ -115,6 +120,7 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
   useAdoptSaved(settings.detection.absence_timeout_s ?? 5, setAbsenceTimeout);
   useAdoptSaved(settings.detection.ignore_stationary ?? true, setIgnoreStationary);
   useAdoptSaved(settings.detection.stationary_after_s ?? 180, setStationaryAfter);
+  useAdoptSaved(settings.detection.dwell_alert_seconds ?? 0, setDwellSeconds);
   useAdoptSaved(settings.detection.night_boost ?? 'off', setNightBoost);
   useAdoptSaved(settings.detection.night_boost_threshold ?? 60, setNightBoostThreshold);
   useAdoptSaved(settings.detection.smoothing ?? false, setSmoothing);
@@ -156,6 +162,34 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
    * still a round trip, and a control that waits for the network before it
    * moves reads as broken.
    */
+  /** Pin or un-pin one camera's loitering threshold. `null` inherits, `0` is
+   *  "no loitering alerts here" — two different instructions. */
+  const setCameraDwell = async (cam: Camera, next: number | null) => {
+    const previous = cam.dwell_seconds ?? null;
+    setCameras((prev) =>
+      prev.map((c) => (c.name === cam.name ? { ...c, dwell_seconds: next } : c)),
+    );
+    setCamBusy((prev) => new Set(prev).add(cam.name));
+    try {
+      const saved = await api.setCameraDwell(cam.name, next);
+      setCameras((prev) =>
+        prev.map((c) =>
+          c.name === cam.name ? { ...c, dwell_seconds: saved.dwell_seconds } : c,
+        ),
+      );
+    } catch {
+      setCameras((prev) =>
+        prev.map((c) => (c.name === cam.name ? { ...c, dwell_seconds: previous } : c)),
+      );
+    } finally {
+      setCamBusy((prev) => {
+        const nextSet = new Set(prev);
+        nextSet.delete(cam.name);
+        return nextSet;
+      });
+    }
+  };
+
   const setCameraStationary = async (cam: Camera, next: boolean | null) => {
     const previous = cam.ignore_stationary ?? null;
     setCameras((prev) =>
@@ -192,6 +226,7 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
         confidence, default_mode: defaultMode, backend, coral_model: coralModel,
         absence_timeout_s: absenceTimeout,
         ignore_stationary: ignoreStationary, stationary_after_s: stationaryAfter,
+        dwell_alert_seconds: dwellSeconds,
         night_boost: nightBoost, night_boost_threshold: nightBoostThreshold,
         smoothing, smoothing_frames: smoothingFrames,
       },
@@ -199,7 +234,7 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
     });
   }, [
     confidence, defaultMode, backend, coralModel, absenceTimeout,
-    ignoreStationary, stationaryAfter,
+    ignoreStationary, stationaryAfter, dwellSeconds,
     nightBoost, nightBoostThreshold, smoothing, smoothingFrames,
     hasRecognition, recognition, onDraftChange,
   ]);
@@ -728,6 +763,113 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
                           <option value="on">Always ignore them here</option>
                           <option value="off">Always report them here</option>
                         </select>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>Someone who doesn't leave</h2>
+        <p className="muted small">
+          A normal alert tells you somebody <em>arrived</em>, once. This is a second,
+          different alert for the thing people actually worry about: somebody who arrived
+          and is <em>still there</em>. It fires once per visit — “still there” repeated
+          every minute is the noise this replaces, and the event is already on screen.
+        </p>
+        <div className="form-stack">
+          <label>
+            Say something after (seconds) — 0 turns it off
+            <input
+              type="number"
+              min={0}
+              max={3600}
+              step={10}
+              value={dwellSeconds}
+              onChange={(e) => {
+                const n = Math.max(0, Math.min(3600, Math.floor(Number(e.target.value) || 0)));
+                // 0 is off; anything above that has a 10 s floor, which the
+                // backend also enforces. Snapping here rather than letting the
+                // save 422 keeps the rule where you can see it.
+                setDwellSeconds(n === 0 ? 0 : Math.max(10, n));
+              }}
+            />
+            <span className="control-hint">
+              Off by default, deliberately: this <em>adds</em> a kind of notification, and
+              a security system that starts pushing new alerts after an update is one
+              people mute entirely. Timed from when the event opened, not from when
+              somebody stopped moving — a subject whose tracking drops behind a pillar
+              hasn't just arrived. A muted person stays muted for this too.
+            </span>
+          </label>
+        </div>
+
+        {cameras.length > 0 && (
+          <>
+            <h3>Per camera</h3>
+            <p className="muted small">
+              <em>Follow</em> keeps a camera tracking whatever you set above.{' '}
+              <em>Never</em> is how a pavement-facing camera opts out of an alert the
+              front door wants.
+            </p>
+            <table className="camera-choice-table">
+              <thead>
+                <tr>
+                  <th>Camera</th>
+                  <th>Still-there alert</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cameras.map((c) => {
+                  // ?? null, never ||: 0 is a real pinned state ("never here")
+                  // and must not collapse into "follow".
+                  const value = c.dwell_seconds ?? null;
+                  const mode = value === null ? 'inherit' : value === 0 ? 'off' : 'custom';
+                  return (
+                    <tr key={c.name}>
+                      <td>{c.friendly_name || c.name}</td>
+                      <td className="dwell-cell">
+                        <select
+                          value={mode}
+                          disabled={camBusy.has(c.name)}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            void setCameraDwell(
+                              c,
+                              v === 'inherit' ? null : v === 'off' ? 0 : 60,
+                            );
+                          }}
+                        >
+                          <option value="inherit">
+                            Follow the setting above (
+                            {dwellSeconds === 0 ? 'off' : `${dwellSeconds}s`})
+                          </option>
+                          <option value="off">Never on this camera</option>
+                          <option value="custom">After a set time…</option>
+                        </select>
+                        {mode === 'custom' && (
+                          <input
+                            type="number"
+                            min={10}
+                            max={3600}
+                            step={10}
+                            value={value ?? 60}
+                            disabled={camBusy.has(c.name)}
+                            aria-label={`Seconds before the still-there alert on ${
+                              c.friendly_name || c.name
+                            }`}
+                            onChange={(e) =>
+                              void setCameraDwell(
+                                c,
+                                Math.max(10, Math.min(3600, Math.floor(Number(e.target.value) || 10))),
+                              )
+                            }
+                          />
+                        )}
                       </td>
                     </tr>
                   );

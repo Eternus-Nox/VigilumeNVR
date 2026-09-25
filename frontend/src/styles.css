@@ -3764,3 +3764,22 @@ label > select {
   display: flex;
   gap: 0.4rem;
 }
+
+/* The per-camera loitering cell holds a mode select plus, when the mode is
+   "after a set time", the seconds beside it. */
+.dwell-cell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.dwell-cell select {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+.dwell-cell input {
+  width: 6rem;
+  flex: none;
+}

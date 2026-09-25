@@ -28,7 +28,7 @@ def _tri_state(value: Any) -> Optional[bool]:
     """
     return None if value is None else bool(value)
 
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 
 
 def column_or(row: Any, name: str, default: Any) -> Any:
@@ -236,6 +236,14 @@ CREATE TABLE IF NOT EXISTS cameras (
     -- of 1 would silently pin every existing camera to today's global value and
     -- make the global control a no-op from then on.
     ignore_stationary INTEGER,
+    -- Per-camera override for settings.detection.dwell_alert_seconds. Same
+    -- three-state contract as ignore_stationary: NULL follows the global
+    -- setting, a number pins this camera, and 0 pins it to OFF. The
+    -- distinction between NULL and 0 is the whole reason this is nullable —
+    -- "follow whatever I set globally" and "never dwell-alert here" are
+    -- different instructions, and a front door and a pavement-facing camera
+    -- want opposite ones.
+    dwell_seconds   INTEGER,
     audio_codec     TEXT NOT NULL DEFAULT 'g711a',
     smart_spotlight INTEGER NOT NULL DEFAULT 0,
     spotlight_hold_seconds INTEGER NOT NULL DEFAULT 60,
@@ -915,6 +923,26 @@ class Database:
                             "ALTER TABLE profiles ADD COLUMN alert_mode "
                             "TEXT NOT NULL DEFAULT 'default'"
                         )
+            if version < 28:
+                # v28: cameras.dwell_seconds — per-camera override for the
+                # loitering alert. Nullable with no default, for the same
+                # reason as ignore_stationary in v26: NULL means "follow the
+                # global setting", so this migration decides nothing and a
+                # later change to the global still moves every camera nobody
+                # has pinned.
+                cur = await self.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cameras'"
+                )
+                if await cur.fetchone() is not None:
+                    existing = [
+                        r[1] for r in await (
+                            await self.conn.execute("PRAGMA table_info(cameras)")
+                        ).fetchall()
+                    ]
+                    if "dwell_seconds" not in existing:
+                        await self.conn.execute(
+                            "ALTER TABLE cameras ADD COLUMN dwell_seconds INTEGER"
+                        )
         if version < SCHEMA_VERSION:
             await self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         await self.conn.commit()
@@ -960,6 +988,9 @@ class Database:
             # NOT coerced to a bool here: the three states have to survive the
             # trip to the client, or "inherit" becomes "off" on the first save.
             "ignore_stationary": _tri_state(column_or(row, "ignore_stationary", None)),
+            # None = follow settings.detection.dwell_alert_seconds; 0 = off
+            # here specifically. Not coerced, for the same reason.
+            "dwell_seconds": column_or(row, "dwell_seconds", None),
             "detect_width": row["detect_width"],
             "detect_height": row["detect_height"],
             "detect_fps": row["detect_fps"],
@@ -1127,6 +1158,22 @@ class Database:
         )
         await self.conn.commit()
         return added["labels"] if added else []
+
+    async def set_camera_dwell(self, name: str, dwell_seconds: Optional[int]) -> None:
+        """Pin one camera's loitering threshold, or clear it to inherit.
+
+        THREE meanings, and all three are reachable: None writes SQL NULL
+        ("follow settings.detection"), 0 pins this camera OFF, and a positive
+        number pins it to that many seconds. A pavement-facing camera wanting
+        no loitering alerts is a different instruction from one that has simply
+        never been configured, and collapsing them would make the global
+        setting un-overridable downwards.
+        """
+        await self.conn.execute(
+            "UPDATE cameras SET dwell_seconds = ? WHERE name = ?",
+            (None if dwell_seconds is None else max(0, int(dwell_seconds)), name),
+        )
+        await self.conn.commit()
 
     async def set_camera_stationary(
         self, name: str, ignore_stationary: Optional[bool]

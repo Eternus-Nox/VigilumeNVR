@@ -74,6 +74,13 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
             'constant events', 'repeat events', 'loitering'],
   },
   {
+    tab: 'detection', card: "Someone who doesn't leave", admin: true,
+    label: 'Alert when someone arrives and stays',
+    terms: ['loiter', 'loitering', 'still there', 'hanging around', 'waiting',
+            'dwell', 'lingering', 'standing', 'prowler', 'casing',
+            'someone at the door too long', 'second alert'],
+  },
+  {
     tab: 'detection', card: 'Detector input', admin: true,
     label: 'Night contrast boost and box smoothing',
     terms: ['night', 'dark', 'ir', 'infrared', 'contrast', 'boost',

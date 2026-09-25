@@ -492,6 +492,20 @@ DEFAULT_SETTINGS: dict = {
         # recording.
         "ignore_stationary": True,
         "stationary_after_s": 180,
+        # LOITERING. Seconds a subject may be present at a camera before a
+        # SECOND notification says they are still there. 0 = off.
+        #
+        # OFF BY DEFAULT, unlike ignore_stationary. That one REMOVES alerts, so
+        # turning it on by default only ever makes an upgraded box quieter;
+        # this one ADDS a kind of alert nobody asked for, and a security system
+        # that starts pushing new notifications after an update is a system
+        # people turn notifications off on. Opt in per camera, or globally.
+        #
+        # Measured from the EVENT's start, not from a track's: a subject whose
+        # track is lost behind a pillar and re-acquired has not just arrived,
+        # and restarting the clock there would mean a loiterer could avoid the
+        # alert by standing somewhere with poor tracking.
+        "dwell_alert_seconds": 0,
         # NIGHT CONTRAST BOOST for the detector's input frame only (see
         # native/enhance.py). For a camera run WITHOUT IR, where the scene is
         # dim rather than dark and the model has little to work with.

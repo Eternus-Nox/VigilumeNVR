@@ -963,6 +963,43 @@ in `api.ts`, and `?? null` (never `||`) at the control. The full camera update
 does not write this column at all, so an unrelated camera save cannot un-pin a
 camera somebody deliberately pinned.
 
+#### Loitering — "someone is still there" (`detection.dwell_alert_seconds`)
+
+An ordinary alert says a subject ARRIVED, once, and is then suppressed by
+`state["notified"]` and the per-(camera, label) cooldown. Both exist so one
+subject cannot produce a stream of notifications, which is right for an arrival
+and wrong for the case people actually worry about: somebody who arrived and
+did not leave.
+
+`EventsPipeline.note_dwell` is therefore a SECOND, different statement about
+the same subject, and deliberately bypasses both gates. Once per event, with a
+distinct notification tag so a phone shows it as new rather than replacing the
+arrival alert.
+
+- **OFF by default** (`0`). Unlike `ignore_stationary`, which only ever removes
+  alerts, this ADDS a kind — and a security system that starts pushing new
+  notifications after an update is one people mute entirely.
+- Timed from the **event's** start, not a track's: a subject whose track is
+  lost behind a pillar and re-acquired has not just arrived, and restarting the
+  clock there would let a loiterer avoid the alert by standing where tracking
+  is poor.
+- Uses the same `notifications.labels` filter as ordinary alerts — an existing
+  control rather than a second list to keep in step.
+- A **muted profile silences it too**, or loitering would be a way for a muted
+  subject to generate notifications anyway.
+- Per camera via `cameras.dwell_seconds` (v28) and
+  `PUT /api/cameras/{name}/dwell` `{dwell_seconds: n|0|null}`. Three meanings,
+  all reachable: `null` follows the global, `0` means never on this camera, a
+  number pins it. `0` and `null` must never collapse together.
+
+**It composes with the stationary filter, and did not at first.** Stationary
+suppression drops a settled subject after `stationary_after_s`, its label goes
+absent and the event ends — so a dwell threshold at or above that window could
+never fire, and the feature would look broken with nothing in the logs.
+`engine._stationary_after(cam)` is therefore camera-aware and holds a settled
+subject until past its dwell threshold (+30 s). Furniture is unaffected: it
+never moved, so it was never active and this number does not apply to it.
+
 #### "Did my change actually deploy?"
 
 `GET /api/system/health` carries three diagnostics beyond `status`/`version`:

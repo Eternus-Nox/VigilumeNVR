@@ -1136,6 +1136,38 @@ async def set_camera_stationary(
     }
 
 
+class DwellOverride(BaseModel):
+    """Per-camera loitering threshold. `null` = follow the global setting,
+    `0` = no loitering alerts on this camera."""
+
+    dwell_seconds: Optional[int] = Field(default=None, ge=0, le=3600)
+
+
+@router.put("/{name}/dwell", dependencies=[Depends(require_admin)])
+async def set_camera_dwell(
+    name: str, body: DwellOverride, request: Request
+) -> dict[str, Any]:
+    """Pin this camera's loitering threshold, or clear it to inherit.
+
+    Lightweight for the same reason as the recognition and stationary toggles:
+    the full camera update probes the device over the network and restarts the
+    recorder's ffmpeg writers, which is absurd for a number only the detection
+    loop reads.
+
+    `null` and `0` are DIFFERENT and both are meant: null follows the global
+    setting, 0 turns loitering alerts off for this camera specifically.
+    """
+    await _get_cam_or_404(request, name)
+    state = request.app.state
+    await state.db.set_camera_dwell(name, body.dwell_seconds)
+    try:
+        await state.engine.reload()
+    except Exception:  # noqa: BLE001 — a skeleton engine must not fail the save
+        log.exception("engine reload after a dwell change on %s failed", name)
+    cam = await _get_cam_or_404(request, name)
+    return {"name": name, "dwell_seconds": cam.get("dwell_seconds")}
+
+
 @router.put("/{name}/settings", dependencies=[Depends(require_admin)])
 async def put_device_settings(name: str, body: DeviceSettingsPatch, request: Request) -> dict[str, Any]:
     cam = await _get_cam_or_404(request, name)

@@ -326,6 +326,10 @@ class _EventState:
     # in lockstep with best_frame.
     best_scene: list[Observation] = field(default_factory=list)
     count: int = 0
+    #: True once the loitering alert has fired for this event. ONE per event,
+    #: not one per interval: "still there" said every minute is the noise the
+    #: feature is meant to replace, and the event is already on screen.
+    dwell_alerted: bool = False
     last_emit_time: float = 0.0
     last_emit_score: float = 0.0
     last_emit_count: int = 0
@@ -402,6 +406,9 @@ class _CameraState:
     # default) means follow the global setting — which is what keeps the
     # global control meaningful for every camera nobody has pinned.
     ignore_stationary: Optional[bool] = None
+    # Per-camera override for settings.detection.dwell_alert_seconds. None
+    # follows the global setting; 0 means off HERE specifically.
+    dwell_seconds: Optional[int] = None
     # tracker_id -> (hit count, last seen epoch)
     hits: dict[int, tuple[int, float]] = field(default_factory=dict)
     # Per-track motion state: what is moving, what arrived and settled, and
@@ -596,6 +603,8 @@ class DetectionEngine:
             # a fixture or a backend that predates the column.
             stationary = row.get("ignore_stationary")
             state.ignore_stationary = None if stationary is None else bool(stationary)
+            dwell = row.get("dwell_seconds")
+            state.dwell_seconds = None if dwell is None else int(dwell)
             geometry_key = (
                 repr(row.get("include_zones") or []),
                 repr(row.get("cross_lines") or []),
@@ -812,7 +821,7 @@ class DetectionEngine:
         # that omits the parked car is a picture that lies about the frame.
         scene = confirmed
         if self._ignore_stationary(cam):
-            cam.stillness.stationary_after_s = self._stationary_after()
+            cam.stillness.stationary_after_s = self._stationary_after(cam)
             # FED FROM `obs`, FILTERED ON `confirmed`. Motion history has to
             # start when a track is first SEEN, not when it confirms: fed from
             # `confirmed` instead, a track arrives at the event layer having
@@ -958,6 +967,7 @@ class DetectionEngine:
             return
 
         st.last_seen = frame_time
+        self._maybe_dwell(cam, st, frame_time)
         # Zones and crossings are recorded BEFORE the emit decision below, so a
         # crossing that happens on a quiet frame — no score improvement, no
         # count change — still reaches the event row on the next update.
@@ -1166,6 +1176,46 @@ class DetectionEngine:
         value = detection.get(key)
         return default if value is None else value
 
+    def _dwell_seconds(self, cam: _CameraState) -> int:
+        """How long a subject may be present here before the loitering alert.
+
+        0 means off. The camera's own value wins when it has one — including a
+        pinned 0, which is how a pavement-facing camera opts out of an alert
+        the rest of the system wants. None falls through to the global setting.
+        """
+        if cam.dwell_seconds is not None:
+            return max(0, int(cam.dwell_seconds))
+        try:
+            return max(0, int(self._detection_setting("dwell_alert_seconds", 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def _maybe_dwell(self, cam: _CameraState, st: _EventState, frame_time: float) -> None:
+        """Tell the pipeline once when this event has been open long enough.
+
+        Measured from the EVENT's start rather than a track's: a subject whose
+        track is lost behind a pillar and re-acquired has not just arrived, and
+        restarting the clock there would let a loiterer avoid the alert by
+        standing where tracking is poor.
+
+        Best-effort and never raises — a loitering alert is an enhancement on
+        top of detection and recording, and must not cost a frame.
+        """
+        if st.dwell_alerted:
+            return
+        threshold = self._dwell_seconds(cam)
+        if threshold <= 0 or frame_time - st.start_time < threshold:
+            return
+        st.dwell_alerted = True
+        pipeline = self._pipeline
+        note = getattr(pipeline, "note_dwell", None)
+        if note is None:
+            return
+        try:
+            note(st.fid, st.label, int(frame_time - st.start_time))
+        except Exception:
+            log.exception("could not announce a dwell on %s", st.camera)
+
     def _ignore_stationary(self, cam: _CameraState) -> bool:
         """Whether motionless objects are held back for THIS camera.
 
@@ -1179,10 +1229,33 @@ class DetectionEngine:
             return cam.ignore_stationary
         return bool(self._detection_setting("ignore_stationary", True))
 
-    def _stationary_after(self) -> float:
-        return clamp_stationary_after(
+    def _stationary_after(self, cam: _CameraState) -> float:
+        """How long a subject that HAS moved may sit still before it stops
+        sustaining its event.
+
+        CAMERA-AWARE, because the two features would otherwise silently cancel
+        each other out. Stationary suppression drops a settled subject after
+        `stationary_after_s`, at which point its label goes absent and the
+        event ends; loitering wants to report on a subject that arrived and did
+        NOT leave. So on a camera with a dwell threshold at or above the
+        dormancy window, the loitering alert could never fire — the subject
+        would be dropped before the clock reached it, and the feature would
+        appear to be broken with nothing in the logs.
+
+        Holding the subject until a little past its dwell threshold makes them
+        compose: the parked car is still furniture (it never moved, so it was
+        never active and this number does not apply to it), while a person
+        standing at a door stays counted long enough to be reported.
+        """
+        base = clamp_stationary_after(
             self._detection_setting("stationary_after_s", STATIONARY_AFTER_S)
         )
+        dwell = self._dwell_seconds(cam)
+        if dwell <= 0:
+            return base
+        # +30 s so the dwell pass has frames to fire on rather than racing the
+        # dormancy sweep at the exact same instant.
+        return max(base, float(dwell) + 30.0)
 
     async def _housekeeping(self) -> None:
         while True:

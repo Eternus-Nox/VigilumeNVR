@@ -288,6 +288,18 @@ class DetectionSettings(BaseModel):
     # just "off" spelled the long way. Something that has NEVER moved is
     # furniture and is held back regardless of this number.
     stationary_after_s: int = Field(default=180, ge=10, le=3600)
+    # Seconds before a "still there" alert. 0 = off, which is the default —
+    # see config.py for why this one is opt-in while ignore_stationary is not.
+    # Floor of 10 s on a non-zero value: below that it is not loitering, it is
+    # the same alert twice.
+    dwell_alert_seconds: int = Field(default=0, ge=0, le=3600)
+
+    @field_validator("dwell_alert_seconds")
+    @classmethod
+    def _dwell(cls, v: int) -> int:
+        if v != 0 and v < 10:
+            raise ValueError("dwell_alert_seconds must be 0 (off) or at least 10")
+        return v
     # Night contrast boost on the DETECTOR's frame only — never on recordings,
     # clips, live view or the event snapshot. See native/enhance.py for the two
     # honest limits (it cannot create signal in a black frame, and the model was
