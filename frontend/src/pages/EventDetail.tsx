@@ -294,7 +294,15 @@ export default function EventDetail() {
       )}
       {!clipReady && event.clip_state === 'unavailable' && (
         <div className="clip-status">
-          <p className="muted">No recording was saved for this event.</p>
+          {/* The recorder always knew why; until it stored the reason, the
+              only way to find out was the backend log. */}
+          <p className="muted">
+            {event.clip_error
+              ? event.clip_error
+              : 'No clip was saved for this event, and no reason was recorded — ' +
+                'that usually means it failed before this version started keeping ' +
+                'track. The backend log has the detail.'}
+          </p>
         </div>
       )}
 

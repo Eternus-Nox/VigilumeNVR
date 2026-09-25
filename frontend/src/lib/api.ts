@@ -779,6 +779,12 @@ export interface NvrEventDetail extends NvrEvent {
   record_enabled: boolean;
   /** Where the clip is in its lifecycle — drives the media UX. */
   clip_state: ClipState;
+  /**
+   * Why no clip landed, in words meant for a person. Empty when nothing went
+   * wrong, and empty on rows that predate the column — so the UI must treat
+   * "no reason" as "not recorded" rather than as "nothing failed".
+   */
+  clip_error?: string;
 }
 
 export interface EventsPage {

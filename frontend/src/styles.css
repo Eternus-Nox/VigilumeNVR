@@ -3783,3 +3783,36 @@ label > select {
   width: 6rem;
   flex: none;
 }
+
+/* --- Grouped events ------------------------------------------------------ */
+
+/* A group occupies one grid cell until expanded, then grows to hold its
+   members. `display: contents` would be neater but loses the wrapper the
+   "+N more" button needs to sit under the lead card. */
+.event-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.event-group-more {
+  align-self: stretch;
+  padding: 5px 8px;
+  font-size: 0.72rem;
+  cursor: pointer;
+  color: var(--text-secondary, #94a3b8);
+  background: var(--surface-alt, rgba(148, 163, 184, 0.1));
+  border: 1px solid var(--border, rgba(148, 163, 184, 0.22));
+  border-radius: 8px;
+}
+
+.event-group-more:hover {
+  color: var(--text-primary, #e2e8f0);
+}
+
+.events-group-toggle {
+  margin-left: auto;
+  font-size: 0.8rem;
+  white-space: nowrap;
+}

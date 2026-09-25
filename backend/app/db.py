@@ -28,7 +28,7 @@ def _tri_state(value: Any) -> Optional[bool]:
     """
     return None if value is None else bool(value)
 
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 29
 
 
 def column_or(row: Any, name: str, default: Any) -> Any:
@@ -293,7 +293,15 @@ CREATE TABLE IF NOT EXISTS events (
     -- event, accumulated by the pipeline. `label` stays the PRIMARY class for
     -- back-compat; `labels` is the multi-object superset. '[]' = legacy row
     -- (the serializer falls back to [label] then).
-    labels       TEXT NOT NULL DEFAULT '[]'
+    labels       TEXT NOT NULL DEFAULT '[]',
+    -- WHY this event has no clip, when it has none. The recorder already
+    -- logged a precise reason for every failure path; nothing carried it to
+    -- the screen, so the UI could only say "no recording was saved" and the
+    -- operator's next move was an SSH session.
+    --
+    -- '' means nothing went wrong (the clip is present, still processing, or
+    -- the camera simply does not record). Only genuine failures write here.
+    clip_error   TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_events_start  ON events(start_time DESC);
 CREATE INDEX IF NOT EXISTS idx_events_camera ON events(camera, start_time DESC);
@@ -943,6 +951,25 @@ class Database:
                         await self.conn.execute(
                             "ALTER TABLE cameras ADD COLUMN dwell_seconds INTEGER"
                         )
+            if version < 29:
+                # v29: events.clip_error — the reason a clip never landed,
+                # carried to the UI instead of only to the log. Existing rows
+                # get '', which reads as "no recorded reason" rather than as a
+                # claim that nothing went wrong; the UI says so.
+                cur = await self.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='events'"
+                )
+                if await cur.fetchone() is not None:
+                    existing = [
+                        r[1] for r in await (
+                            await self.conn.execute("PRAGMA table_info(events)")
+                        ).fetchall()
+                    ]
+                    if "clip_error" not in existing:
+                        await self.conn.execute(
+                            "ALTER TABLE events ADD COLUMN clip_error "
+                            "TEXT NOT NULL DEFAULT ''"
+                        )
         if version < SCHEMA_VERSION:
             await self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         await self.conn.commit()
@@ -1520,6 +1547,9 @@ class Database:
             # the event (multi-object). Legacy/empty rows fall back to the single
             # primary `label` so every event always exposes at least one label.
             "labels": json.loads(row["labels"]) or [row["label"]],
+            # Why a clip never landed, in words meant for a person. '' when
+            # nothing went wrong, or when the row predates the column.
+            "clip_error": column_or(row, "clip_error", "") or "",
         }
 
     async def recognitions_for(self, fids: "Sequence[str]") -> dict[str, list[dict[str, Any]]]:

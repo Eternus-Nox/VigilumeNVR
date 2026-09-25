@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api, type NvrEvent } from '../lib/api';
 import EventCard from '../components/EventCard';
+import { groupEvents, groupKey } from '../lib/groupEvents';
 import { useAppState } from '../state/AppState';
 import { localInputToEpochSeconds, titleCase } from '../lib/format';
 
@@ -22,6 +23,17 @@ export default function Events() {
   const beforeStr = params.get('before') ?? '';
 
   const [events, setEvents] = useState<NvrEvent[]>([]);
+  // Collapse near-simultaneous detections on one camera into a single row.
+  // ON by default — the clutter is the common case — but remembered, because
+  // somebody reviewing an incident wants every row exactly as recorded.
+  const [grouped, setGrouped] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem('vigilume.groupEvents') !== 'off';
+    } catch {
+      return true;
+    }
+  });
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -138,6 +150,28 @@ export default function Events() {
             Clear
           </button>
         )}
+        {/* A person and the car they arrived in are two events on the server —
+            one per object type. Grouping is presentation only; nothing is
+            hidden and every row is one click away. */}
+        <label className="checkbox events-group-toggle">
+          <input
+            type="checkbox"
+            checked={grouped}
+            onChange={(e) => {
+              setGrouped(e.target.checked);
+              setExpanded(new Set());
+              try {
+                window.localStorage.setItem(
+                  'vigilume.groupEvents',
+                  e.target.checked ? 'on' : 'off',
+                );
+              } catch {
+                // A private window just forgets the preference next time.
+              }
+            }}
+          />
+          <span>Group detections at the same moment</span>
+        </label>
       </div>
 
       {error && (
@@ -156,9 +190,44 @@ export default function Events() {
         </div>
       ) : (
         <div className="event-grid">
-          {events.map((ev) => (
-            <EventCard key={String(ev.id)} event={ev} />
-          ))}
+          {(grouped ? groupEvents(events) : events.map((e) => ({
+            lead: e, events: [e], labels: [],
+          }))).map((group) => {
+            const extra = group.events.length - 1;
+            const leadKey = String(group.lead.id);
+            const open = expanded.has(leadKey);
+            // A group of one renders exactly as it always did — no badge, no
+            // wrapper behaviour, nothing to notice.
+            if (extra <= 0) {
+              return <EventCard key={String(group.lead.id)} event={group.lead} />;
+            }
+            return (
+              <div className="event-group" key={groupKey(group)}>
+                <EventCard event={group.lead} />
+                <button
+                  type="button"
+                  className="event-group-more"
+                  aria-expanded={open}
+                  onClick={() =>
+                    setExpanded((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(leadKey)) next.delete(leadKey);
+                      else next.add(leadKey);
+                      return next;
+                    })
+                  }
+                >
+                  {open
+                    ? 'Show fewer'
+                    : `+${extra} more at the same moment`}
+                </button>
+                {open &&
+                  group.events
+                    .slice(1)
+                    .map((ev) => <EventCard key={String(ev.id)} event={ev} />)}
+              </div>
+            );
+          })}
         </div>
       )}
 

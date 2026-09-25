@@ -1223,6 +1223,21 @@ class Recorder:
         except Exception:  # noqa: BLE001 — clip failure must never propagate
             log.exception("clip extraction crashed for %s (%s)", frigate_id, camera)
 
+    async def _note_clip_error(self, event_id: Optional[int], reason: str) -> None:
+        """Record WHY a clip never landed, so the UI can say it.
+
+        Best-effort: a clip failure is already a degraded outcome, and failing
+        to write down the reason must not turn it into an exception on a
+        fire-and-forget task. The log line stays either way — this only adds a
+        copy the operator can reach without an SSH session.
+        """
+        if event_id is None:
+            return
+        try:
+            await self._db.update_event(event_id, clip_error=reason)
+        except Exception:  # noqa: BLE001
+            log.debug("could not record clip_error for event %s", event_id)
+
     async def extract_clip(
         self, camera: str, frigate_id: str, start_time: float, end_time: float
     ) -> Optional[Path]:
@@ -1261,6 +1276,11 @@ class Recorder:
                 "recorder: clip FAILED event=%s cam=%s — no segments in window [%.1f, %.1f]",
                 frigate_id, camera, window_start, window_end,
             )
+            await self._note_clip_error(
+                event_id,
+                "There was no 24/7 footage covering this moment. The recorder "
+                "was not running then, or retention had already removed it.",
+            )
             return None
 
         first_segment_start = segments[0][0]
@@ -1283,6 +1303,11 @@ class Recorder:
                     "recorder: clip FAILED event=%s cam=%s — ffmpeg exited %s",
                     frigate_id, camera, returncode,
                 )
+                await self._note_clip_error(
+                    event_id,
+                    f"The footage for this moment could not be cut (ffmpeg "
+                    f"exited {returncode}). The 24/7 recording is unaffected.",
+                )
                 return None
             size = await asyncio.to_thread(_file_size, part_path)
             if size <= 0:
@@ -1292,11 +1317,20 @@ class Recorder:
                     "recorder: clip FAILED event=%s cam=%s — empty output (%d bytes)",
                     frigate_id, camera, size,
                 )
+                await self._note_clip_error(
+                    event_id,
+                    "The segments covering this moment could not be read, so "
+                    "the clip came out empty.",
+                )
                 return None
             await asyncio.to_thread(part_path.replace, out_path)
             # has_clip flips to true ONLY here — after a non-empty file exists.
             if not row.get("has_clip"):
                 await self._db.update_event(event_id, has_clip=True)
+            if row.get("clip_error"):
+                # A later attempt succeeded; the old reason would otherwise sit
+                # on a row that now has a perfectly good clip.
+                await self._note_clip_error(event_id, "")
             ok = True
             log.info(
                 "recorder: clip ready event=%s -> %s (bytes=%d, %d segments)",
