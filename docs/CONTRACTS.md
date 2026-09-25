@@ -963,6 +963,48 @@ in `api.ts`, and `?? null` (never `||`) at the control. The full camera update
 does not write this column at all, so an unrelated camera save cannot un-pin a
 camera somebody deliberately pinned.
 
+#### "Did my change actually deploy?"
+
+`GET /api/system/health` carries three diagnostics beyond `status`/`version`:
+
+| field | meaning |
+|---|---|
+| `schema_version` | the version the DATABASE is on, read back from `PRAGMA user_version` |
+| `expects_schema` | the version this backend build ships (`db.SCHEMA_VERSION`) |
+| `started_at` | unix seconds when the process came up |
+
+`schema_version` is read from the file rather than reported from the constant,
+because the case worth catching is the two DISAGREEING — a backend that came up
+against a database whose migration did not run, which otherwise surfaces much
+later as unrelated 500s. It is best-effort and reports `null` on failure:
+health is the endpoint you hit when things are already wrong, so it must not
+become the thing that is wrong.
+
+The web app pairs this with a **stale-bundle check** (`frontend/src/lib/bundle.ts`).
+The web and backend are separate containers rebuilt independently, so three
+failures look identical from the browser — the UI just behaves as though the
+change was never made: the browser holds a cached bundle, nginx serves an old
+one, or only one of the two images was rebuilt.
+
+**No build-time plumbing**, deliberately: the documented deploy is a plain
+`docker compose up -d --build` with no build args, so a baked-in git SHA would
+be empty in exactly the common case. Instead the running tab compares the
+content-hashed entry script in its own `document` against the one in a freshly
+fetched `/index.html`. A difference means the server has a build this tab is
+not running.
+
+The entry script is read from the **document's own `<script type="module">`**,
+not from `import.meta.url` — the latter names whichever CHUNK the module was
+bundled into, and Vite may split that into a shared chunk at any time, after
+which it would never equal the entry and the banner would report every build as
+stale forever. Every uncertain case (fetch failed, no module script, unhashed
+dev names) reports "unknown" and shows nothing: a check that cries wolf is
+ignored on the day it is right. `npm run build` runs
+`scripts/check-bundle-detect.mjs`, which exercises the real parser over the real
+built `index.html` in both directions.
+
+Settings → System → **What's running** shows all of it in one card.
+
 WebSocket:
 - `WS /api/ws?token=` — server pushes `{type:"event_new"|"event_update"|"event_end"|"doorbell", event:{...}}`, `{type:"camera_status", ...}`, and `{type:"model_status", key, tier, state, progress_pct, active, loaded}` for live UI updates.
 

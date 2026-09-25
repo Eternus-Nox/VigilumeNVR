@@ -1348,6 +1348,17 @@ export interface HealthStatus {
   detector: DetectorSummary;
   go2rtc: boolean;
   cameras_online: number;
+  /**
+   * The schema version the DATABASE is actually on, read back from the file.
+   * When it disagrees with `expects_schema`, a migration did not run — which
+   * otherwise shows up only as unrelated 500s much later.
+   * Absent on a backend that predates these fields.
+   */
+  schema_version?: number | null;
+  /** The schema version this backend build was written against. */
+  expects_schema?: number;
+  /** Unix seconds when the backend process started. */
+  started_at?: number | null;
 }
 
 /** One down window from GET /api/system/camera-health. */

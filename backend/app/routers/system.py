@@ -18,12 +18,14 @@ import logging
 import os
 import signal
 import threading
+from typing import Any, Optional
 import time
 
 from fastapi import APIRouter, Depends, Query, Request
 
 from ..auth import require_admin, require_auth
 from ..config import APP_VERSION
+from ..db import SCHEMA_VERSION
 from ..native.model_store import ModelStore
 
 log = logging.getLogger(__name__)
@@ -138,6 +140,23 @@ async def request_restart(reason: str, delay_s: float = _RESTART_DELAY_S) -> Non
     asyncio.create_task(_fire(), name="system-restart")
 
 
+async def _db_schema_version(state: Any) -> Optional[int]:
+    """The version the DATABASE is on, not the one this build expects.
+
+    Read from `PRAGMA user_version` rather than from the constant, because the
+    whole point is to catch the case where they disagree — a backend that came
+    up against a database whose migration did not run. Best-effort: health is
+    the endpoint you hit when things are already wrong, so a failure here
+    reports None rather than turning the health check itself into an error.
+    """
+    try:
+        cur = await state.db.conn.execute("PRAGMA user_version")
+        row = await cur.fetchone()
+        return int(row[0]) if row else None
+    except Exception:  # noqa: BLE001 — diagnostics must never fail the probe
+        return None
+
+
 @router.get("/health")
 async def health(request: Request) -> dict:
     state = request.app.state
@@ -145,6 +164,19 @@ async def health(request: Request) -> dict:
     return {
         "status": "ok",
         "version": APP_VERSION,
+        # WHAT IS ACTUALLY RUNNING. A large share of the time lost on this
+        # project has gone to "is the thing I just changed even deployed?" —
+        # a container serving a bundle baked from an older sync, a backend
+        # restarted without re-reading .env, a database that never took a
+        # migration. These three answer it without an SSH session.
+        #
+        # `schema_version` is the load-bearing one: it is the version the
+        # database has actually been MIGRATED to, read back from the file
+        # rather than the constant this build ships, so a migration that did
+        # not run shows up as a number that disagrees with the release.
+        "schema_version": await _db_schema_version(state),
+        "expects_schema": SCHEMA_VERSION,
+        "started_at": getattr(state, "started_at", None),
         "detector": {
             "kind": getattr(detector, "kind", "onnx"),  # "onnx"
             "ready": detector.ready,

@@ -488,6 +488,10 @@ async def lifespan(app: FastAPI):
     app.state.config = config
     app.state.auth = auth
     app.state.db = db
+    # When this process came up, so the UI can say how long the backend
+    # has been running — the quickest way to tell a restart that took
+    # from one that did not.
+    app.state.started_at = time.time()
     app.state.settings = settings
     app.state.ws = ws
     app.state.push = push

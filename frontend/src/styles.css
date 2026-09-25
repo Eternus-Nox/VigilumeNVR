@@ -3715,3 +3715,52 @@ label > select {
     width: 100%;
   }
 }
+
+/* --- "What's running" / stale bundle ------------------------------------ */
+
+.whats-running {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.3rem 0.9rem;
+  margin: 0.6rem 0 0;
+  font-size: 0.85rem;
+}
+
+.whats-running > div {
+  display: contents;
+}
+
+.whats-running dt {
+  color: var(--text-secondary, #94a3b8);
+}
+
+.whats-running dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.whats-running-bad {
+  color: var(--danger, #f87171);
+  font-weight: 600;
+}
+
+/* A page-wide notice, above the routed content. Deliberately not a toast:
+   toasts expire, and this is true until you reload. */
+.stale-bundle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem 1rem;
+  padding: 8px 16px;
+  font-size: 0.85rem;
+  color: var(--text-primary, #e2e8f0);
+  background: var(--surface-alt, rgba(56, 189, 248, 0.14));
+  border-bottom: 1px solid var(--border, rgba(148, 163, 184, 0.25));
+}
+
+.stale-bundle-actions {
+  display: flex;
+  gap: 0.4rem;
+}

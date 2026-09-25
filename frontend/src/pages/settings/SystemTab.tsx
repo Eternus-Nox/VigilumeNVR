@@ -10,6 +10,7 @@ import ChipsInput from '../../components/ChipsInput';
 import { ConfirmDialog } from '../../components/Modal';
 import ReportBugCard from '../../components/ReportBugCard';
 import SupportCard from '../../components/SupportCard';
+import WhatsRunning from '../../components/WhatsRunning';
 import { useAppState } from '../../state/AppState';
 import { useAdoptSaved, type TabProps } from '../Settings';
 
@@ -434,6 +435,17 @@ export default function SystemTab({ settings, onDraftChange, pending }: TabProps
       {/* No Save button here — the shell owns the single Save for every
           settings tab. Server actions below (Restart) are NOT settings: they
           fire immediately and are deliberately not batched behind Save. */}
+
+      <section className="card">
+        <h2>What's running</h2>
+        <p className="muted small">
+          The answer to “did my change actually deploy?”. The web app and the backend
+          are separate containers and can be rebuilt independently, so they can disagree
+          — and when they do, the symptom is usually just “the thing I changed didn't
+          work”.
+        </p>
+        <WhatsRunning />
+      </section>
 
       <section className="card">
         <h2>Server</h2>

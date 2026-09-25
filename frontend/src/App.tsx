@@ -15,6 +15,7 @@ import Layout from './components/Layout';
 // so lazying them would only add a round trip to the critical path.
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
+import StaleBundleBanner from './components/StaleBundleBanner';
 
 // Everything else is route-split. Measured on this tree: the app chunk goes
 // from 186,991 B raw / 54,902 B gzip to 44,110 B / 14,600 B — ~143 KB raw of
@@ -62,6 +63,9 @@ export default function App() {
   return (
     <BrowserRouter>
       <SwNavigator />
+      {/* Only ever visible when the server is demonstrably serving a
+          different bundle than this tab loaded — see lib/bundle.ts. */}
+      <StaleBundleBanner />
       {/* One boundary around all routes. `null` rather than a spinner: the
           split chunks are served from the same origin and are already
           cache-warm on any repeat visit, so a flash of spinner on navigation
