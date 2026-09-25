@@ -35,9 +35,14 @@ import type { NvrEvent } from './api';
 export const GROUP_WINDOW_S = 10;
 
 export interface EventGroup {
-  /** The event shown when the group is collapsed. */
+  /**
+   * The event the row shows. The one with a clip if any member has one, else
+   * one with a snapshot, else the newest — the row is somebody's way into the
+   * moment, and landing on "no clip was saved" when a sibling has one would
+   * make the moment look worse-recorded than it was.
+   */
   lead: NvrEvent;
-  /** Every event in the group, `lead` first. Length 1 for an ungrouped row. */
+  /** Every event in the group, in page order. Length 1 for an ungrouped row. */
   events: NvrEvent[];
   /** Distinct labels across the group, for the collapsed row's chip. */
   labels: string[];
@@ -59,18 +64,20 @@ export function groupEvents(events: NvrEvent[]): EventGroup[] {
   // Per camera, the group currently open for it. Keyed by camera because two
   // cameras firing at the same instant are two separate things, and a single
   // "current group" would let one camera's event close another's.
-  const open = new Map<string, EventGroup>();
+  // The window is measured from the group's FIRST event, which is kept apart
+  // from `lead` because the lead is re-picked afterwards.
+  const open = new Map<string, { group: EventGroup; start: number }>();
 
   for (const event of events) {
     const current = open.get(event.camera);
     const within =
       current !== undefined &&
-      Math.abs(current.lead.start_time - event.start_time) <= GROUP_WINDOW_S;
+      Math.abs(current.start - event.start_time) <= GROUP_WINDOW_S;
 
     if (current && within) {
-      current.events.push(event);
+      current.group.events.push(event);
       for (const l of labelsOf(event)) {
-        if (!current.labels.includes(l)) current.labels.push(l);
+        if (!current.group.labels.includes(l)) current.group.labels.push(l);
       }
       continue;
     }
@@ -80,13 +87,24 @@ export function groupEvents(events: NvrEvent[]): EventGroup[] {
       labels: [...labelsOf(event)],
     };
     groups.push(group);
-    open.set(event.camera, group);
+    open.set(event.camera, { group, start: event.start_time });
   }
+  for (const group of groups) group.lead = pickLead(group.events);
   return groups;
 }
 
-/** A stable key for a group, for React. Uses the lead's id — groups are rebuilt
- *  from scratch whenever the page changes, and the lead is stable within one. */
+/** Best member to stand for the moment: clip, then snapshot, then the first. */
+function pickLead(events: NvrEvent[]): NvrEvent {
+  return (
+    events.find((e) => e.has_clip) ??
+    events.find((e) => e.has_snapshot) ??
+    events[0]
+  );
+}
+
+/** A stable key for a group, for React. Uses the FIRST member's id rather than
+ *  the lead's: the lead can change when a sibling's clip lands, and the row
+ *  should update in place rather than remount. */
 export function groupKey(group: EventGroup): string {
-  return `g${group.lead.id}`;
+  return `g${group.events[0].id}`;
 }

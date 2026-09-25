@@ -3786,29 +3786,76 @@ label > select {
 
 /* --- Grouped events ------------------------------------------------------ */
 
-/* A group occupies one grid cell until expanded, then grows to hold its
-   members. `display: contents` would be neater but loses the wrapper the
-   "+N more" button needs to sit under the lead card. */
-.event-group {
+/* The grid shows ONE card per moment; this says how many records it stands
+   for. Top-right, because the bottom edge already holds the label chip, the
+   recognition chip and the download button. */
+.event-group-count {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: rgba(4, 10, 18, 0.8);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 0.66rem;
+  font-weight: 600;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+/* Event detail: the other records from the same moment, which the grid no
+   longer shows as their own cards. */
+.event-siblings {
+  margin: 1rem 0 0;
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.75rem 0.9rem;
+}
+
+.event-siblings-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-dim);
+}
+
+.event-siblings-list {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 0;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
-.event-group-more {
-  align-self: stretch;
-  padding: 5px 8px;
-  font-size: 0.72rem;
-  cursor: pointer;
-  color: var(--text-secondary, #94a3b8);
-  background: var(--surface-alt, rgba(148, 163, 184, 0.1));
-  border: 1px solid var(--border, rgba(148, 163, 184, 0.22));
-  border-radius: 8px;
+.event-sibling {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  padding: 0.3rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-raise);
+  color: var(--text);
+  font-size: 0.82rem;
+  text-decoration: none;
 }
 
-.event-group-more:hover {
-  color: var(--text-primary, #e2e8f0);
+.event-sibling:hover {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+}
+
+.event-sibling-media {
+  font-size: 0.7rem;
+  color: var(--accent);
+}
+
+.event-sibling-media-dim {
+  color: var(--text-dim);
 }
 
 .events-group-toggle {

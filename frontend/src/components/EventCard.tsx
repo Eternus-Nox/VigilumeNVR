@@ -16,9 +16,20 @@ import AuthImage from './AuthImage';
 function EventCard({
   event,
   compact = false,
+  groupLabels,
+  groupCount = 1,
 }: {
   event: NvrEvent;
   compact?: boolean;
+  /**
+   * Every label seen across the MOMENT this card stands for, when the list is
+   * grouping. The server opens one event per object type, so a person and the
+   * car they arrived in are two events; the list shows one row, and that row
+   * has to name both or it would be quietly lying about what was detected.
+   */
+  groupLabels?: string[];
+  /** How many events this row stands for. 1 = an ordinary, ungrouped card. */
+  groupCount?: number;
 }) {
   const { pushToast, cameras } = useAppState();
   const [busy, setBusy] = useState(false);
@@ -57,9 +68,13 @@ function EventCard({
     titleCase(event.camera);
 
   // Multi-object events carry every distinct class; older events only `label`.
-  const labels = (event.labels && event.labels.length > 0 ? event.labels : [event.label]).map(
-    titleCase,
-  );
+  const labels = (
+    groupLabels && groupLabels.length > 0
+      ? groupLabels
+      : event.labels && event.labels.length > 0
+        ? event.labels
+        : [event.label]
+  ).map(titleCase);
   const labelText = labels.join(', ');
 
   // At most one recognition on the thumbnail: the card has room for a single
@@ -80,6 +95,18 @@ function EventCard({
             {labelText}
             {event.count > 1 ? ` ×${event.count}` : ''}
           </span>
+          {/* Not a button: the list shows ONE row for the moment, and the
+              other detections are on the detail page rather than expanding
+              here. This only says the row stands for more than one record, so
+              nobody thinks something was lost. */}
+          {groupCount > 1 && (
+            <span
+              className="event-group-count"
+              title={`${groupCount} separate detections within a few seconds`}
+            >
+              {groupCount} detections
+            </span>
+          )}
           {headline && <RecognitionChip recognition={headline} className="event-recog-chip" />}
           {kind && (
             <button

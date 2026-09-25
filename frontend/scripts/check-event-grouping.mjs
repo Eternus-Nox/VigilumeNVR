@@ -51,8 +51,9 @@ const js = src
 const mod = new Function(`${js}; return { groupEvents, GROUP_WINDOW_S };`)();
 const { groupEvents, GROUP_WINDOW_S } = mod;
 
-const ev = (id, camera, start, label = 'person') => ({
+const ev = (id, camera, start, label = 'person', media = {}) => ({
   id, camera, start_time: start, label, labels: [label],
+  has_clip: false, has_snapshot: false, ...media,
 });
 
 console.log('\nnothing is lost and nothing is reordered');
@@ -100,6 +101,35 @@ const widest = Math.max(
 );
 check(widest <= GROUP_WINDOW_S,
       `no group spans more than the window (widest ${widest}s)`);
+
+console.log('\nthe row shows the member that was actually recorded');
+const mixed = groupEvents([
+  ev(1, 'drive', 1000, 'person'),
+  ev(2, 'drive', 999, 'car', { has_snapshot: true }),
+  ev(3, 'drive', 998, 'dog', { has_clip: true, has_snapshot: true }),
+  ev(4, 'porch', 990, 'person'),
+]);
+check(mixed.length === 2 && mixed[0].lead.id === 3,
+      `a sibling with a clip leads the row over a newer one without (got ${mixed[0].lead.id})`);
+check(mixed[0].events.map((e) => e.id).join() === '1,2,3',
+      'without reordering the members');
+check(mixed[0].labels.join() === 'person,car,dog',
+      'and the labels still read in page order');
+check(mixed[1].lead.id === 4,
+      'the next group keeps its place in the list');
+const snapOnly = groupEvents([
+  ev(1, 'drive', 1000),
+  ev(2, 'drive', 999, 'car', { has_snapshot: true }),
+]);
+check(snapOnly[0].lead.id === 2, 'with no clip anywhere, a snapshot beats nothing');
+const late = groupEvents([
+  ev(1, 'drive', 1000),
+  ev(2, 'drive', 1000 - GROUP_WINDOW_S, 'car', { has_clip: true }),
+  ev(3, 'drive', 1000 - GROUP_WINDOW_S - 1, 'car'),
+]);
+check(late.length === 2,
+      "re-picking the lead doesn't move the window: it is still measured from " +
+      'the first member, so a clip at the far edge cannot stretch the group');
 
 console.log('\nedges');
 check(groupEvents([]).length === 0, 'an empty page yields no groups');

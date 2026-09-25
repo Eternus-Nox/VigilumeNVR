@@ -21,6 +21,8 @@ import LivePlayer from '../components/LivePlayer';
 import HoldButton from '../components/HoldButton';
 import PtzControls from '../components/PtzControls';
 import EventCard from '../components/EventCard';
+import { groupEvents, groupKey } from '../lib/groupEvents';
+import { groupingEnabled } from '../lib/groupPref';
 import { ConfirmDialog } from '../components/Modal';
 import { useAppState, useCameraLive } from '../state/AppState';
 import { amcrestDefaultUrl, titleCase } from '../lib/format';
@@ -613,9 +615,19 @@ export default function CameraDetail() {
           <p className="muted">No events recorded for this camera yet.</p>
         ) : (
           <div className="event-strip">
-            {events.map((ev) => (
-              <EventCard key={String(ev.id)} event={ev} compact />
-            ))}
+            {/* Same one-card-per-moment rule as the Events page, and the
+                same switch — it is set there. */}
+            {groupingEnabled()
+              ? groupEvents(events).map((group) => (
+                  <EventCard
+                    key={groupKey(group)}
+                    event={group.lead}
+                    groupLabels={group.events.length > 1 ? group.labels : undefined}
+                    groupCount={group.events.length}
+                    compact
+                  />
+                ))
+              : events.map((ev) => <EventCard key={String(ev.id)} event={ev} compact />)}
           </div>
         )}
       </section>

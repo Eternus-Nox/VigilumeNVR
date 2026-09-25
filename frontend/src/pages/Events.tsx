@@ -7,6 +7,7 @@ import { useSearchParams } from 'react-router-dom';
 import { api, type NvrEvent } from '../lib/api';
 import EventCard from '../components/EventCard';
 import { groupEvents, groupKey } from '../lib/groupEvents';
+import { groupingEnabled, setGroupingEnabled } from '../lib/groupPref';
 import { useAppState } from '../state/AppState';
 import { localInputToEpochSeconds, titleCase } from '../lib/format';
 
@@ -24,16 +25,7 @@ export default function Events() {
 
   const [events, setEvents] = useState<NvrEvent[]>([]);
   // Collapse near-simultaneous detections on one camera into a single row.
-  // ON by default — the clutter is the common case — but remembered, because
-  // somebody reviewing an incident wants every row exactly as recorded.
-  const [grouped, setGrouped] = useState<boolean>(() => {
-    try {
-      return window.localStorage.getItem('vigilume.groupEvents') !== 'off';
-    } catch {
-      return true;
-    }
-  });
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [grouped, setGrouped] = useState<boolean>(groupingEnabled);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -151,23 +143,15 @@ export default function Events() {
           </button>
         )}
         {/* A person and the car they arrived in are two events on the server —
-            one per object type. Grouping is presentation only; nothing is
-            hidden and every row is one click away. */}
+            one per object type. Grouping is presentation only: nothing is
+            deleted, and the other records are listed on the event page. */}
         <label className="checkbox events-group-toggle">
           <input
             type="checkbox"
             checked={grouped}
             onChange={(e) => {
               setGrouped(e.target.checked);
-              setExpanded(new Set());
-              try {
-                window.localStorage.setItem(
-                  'vigilume.groupEvents',
-                  e.target.checked ? 'on' : 'off',
-                );
-              } catch {
-                // A private window just forgets the preference next time.
-              }
+              setGroupingEnabled(e.target.checked);
             }}
           />
           <span>Group detections at the same moment</span>
@@ -190,44 +174,21 @@ export default function Events() {
         </div>
       ) : (
         <div className="event-grid">
-          {(grouped ? groupEvents(events) : events.map((e) => ({
-            lead: e, events: [e], labels: [],
-          }))).map((group) => {
-            const extra = group.events.length - 1;
-            const leadKey = String(group.lead.id);
-            const open = expanded.has(leadKey);
-            // A group of one renders exactly as it always did — no badge, no
-            // wrapper behaviour, nothing to notice.
-            if (extra <= 0) {
-              return <EventCard key={String(group.lead.id)} event={group.lead} />;
-            }
-            return (
-              <div className="event-group" key={groupKey(group)}>
-                <EventCard event={group.lead} />
-                <button
-                  type="button"
-                  className="event-group-more"
-                  aria-expanded={open}
-                  onClick={() =>
-                    setExpanded((prev) => {
-                      const next = new Set(prev);
-                      if (next.has(leadKey)) next.delete(leadKey);
-                      else next.add(leadKey);
-                      return next;
-                    })
-                  }
-                >
-                  {open
-                    ? 'Show fewer'
-                    : `+${extra} more at the same moment`}
-                </button>
-                {open &&
-                  group.events
-                    .slice(1)
-                    .map((ev) => <EventCard key={String(ev.id)} event={ev} />)}
-              </div>
-            );
-          })}
+          {(grouped
+            ? groupEvents(events)
+            : events.map((e) => ({ lead: e, events: [e], labels: [] as string[] }))
+          ).map((group) => (
+            // ONE row per moment. The other detections in the group are not
+            // expanded inline — they are listed on the event's detail page,
+            // which is where someone who wants every record goes anyway, and
+            // keeping them out of the grid is the whole point of grouping.
+            <EventCard
+              key={groupKey(group)}
+              event={group.lead}
+              groupLabels={group.events.length > 1 ? group.labels : undefined}
+              groupCount={group.events.length}
+            />
+          ))}
         </div>
       )}
 
