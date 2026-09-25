@@ -317,7 +317,7 @@ async def _engine_cases() -> None:
     plain = _cam_row("plain", exempt_zones=[])
     engine._cameras["plain"] = _CameraState(row=plain, exempt_polys=exempt_detect_polygons(plain))
     await _drive(engine, "plain", (60.0, 60.0, 80.0, 90.0))
-    check(("plain", "person") in engine._events, "empty exempt_zones: confirmed person opens the event (no-op)")
+    check(engine.open_event("plain", "person") is not None, "empty exempt_zones: confirmed person opens the event (no-op)")
     check(pipeline.counts.get(("plain", "person")) == 1, "empty exempt_zones: live count fed as usual")
 
     # --- masked camera: a detection whose foot is inside the zone opens NO event ---
@@ -325,7 +325,7 @@ async def _engine_cases() -> None:
     engine._cameras["masked"] = _CameraState(row=masked_row, exempt_polys=exempt_detect_polygons(masked_row))
     # foot-center (70,90) inside the bottom-right zone
     await _drive(engine, "masked", (60.0, 60.0, 80.0, 90.0))
-    check(("masked", "person") not in engine._events,
+    check(engine.open_event("masked", "person") is None,
           "masked: object with foot inside an exempt zone opens NO event")
     check(pipeline.counts.get(("masked", "person")) is None,
           "masked: suppressed object never feeds a live count")
@@ -334,7 +334,7 @@ async def _engine_cases() -> None:
 
     # --- same masked camera: an object OUTSIDE the zone still opens its event ---
     await _drive(engine, "masked", (10.0, 10.0, 30.0, 40.0), tid=8)
-    check(("masked", "person") in engine._events,
+    check(engine.open_event("masked", "person") is not None,
           "masked: an object outside the exempt zone still opens the event")
     check(pipeline.counts.get(("masked", "person")) == 1, "masked: un-masked object feeds the live count")
 
@@ -342,14 +342,14 @@ async def _engine_cases() -> None:
     tallcam = _cam_row("tall", exempt_zones=[BR_ZONE])
     engine._cameras["tall"] = _CameraState(row=tallcam, exempt_polys=exempt_detect_polygons(tallcam))
     await _drive(engine, "tall", (60.0, 10.0, 80.0, 80.0))  # center y=45 outside, foot (70,80) inside
-    check(("tall", "person") not in engine._events,
+    check(engine.open_event("tall", "person") is None,
           "foot-center: tall box (center above zone, foot inside) is masked -> no event")
 
     # --- box fully above the ground zone still fires ---
     abovecam = _cam_row("above", exempt_zones=[BR_ZONE])
     engine._cameras["above"] = _CameraState(row=abovecam, exempt_polys=exempt_detect_polygons(abovecam))
     await _drive(engine, "above", (60.0, 10.0, 80.0, 40.0))  # foot (70,40) above zone
-    check(("above", "person") in engine._events,
+    check(engine.open_event("above", "person") is not None,
           "foot-center: box entirely above the zone opens the event")
 
     # --- reject-suppression: same-label detection near a learned sample opens NO event ---
@@ -359,15 +359,15 @@ async def _engine_cases() -> None:
     st.suppress_radius = 10.0
     engine._cameras["supp"] = st
     await _drive(engine, "supp", (60.0, 60.0, 80.0, 90.0))  # foot (70,90) == sample
-    check(("supp", "person") not in engine._events,
+    check(engine.open_event("supp", "person") is None,
           "reject-suppression: same-label detection near a sample opens NO event")
     # same camera, same label but FAR from the sample -> still fires
     await _drive(engine, "supp", (10.0, 10.0, 30.0, 40.0), tid=9)  # foot (20,40), ~70px away
-    check(("supp", "person") in engine._events,
+    check(engine.open_event("supp", "person") is not None,
           "reject-suppression: a same-label detection far from the sample still fires")
     # a DIFFERENT label at the SAME spot is NOT suppressed (label-specific)
     await _drive(engine, "supp", (60.0, 60.0, 80.0, 90.0), label="car", tid=10)
-    check(("supp", "car") in engine._events,
+    check(engine.open_event("supp", "car") is not None,
           "reject-suppression: a different label at the sample spot still fires (label-specific)")
 
 
@@ -407,7 +407,7 @@ async def _reload_case() -> None:
         pipeline = RecordingPipeline()
         engine.set_pipeline(pipeline)
         await _drive(engine, "yard", (60.0, 60.0, 80.0, 90.0))
-        check(("yard", "person") not in engine._events,
+        check(engine.open_event("yard", "person") is None,
               "DB-loaded exempt zone masks the object end-to-end (no event)")
     finally:
         await db.close()

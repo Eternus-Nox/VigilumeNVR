@@ -279,7 +279,7 @@ def main() -> int:  # noqa: C901 — a checklist, not a branchy algorithm
         add("open")
         await drive(engine, "open", 500, 400)
         check(
-            ("open", "person") in engine._events,
+            engine.open_event("open", "person") is not None,
             "with NO include zones a person anywhere still opens an event — the "
             "single most important regression, since every existing camera is this",
         )
@@ -287,7 +287,7 @@ def main() -> int:  # noqa: C901 — a checklist, not a branchy algorithm
         add("drive", include_zones=[{"name": "driveway", "points": LEFT_HALF}])
         await drive(engine, "drive", 500, 400)  # right half — outside
         check(
-            ("drive", "person") not in engine._events,
+            engine.open_event("drive", "person") is None,
             "a person OUTSIDE the include zone opens no event at all — not a "
             "suppressed notification, no event: this is what kills street traffic",
         )
@@ -297,7 +297,7 @@ def main() -> int:  # noqa: C901 — a checklist, not a branchy algorithm
         )
 
         await drive(engine, "drive", 100, 400, tid=10)  # left half — inside
-        st = engine._events.get(("drive", "person"))
+        st = engine.open_event("drive", "person")
         check(st is not None, "a person INSIDE the zone opens one normally")
         check(
             st is not None and st.zones == {"driveway"},
@@ -318,7 +318,7 @@ def main() -> int:  # noqa: C901 — a checklist, not a branchy algorithm
         add("gate", cross_lines=[{"name": "gate", "start": [0.0, 0.5], "end": [1.0, 0.5]}])
         for i, y in enumerate((400, 400, 400, 380, 120, 100)):
             await engine.process("gate", 2000.0 + i * 0.2, [obs(320, y, tid=11)], frame_bgr=None)
-        gate = engine._events.get(("gate", "person"))
+        gate = engine.open_event("gate", "person")
         check(gate is not None and gate.zones == {"gate"},
               "walking across a line stamps the line's name on the open event")
         check(gate is not None and gate.line_counts == {"gate": [1, 0]},

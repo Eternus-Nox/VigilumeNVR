@@ -227,7 +227,7 @@ async def engine_cases() -> None:
     check(kinds(pipe, "car") == [],
           "a car parked in the drive produces NO event at all — not one that "
           "closes, not a heartbeat, nothing")
-    check(("drive", "car") not in engine._events,
+    check(engine.open_event("drive", "car") is None,
           "...and holds no open event, which is what was blocking every "
           "later arrival")
 
@@ -286,7 +286,7 @@ async def engine_cases() -> None:
     for i in range(int(UPDATE_HEARTBEAT_S * 4 / step)):  # ~4 heartbeats' worth
         await engine2.process("porch", held + i * step,
                               [Observation("person", 7, 0.9, still)], frame_bgr=None)
-    check(("porch", "person") in engine2._events,
+    check(engine2.open_event("porch", "person") is not None,
           "standing perfectly still KEEPS the event open — this is the case the "
           "whole feature must not break")
     check(len(pipe2.payloads) == before,

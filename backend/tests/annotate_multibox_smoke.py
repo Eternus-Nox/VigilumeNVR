@@ -297,13 +297,17 @@ async def _engine_scene_cases() -> None:
     check(after["snapshot"]["box"] == list(after["box"]) and len(after["box"]) == 4,
           "legacy snapshot.box / box fields retained for backward compatibility")
 
-    # The dog event's scene is the same full scene (every counted object).
-    new_dog = [p for p in cap.payloads if p["type"] == "new" and p["after"]["label"] == "dog"]
-    check(len(new_dog) == 1 and len(new_dog[0]["after"]["scene"]) == 3,
-          "the dog event's snapshot scene also boxes every counted object")
+    # ONE event per camera: the dog does not open a second event — it is part
+    # of the person's, which is named after the more important type.
+    news = [p for p in cap.payloads if p["type"] == "new"]
+    check(len(news) == 1,
+          f"people and a dog in one frame open ONE event, not one per type (got {len(news)})")
+    check(sorted(after.get("labels") or []) == ["dog", "person"]
+          and sorted(after.get("present_labels") or []) == ["dog", "person"],
+          "and that event carries both types, as seen and as in view now")
 
     # Scene tracks the retained best frame.
-    st = engine._events[("cam", "person")]
+    st = engine.open_event("cam", "person")
     check(len(st.best_scene) == 3 and st.best_frame is not None,
           "EventState.best_scene matches the retained best frame")
 
@@ -409,7 +413,7 @@ async def _pipeline_multibox_cases() -> None:
     for i in range(4):
         await engine.process("cam", t0 + i * 0.2, scene_at(i), frame_bgr=frame)
 
-    st = engine._events[("cam", "person")]
+    st = engine.open_event("cam", "person")
     row = await db.get_event_by_frigate_id(st.fid)
     check(row is not None and row["label"] == "person", "person event row stored via the pipeline")
     event_id = int(row["id"])

@@ -13,9 +13,9 @@ So a dwell alert is a SECOND, different statement about the same subject, and
 it deliberately bypasses both of those gates. Everything below is about making
 that bypass safe:
 
-  * ONE per event. "Still there" repeated every minute is precisely the noise
-    this replaces, and the event is already on screen.
-  * measured from the EVENT's start, not a track's — a subject whose track is
+  * ONE per type per event. "Still there" repeated every minute is precisely
+    the noise this replaces, and the event is already on screen.
+  * measured from when the TYPE arrived, not a track's start — a subject whose track is
     lost behind a pillar and re-acquired has not just arrived, and restarting
     the clock there would let a loiterer avoid the alert by standing where
     tracking is poor.
@@ -204,7 +204,7 @@ async def engine_checks() -> None:
     e = engine_with(pipe, dwell_alert_seconds=0, stationary_after_s=60)
     add_camera(e)
     await run(e, pipe, seconds=400)
-    check(("porch", "person") not in e._events,
+    check(e.open_event("porch", "person") is None,
           "...and with dwell OFF the stationary filter still releases a settled "
           "subject as before — the hold is bought by dwell, not granted always")
 
@@ -230,19 +230,25 @@ def pipeline_checks() -> None:
     sent: list = []
     pipe._spawn = lambda coro: (sent.append(coro), coro.close())  # type: ignore[attr-defined]
     pipe._active = {  # type: ignore[attr-defined]
-        "fid-1": {"notified": True, "dwell_notified": False, "recognitions": [],
+        "fid-1": {"notified": True, "recognitions": [],
                   "event_id": 5, "camera": "porch", "last_after": {"camera": "porch"}},
     }
     pipe.note_dwell("fid-1", "person", 90)
     check(len(sent) == 1,
           "note_dwell sends even though the event is ALREADY notified — an "
           "arrival alert must not swallow the loitering one")
-    check(pipe._active["fid-1"]["dwell_notified"] is True,  # type: ignore[attr-defined]
-          "...and marks the event, so a second call is a no-op")
+    check("person" in pipe._active["fid-1"]["dwell_labels"],  # type: ignore[attr-defined]
+          "...and marks the type on the event, so a second call is a no-op")
 
     sent.clear()
     pipe.note_dwell("fid-1", "person", 150)
     check(sent == [], "a repeat call sends nothing")
+
+    sent.clear()
+    pipe.note_dwell("fid-1", "car", 400)
+    check(len(sent) == 1,
+          "a DIFFERENT type on the same event gets its own — events are one per "
+          "camera, and the car on the drive is not the person beside it")
 
     sent.clear()
     pipe.note_dwell("missing-fid", "person", 90)

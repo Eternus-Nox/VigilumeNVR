@@ -28,10 +28,12 @@ Per enabled camera, an ffmpeg ingest loop feeds ONE inference worker
   the camera's latest frame); pass a fresh buffer per frame.
 - tracker_id values start at 0 — never treated as falsy anywhere here.
 
-Event model (design doc §4.2): one open event per (camera, label); a track
-is confirmed after MIN_HITS frames carrying its tracker_id; "update" emits
-on best-score +0.02 / active-count change / 10 s heartbeat; "end" after
-ABSENCE_TIMEOUT_S without the label, end_time = last time it was seen.
+Event model: ONE open event per camera, holding every object type seen while
+it is open (it was one per (camera, label) — see _EventState); a track is
+confirmed after MIN_HITS frames carrying its tracker_id; "update" emits on
+best-score +0.02 / active-count change / a type arriving or leaving / 10 s
+heartbeat; "end" after ABSENCE_TIMEOUT_S with NOTHING confirmed in view,
+end_time = last time anything was seen.
 Native event ids use the ``native.`` prefix (must never collide with the
 ``doorbell.``/``audio.`` synthetic-no-media prefixes in routers/events.py).
 """
@@ -49,6 +51,7 @@ from typing import TYPE_CHECKING, Any, Optional, Sequence
 import cv2
 import numpy as np
 
+from ..event_labels import label_rank, primary_label
 from . import zones as zonelib
 from .coco_labels import ID_TO_LABEL
 from .stillness import STATIONARY_AFTER_S, Stillness, clamp_stationary_after
@@ -330,6 +333,18 @@ def observations_from_supervision(detections: "sv.Detections") -> list[Observati
 
 @dataclass
 class _EventState:
+    """ONE event per camera, open while anything worth reporting is in view.
+
+    It used to be one per (camera, label): a person and the car they arrived in
+    were two events a second apart, and the event list showed two rows for one
+    thing that happened. Now the event opens on the first confirmed object of
+    any type, gathers every type that appears while it is open, and ends only
+    when ALL of them have been gone for the absence timeout.
+
+    `label` is the event's NAME — the most important type seen so far (see
+    `primary_label`), so it can change from "car" to "person" mid-event.
+    """
+
     fid: str
     camera: str
     label: str
@@ -345,10 +360,12 @@ class _EventState:
     # in lockstep with best_frame.
     best_scene: list[Observation] = field(default_factory=list)
     count: int = 0
-    #: True once the loitering alert has fired for this event. ONE per event,
-    #: not one per interval: "still there" said every minute is the noise the
-    #: feature is meant to replace, and the event is already on screen.
-    dwell_alerted: bool = False
+    #: Types the loitering alert has fired for in this event. ONE per type, not
+    #: one per interval: "still there" said every minute is the noise the
+    #: feature is meant to replace. Per TYPE because the event is one per
+    #: camera, and the car on the drive and the person standing by it are two
+    #: different things to have been told about.
+    dwell_alerted: set[str] = field(default_factory=set)
     last_emit_time: float = 0.0
     last_emit_score: float = 0.0
     last_emit_count: int = 0
@@ -366,6 +383,22 @@ class _EventState:
     # the best frame was adopted so the trace drawn on the snapshot ends where
     # the boxes are. Refreshed in lockstep with best_frame.
     best_traces: dict[int, list[tuple[float, float]]] = field(default_factory=dict)
+    #: Label of the object the best frame was adopted for. The best frame
+    #: follows the most IMPORTANT subject first and the highest score second,
+    #: so the snapshot of a car-then-person event shows the person.
+    best_label: str = ""
+    #: Every type seen during the event, in the order it first appeared.
+    labels: list[str] = field(default_factory=list)
+    #: Types in view NOW (seen within the absence timeout) -> how many.
+    label_counts: dict[str, int] = field(default_factory=dict)
+    #: When each present type was last seen, and when its current continuous
+    #: presence began. A type that leaves and comes back starts again — which
+    #: is what the loitering clock needs.
+    label_last_seen: dict[str, float] = field(default_factory=dict)
+    label_first_seen: dict[str, float] = field(default_factory=dict)
+    #: The present set as of the last emit, so a type arriving or leaving is
+    #: reported promptly rather than on the next heartbeat.
+    last_emit_present: tuple[str, ...] = ()
 
 
 @dataclass
@@ -467,7 +500,8 @@ class DetectionEngine:
         self._config = config
         self._pipeline: Optional["EventsPipeline"] = None
         self._cameras: dict[str, _CameraState] = {}
-        self._events: dict[tuple[str, str], _EventState] = {}
+        # Keyed by CAMERA: one open event per camera (see _EventState).
+        self._events: dict[str, _EventState] = {}
         # fid -> (expires_at, best frame) for events that already ended
         self._ended_frames: dict[str, tuple[float, np.ndarray]] = {}
         self._tasks: list[asyncio.Task] = []
@@ -929,93 +963,89 @@ class DetectionEngine:
                 o for label in self._face.labels for o in by_label.get(label, ())
             ]
             if faceable:
-                open_fid = ""
-                # The event fid for the label that actually opened one. A face
-                # seen on a car belongs to the car's event, not to a person
-                # event that may not exist.
-                for label in ("person", "car", "truck", "bus", "motorcycle"):
-                    st_lbl = self._events.get((camera, label))
-                    if st_lbl is not None:
-                        open_fid = st_lbl.fid
-                        break
-                await self._face.observe(cam, faceable, frame_bgr,
-                                         frame_time, open_fid)
+                # The camera's one open event, whatever it is named after.
+                open_ev = self._events.get(camera)
+                await self._face.observe(cam, faceable, frame_bgr, frame_time,
+                                         open_ev.fid if open_ev is not None else "")
 
         # --- plate reading pass ---
         # Fed the vehicle labels the camera is actually tracking. PlatePass
         # picks its own out of the set and throttles per track, so handing it
         # the whole confirmed scene costs nothing when there is no vehicle.
         if self._plates is not None and confirmed:
-            vehicle_fid = ""
-            for label in ("car", "truck", "bus"):
-                st_v = self._events.get((camera, label))
-                if st_v is not None:
-                    vehicle_fid = st_v.fid
-                    break
-            await self._plates.observe(cam, confirmed, frame_bgr, frame_time, vehicle_fid)
+            open_ev = self._events.get(camera)
+            await self._plates.observe(cam, confirmed, frame_bgr, frame_time,
+                                       open_ev.fid if open_ev is not None else "")
 
-        # The full confirmed set is the "scene" saved with whichever frame each
-        # label's event adopts as its best — every counted object, all labels.
-        for label, group in by_label.items():
-            await self._observe_label(
-                cam, label, group, frame_time, frame_bgr, scene,
-                zone_names, crossed_by_label.get(label, ()),
+        # The full confirmed set is the "scene" saved with the event's best
+        # frame — every counted object, all labels.
+        absence_timeout = self._absence_timeout()
+        if by_label:
+            crossed_all = [c for group in crossed_by_label.values() for c in group]
+            await self._observe_scene(
+                cam, by_label, frame_time, frame_bgr, scene, zone_names, crossed_all,
+                absence_timeout,
             )
 
-        # --- absence: end open events whose label went quiet ---
-        absence_timeout = self._absence_timeout()
-        for key, st in list(self._events.items()):
-            if key[0] != camera or st.label in by_label:
-                continue
-            if frame_time - st.last_seen >= absence_timeout:
-                await self._end_event(key)
+        # --- absence ---
+        # A type that has gone quiet leaves the event; the EVENT ends only when
+        # every type has — "keep it running until everything has left".
+        st = self._events.get(camera)
+        if st is not None:
+            if not by_label and frame_time - st.last_seen >= absence_timeout:
+                await self._end_event(camera)
+            elif not by_label:
+                await self._retire_labels(st, frame_time, absence_timeout)
 
-    async def _observe_label(
+    async def _observe_scene(
         self,
         cam: _CameraState,
-        label: str,
-        group: list[Observation],
+        by_label: dict[str, list[Observation]],
         frame_time: float,
         frame_bgr: Optional[np.ndarray],
         scene: Sequence[Observation],
-        zone_names: Optional[dict[int, list[str]]] = None,
-        crossed: Sequence["zonelib.Crossing"] = (),
+        zone_names: Optional[dict[int, list[str]]],
+        crossed: Sequence["zonelib.Crossing"],
+        absence_timeout: float,
     ) -> None:
+        """Open or extend the camera's one event with this frame's objects."""
         camera = cam.row["name"]
-        key = (camera, label)
-        best = max(group, key=lambda o: o.score)
-        count = len({o.tracker_id for o in group})
-        st = self._events.get(key)
+        group = [o for objs in by_label.values() for o in objs]
+        best = min(group, key=lambda o: (label_rank(o.label), -o.score))
+        st = self._events.get(camera)
 
         if st is None:
             st = _EventState(
                 fid=_make_fid(frame_time),
                 camera=camera,
-                label=label,
+                label=primary_label(list(by_label)),
                 start_time=frame_time,
                 record_enabled=bool(cam.row.get("record_enabled", True)),
                 last_seen=frame_time,
             )
-            self._events[key] = st
+            self._events[camera] = st
+            self._track_labels(st, by_label, frame_time)
             self._note_geometry(st, group, zone_names, crossed)
             self._adopt_best(cam, st, best, frame_time, frame_bgr, scene)
-            st.count = count
-            self._update_count(camera, label, count)
+            st.last_emit_present = tuple(sorted(st.label_counts))
             await self._emit("new", st, frame_time)
             return
 
         st.last_seen = frame_time
+        self._track_labels(st, by_label, frame_time)
+        self._drop_quiet_labels(st, frame_time, absence_timeout, keep=by_label)
         self._maybe_dwell(cam, st, frame_time)
         # Zones and crossings are recorded BEFORE the emit decision below, so a
         # crossing that happens on a quiet frame — no score improvement, no
         # count change — still reaches the event row on the next update.
         self._note_geometry(st, group, zone_names, crossed)
-        if best.score > st.best_score:
+        # A more important subject replaces the best frame outright; among
+        # equals, a higher score does. So a car's event that a person then
+        # walks into ends up with a snapshot of the person.
+        if (label_rank(best.label), -best.score) < (label_rank(st.best_label), -st.best_score):
             self._adopt_best(cam, st, best, frame_time, frame_bgr, scene)
-        count_changed = count != st.count
-        st.count = count
-        if count_changed:
-            self._update_count(camera, label, count)
+        count = st.count
+        present = tuple(sorted(st.label_counts))
 
         # The HEARTBEAT is held back while every subject of this event is
         # motionless: an event whose people are all standing still has nothing
@@ -1033,11 +1063,56 @@ class DetectionEngine:
         if (
             st.best_score - st.last_emit_score >= UPDATE_SCORE_DELTA
             or count != st.last_emit_count
+            or present != st.last_emit_present  # a type arrived or left
             or crossed  # a line crossing is the sharpest signal here — don't sit
                         # on it for up to a heartbeat before the row records it
             or heartbeat_due
         ):
             await self._emit("update", st, frame_time)
+
+    def _track_labels(
+        self, st: _EventState, by_label: dict[str, list[Observation]], frame_time: float
+    ) -> None:
+        """Fold this frame's objects into the event's per-type bookkeeping."""
+        for label, objs in by_label.items():
+            if label not in st.labels:
+                st.labels.append(label)
+            st.label_first_seen.setdefault(label, frame_time)
+            st.label_last_seen[label] = frame_time
+            n = len({o.tracker_id for o in objs})
+            if st.label_counts.get(label) != n:
+                st.label_counts[label] = n
+                self._update_count(st.camera, label, n)
+        st.label = primary_label(st.labels)
+        st.count = sum(st.label_counts.values())
+
+    def _drop_quiet_labels(
+        self, st: _EventState, frame_time: float, absence_timeout: float,
+        keep: Sequence[str] = (),
+    ) -> bool:
+        """Remove types unseen for the absence timeout. True if any left."""
+        gone = [
+            label for label in st.label_counts
+            if label not in keep
+            and frame_time - st.label_last_seen.get(label, frame_time) >= absence_timeout
+        ]
+        for label in gone:
+            del st.label_counts[label]
+            st.label_first_seen.pop(label, None)
+            self._update_count(st.camera, label, 0)
+        if gone:
+            st.count = sum(st.label_counts.values())
+        return bool(gone)
+
+    async def _retire_labels(
+        self, st: _EventState, frame_time: float, absence_timeout: float
+    ) -> None:
+        """On an empty frame: let types that have gone quiet leave the event,
+        and say so, while the event itself stays open for the rest."""
+        if self._drop_quiet_labels(st, frame_time, absence_timeout):
+            present = tuple(sorted(st.label_counts))
+            if present != st.last_emit_present:
+                await self._emit("update", st, frame_time)
 
     @staticmethod
     def _note_geometry(
@@ -1071,6 +1146,7 @@ class DetectionEngine:
         scene: Sequence[Observation],
     ) -> None:
         st.best_score = best.score
+        st.best_label = best.label
         st.best_box = best.box
         # Scene tracks the saved frame: refresh it alongside best_frame.
         st.best_scene = list(scene)
@@ -1084,14 +1160,16 @@ class DetectionEngine:
             st.best_frame = frame_bgr.copy()
             st.best_frame_time = frame_time
 
-    async def _end_event(self, key: tuple[str, str], end_time: Optional[float] = None) -> None:
-        st = self._events.pop(key, None)
+    async def _end_event(self, camera: str, end_time: Optional[float] = None) -> None:
+        st = self._events.pop(camera, None)
         if st is None:
             return
         st.last_seen = end_time if end_time is not None else st.last_seen
         if st.best_frame is not None:
             self._ended_frames[st.fid] = (time.monotonic() + ENDED_FRAME_KEEP_S, st.best_frame)
-        self._update_count(st.camera, st.label, 0)
+        for label in set(st.labels) | set(st.label_counts):
+            self._update_count(st.camera, label, 0)
+        st.label_counts.clear()
         await self._emit("end", st, st.last_seen)
         # has_clip is written to the row by the recorder ONLY after the clip
         # file is actually assembled (recorder.extract_clip); the engine never
@@ -1106,7 +1184,14 @@ class DetectionEngine:
         after: dict[str, Any] = {
             "id": st.fid,
             "camera": st.camera,
+            # The event's NAME: its most important type so far. May change
+            # mid-event (car -> person); the pipeline updates the row.
             "label": st.label,
+            # Every type seen during the event, and the ones in view right now.
+            # The pipeline drives the per-type Home Assistant sensors from
+            # `present_labels`, and alerts again when a new type joins.
+            "labels": list(st.labels),
+            "present_labels": sorted(st.label_counts),
             "top_score": st.best_score,
             "start_time": st.start_time,
             "snapshot": {
@@ -1167,6 +1252,7 @@ class DetectionEngine:
         st.last_emit_time = frame_time
         st.last_emit_score = st.best_score
         st.last_emit_count = st.count
+        st.last_emit_present = tuple(sorted(st.label_counts))
         if self._pipeline is None:  # not wired yet (boot ordering bug guard)
             log.warning("engine emit before pipeline wiring: %s %s", etype, st.fid)
             return
@@ -1282,28 +1368,40 @@ class DetectionEngine:
             return 0
 
     def _maybe_dwell(self, cam: _CameraState, st: _EventState, frame_time: float) -> None:
-        """Tell the pipeline once when this event has been open long enough.
+        """Tell the pipeline once when a type has been here long enough.
 
-        Measured from the EVENT's start rather than a track's: a subject whose
-        track is lost behind a pillar and re-acquired has not just arrived, and
-        restarting the clock there would let a loiterer avoid the alert by
-        standing where tracking is poor.
+        Measured from when that TYPE's continuous presence in the event began,
+        not from a track's start: a subject whose track is lost behind a pillar
+        and re-acquired has not just arrived, and restarting the clock there
+        would let a loiterer avoid the alert by standing where tracking is
+        poor. Not from the event's start either — the event is one per camera
+        now, and a person who walks up to a car that has been on the drive for
+        ten minutes has not been loitering for ten minutes.
 
         Best-effort and never raises — a loitering alert is an enhancement on
         top of detection and recording, and must not cost a frame.
         """
-        if st.dwell_alerted:
-            return
         threshold = self._dwell_seconds(cam)
-        if threshold <= 0 or frame_time - st.start_time < threshold:
+        if threshold <= 0:
             return
-        st.dwell_alerted = True
+        # The most important type that has stayed long enough and not yet been
+        # reported.
+        due = [
+            label for label in st.label_counts
+            if label not in st.dwell_alerted
+            and frame_time - st.label_first_seen.get(label, frame_time) >= threshold
+        ]
+        if not due:
+            return
+        label = primary_label(due)
+        stayed = frame_time - st.label_first_seen[label]
+        st.dwell_alerted.add(label)
         pipeline = self._pipeline
         note = getattr(pipeline, "note_dwell", None)
         if note is None:
             return
         try:
-            note(st.fid, st.label, int(frame_time - st.start_time))
+            note(st.fid, label, int(stayed))
         except Exception:
             log.exception("could not announce a dwell on %s", st.camera)
 
@@ -1354,12 +1452,12 @@ class DetectionEngine:
             try:
                 now = time.time()
                 absence_timeout = self._absence_timeout()
-                for key, st in list(self._events.items()):
-                    camera_gone = key[0] not in self._cameras or not bool(
-                        self._cameras[key[0]].row.get("detect_enabled", True)
+                for camera, st in list(self._events.items()):
+                    camera_gone = camera not in self._cameras or not bool(
+                        self._cameras[camera].row.get("detect_enabled", True)
                     )
                     if camera_gone or now - st.last_seen >= absence_timeout:
-                        await self._end_event(key)
+                        await self._end_event(camera)
                 mono = time.monotonic()
                 for fid, (expires, _) in list(self._ended_frames.items()):
                     if mono >= expires:
@@ -1368,6 +1466,15 @@ class DetectionEngine:
                 raise
             except Exception:  # noqa: BLE001
                 log.exception("engine housekeeping cycle failed")
+
+    def open_event(self, camera: str, label: Optional[str] = None) -> Optional[_EventState]:
+        """The camera's open event — and, given `label`, only if that type is
+        in view in it right now. For callers and tests that used to look an
+        event up by (camera, label)."""
+        st = self._events.get(camera)
+        if st is None or (label is not None and label not in st.label_counts):
+            return None
+        return st
 
     # ---------- media surface (consumed by NativeMediaProvider) ----------
 

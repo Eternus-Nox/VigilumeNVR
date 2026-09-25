@@ -57,8 +57,6 @@ struct CameraDetailView: View {
 
     // Recent events
     @State private var recentEvents: [Event] = []
-    /// Same one-row-per-moment switch as the Events tab (set there).
-    @AppStorage(EventGrouping.preferenceKey) private var groupEvents = true
 
     private var isOnline: Bool {
         session.cameraOnline[camera.name] ?? camera.online
@@ -709,23 +707,13 @@ struct CameraDetailView: View {
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 10) {
-                        ForEach(
-                            groupEvents
-                                ? EventGrouping.group(recentEvents)
-                                : recentEvents.map(EventGroup.init(single:))
-                        ) { group in
+                        ForEach(recentEvents) { event in
                             // Tap-through to the full event screen (clip
-                            // playback + the Save/Share card, and the other
-                            // detections from the same moment).
+                            // playback + the Save/Share card).
                             NavigationLink {
-                                EventDetailView(eventID: group.lead.id)
+                                EventDetailView(eventID: event.id)
                             } label: {
-                                RecentEventTile(
-                                    event: group.lead,
-                                    api: session.api,
-                                    groupLabels: group.events.count > 1 ? group.labels : nil,
-                                    groupCount: group.events.count
-                                )
+                                RecentEventTile(event: event, api: session.api)
                             }
                             .buttonStyle(.plain)
                         }
@@ -975,16 +963,6 @@ struct CameraDetailView: View {
 private struct RecentEventTile: View {
     let event: Event
     let api: APIClient?
-    /// Every label across the moment when the strip is grouping.
-    var groupLabels: [String]? = nil
-    /// How many events this tile stands for. 1 = an ordinary tile.
-    var groupCount: Int = 1
-
-    private var title: String {
-        (groupLabels ?? [event.label])
-            .map { $0.replacingOccurrences(of: "_", with: " ").capitalized }
-            .joined(separator: ", ")
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -1011,22 +989,13 @@ private struct RecentEventTile: View {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(Theme.border, lineWidth: 1)
             )
-            .overlay(alignment: .topTrailing) {
-                if groupCount > 1 {
-                    Text("\(groupCount)")
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(Theme.textPrimary)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Theme.bgDeep.opacity(0.85)))
-                        .overlay(Capsule().stroke(Theme.border, lineWidth: 1))
-                        .padding(4)
-                        .accessibilityLabel("\(groupCount) detections")
-                }
-            }
 
             HStack(spacing: 4) {
-                Text(title)
+                // Every type in the event: events are one per camera now, so
+                // a car and the person who got out of it are one tile.
+                Text(event.allLabels
+                        .map { $0.replacingOccurrences(of: "_", with: " ").capitalized }
+                        .joined(separator: ", "))
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(Theme.textPrimary)
                     .lineLimit(1)

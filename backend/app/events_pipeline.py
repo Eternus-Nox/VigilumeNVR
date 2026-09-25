@@ -21,6 +21,7 @@ from typing import Any, Optional, TYPE_CHECKING
 from . import annotate
 from .auth import AuthService
 from .db import Database
+from .event_labels import primary_label
 from .native.media import MediaProvider
 from .native.recognition import normalize_alert_mode
 from .notify.ntfy import NTFY_ICON_DEFAULT, NTFY_ICON_DOORBELL, ntfy_icon
@@ -302,8 +303,12 @@ class EventsPipeline:
         camera, label = after["camera"], after["label"]
         count = self.current_count(camera, label)
         # Multi-object: seed the running label set with the primary label plus
-        # every other class already present in the opening frame's scene.
-        labels = [label] + [l for l in _scene_labels(after) if l != label]
+        # every other class the engine has already seen or that is in the
+        # opening frame's scene. Events are one per camera, so this list is how
+        # "person + car" is one row.
+        labels = list(dict.fromkeys(
+            [label, *(after.get("labels") or []), *_scene_labels(after)]
+        ))
         if existing:
             event_id = int(existing["id"])
             # Merge into whatever the DB already has (restart-adopt path).
@@ -334,6 +339,15 @@ class EventsPipeline:
             "enriching": False,
             # Running set of all classes seen during this event (order-preserving).
             "labels": labels,
+            # The event's NAME as last written to the row. The engine renames
+            # an event when a more important type joins (car -> person).
+            "label": label,
+            # Types already alerted about (or deliberately suppressed). A type
+            # that joins an open event later — the person getting out of the
+            # car — is not in here, and gets its own alert.
+            "notified_labels": set(),
+            # Types whose Home Assistant sensor this event has turned ON.
+            "mqtt_on": set(),
             # Live recognitions from the face/plate passes, keyed by kind. These
             # arrive OUT OF BAND (note_recognition) rather than on the event
             # payload, because recognition finishes on its own schedule — a few
@@ -350,7 +364,7 @@ class EventsPipeline:
         row = await self._db.get_event(event_id)
         if row:
             await self._ws.broadcast({"type": "event_new", "event": row})
-        await self._publish_mqtt(after["camera"], after["label"], "new", row)
+        await self._publish_presence(self._active[fid], after, row, "new")
         self._spawn(self._enrich_and_notify(fid, after))
 
     async def _on_update(self, fid: str, after: dict[str, Any]) -> None:
@@ -374,13 +388,28 @@ class EventsPipeline:
         # Accumulate any newly-appearing classes into the event's label set.
         known: list[str] = state.get("labels") or [label]
         grew = False
-        for lbl in [label, *_scene_labels(after)]:
+        for lbl in [label, *(after.get("labels") or []), *_scene_labels(after)]:
             if lbl and lbl not in known:
                 known.append(lbl)
                 grew = True
         if grew:
             state["labels"] = known
             update_fields["labels"] = known
+        # The engine renames the event when a more important type joins it.
+        if label != state.get("label"):
+            state["label"] = label
+            update_fields["label"] = label
+        # A type worth an alert that has NOT been alerted about re-arms the
+        # notification: the event is one per camera, so "a person got out of
+        # the car" arrives as a type joining an open event rather than as a new
+        # event, and must still reach the phone. The recognition hold restarts
+        # for it, so a face has its usual chance to be named.
+        if grew and state["notified"]:
+            wanted = self._settings.notifications.get("labels") or []
+            notified = state.setdefault("notified_labels", set())
+            if any(l in wanted and l not in notified for l in known):
+                state["notified"] = False
+                state["opened_at"] = time.monotonic()
         # Track the best box alongside score (the engine adopts a new best box on
         # a higher score, so the stored box stays aligned with the snapshot the
         # operator sees when rejecting). Never overwrite a good box with None.
@@ -391,7 +420,7 @@ class EventsPipeline:
         row = await self._db.get_event(state["event_id"])
         if row:
             await self._ws.broadcast({"type": "event_update", "event": row})
-        await self._publish_mqtt(camera, label, "update", row)
+        await self._publish_presence(state, after, row, "update")
 
         snap_time = _snapshot_meta(after).get("frame_time")
         needs_snapshot = after.get("has_snapshot") and snap_time != state.get("snap_time")
@@ -421,7 +450,43 @@ class EventsPipeline:
         row = await self._db.get_event(event_id)
         if row:
             await self._ws.broadcast({"type": "event_end", "event": row})
-        await self._publish_mqtt(after.get("camera"), after.get("label"), "end", row)
+        await self._publish_presence(state, after, row, "end")
+
+    async def _publish_presence(
+        self,
+        state: Optional[dict[str, Any]],
+        after: dict[str, Any],
+        row: Optional[dict[str, Any]],
+        etype: str,
+    ) -> None:
+        """Drive the per-type Home Assistant sensors from what is in view.
+
+        The event is one per camera, but Home Assistant has one binary_sensor
+        per TYPE ("person on the driveway", "car on the driveway") and people
+        automate on them separately. So each type in the engine's
+        `present_labels` is ON, a type that has left while the event goes on is
+        turned OFF, and the end turns every one OFF. The event's own name is
+        published last so the last-event sensor reads as the event does.
+        """
+        camera = after.get("camera")
+        label = after.get("label")
+        if etype == "end":
+            present: set[str] = set()
+        else:
+            present = set(after.get("present_labels") or ([label] if label else []))
+        if state is not None:
+            was: set[str] = set(state.get("mqtt_on") or ())
+        else:
+            # Restart path: nothing remembered, so turn off everything the
+            # event could have turned on.
+            was = set(after.get("labels") or ([label] if label else []))
+        order = sorted(present, key=lambda l: (l == label, l))
+        for lbl in order:
+            await self._publish_mqtt(camera, lbl, "update" if lbl in was else "new", row)
+        for lbl in sorted(was - present):
+            await self._publish_mqtt(camera, lbl, "end", row)
+        if state is not None:
+            state["mqtt_on"] = present
 
     async def _publish_mqtt(
         self, camera: Optional[str], label: Optional[str], etype: str, row: Optional[dict[str, Any]]
@@ -588,12 +653,18 @@ class EventsPipeline:
         statement about the same subject ("still there"), not a repeat of the
         first one, so it deliberately bypasses both.
 
-        Once per event, enforced by the engine. Best-effort and never raises.
+        Once per TYPE per event, enforced by the engine: events are one per
+        camera, so the car that has been on the drive and the person who has
+        been standing beside it are two separate "still there"s. Best-effort
+        and never raises.
         """
         state = self._active.get(fid)
-        if state is None or state.get("dwell_notified"):
+        if state is None:
             return
-        state["dwell_notified"] = True
+        done: set[str] = state.setdefault("dwell_labels", set())
+        if label in done:
+            return
+        done.add(label)
         self._spawn(self._send_dwell(fid, label, seconds))
 
     async def _send_dwell(self, fid: str, label: str, seconds: int) -> None:
@@ -819,9 +890,18 @@ class EventsPipeline:
         ns = self._settings.notifications
         if not ns.get("enabled", True):
             return
-        camera, label = after["camera"], after["label"]
-        if label not in (ns.get("labels") or []):
+        camera = after["camera"]
+        # The types in this event worth an alert that have not had one yet.
+        # One event per camera: the first alert names the event; a type that
+        # joins later (a person getting out of the car) gets its own.
+        notified: set[str] = state.setdefault("notified_labels", set())
+        wanted = ns.get("labels") or []
+        fresh = [l for l in (state.get("labels") or [after["label"]])
+                 if l in wanted and l not in notified]
+        if not fresh:
             return
+        label = primary_label(fresh)
+        first_alert = not notified
         if self._score_of(after) < float(ns.get("min_score", 0.7)):
             return
         if not _crossing_gate_open(after):
@@ -833,30 +913,37 @@ class EventsPipeline:
             # cooldown check matters: a deferred notification must not burn the
             # cooldown that the real one will need.
             return
-        send_now, recognized_name = self._recognition_gate(after, state)
+        # Gated as the type being alerted about, not the event's name: a
+        # person joining a car's event should wait for a face, not a plate.
+        send_now, recognized_name = self._recognition_gate({**after, "label": label}, state)
         if not send_now:
             # DEFERRED (or suppressed — the gate sets `notified` itself in that
             # case). Returning BEFORE the cooldown check matters for the same
             # reason it does on the crossing gate: a held notification must not
             # burn the cooldown the real one will need.
+            if state["notified"]:
+                # Suppressed, not deferred: these types are settled.
+                notified.update(fresh)
             return
         if not self._cooldown_ok((camera, label), float(ns.get("cooldown_seconds", 60))):
             return
         state["notified"] = True
+        notified.update(fresh)
         self._mark_cooldown((camera, label))
 
         friendly = await self._friendly_name(camera)
-        count = state["max_count"]
+        count = max(1, self.counts.get((camera, label), 1)) if not first_alert else state["max_count"]
         # Multi-object: title/body list every detected class so the alert (and
         # its Apple Watch mirror) shows the full picture, not just the primary.
         # The primary label leads; the count applies to the primary label only.
-        labels: list[str] = state.get("labels") or [label]
+        labels: list[str] = (state.get("labels") or [label]) if first_alert else fresh
         if len(labels) > 1:
             phrase = _humanize_labels(labels)
-            title = f"{phrase} detected at {friendly}"
+            title = f"{phrase} {'detected' if first_alert else 'also detected'} at {friendly}"
             body = f"{phrase} in frame"
         else:
-            title = f"{label.replace('_', ' ').capitalize()} detected at {friendly}"
+            name = label.replace('_', ' ').capitalize()
+            title = f"{name} {'detected' if first_alert else 'also detected'} at {friendly}"
             body = f"{annotate.plural_label(label, count)} in frame"
         if recognized_name:
             # A name is the most useful thing an alert can carry, so it LEADS

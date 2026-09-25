@@ -6,12 +6,11 @@
   "scripts": {
     "dev": "vite",
     "prebuild": "node scripts/gen-icons.mjs",
-    "build": "node scripts/check-settings-index.mjs && node scripts/check-event-grouping.mjs && tsc --noEmit && vite build && node scripts/check-bundle-detect.mjs",
+    "build": "node scripts/check-settings-index.mjs && tsc --noEmit && vite build && node scripts/check-bundle-detect.mjs",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
     "check:settings": "node scripts/check-settings-index.mjs",
-    "check:bundle": "node scripts/check-bundle-detect.mjs",
-    "check:groups": "node scripts/check-event-grouping.mjs"
+    "check:bundle": "node scripts/check-bundle-detect.mjs"
   },
   "dependencies": {
     "hls.js": "^1.5.20",

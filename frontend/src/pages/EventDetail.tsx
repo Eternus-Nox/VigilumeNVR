@@ -7,8 +7,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { api, headlineRecognition, type NvrEvent, type NvrEventDetail } from '../lib/api';
-import { GROUP_WINDOW_S } from '../lib/groupEvents';
+import { api, headlineRecognition, type NvrEventDetail } from '../lib/api';
 import { downloadAttachment } from '../lib/download';
 import AuthImage from '../components/AuthImage';
 import RecognitionChip from '../components/RecognitionChip';
@@ -61,9 +60,6 @@ export default function EventDetail() {
   const [rejecting, setRejecting] = useState(false);
   const [stalled, setStalled] = useState(false);
   const [downloading, setDownloading] = useState<'clip' | 'snapshot' | null>(null);
-  // Other records from the same moment on this camera. The events grid shows
-  // one card per moment, so this is where the rest of them are reachable.
-  const [siblings, setSiblings] = useState<NvrEvent[]>([]);
   const attemptsRef = useRef(0);
 
   useEffect(() => {
@@ -111,38 +107,6 @@ export default function EventDetail() {
     }, delay);
     return () => clearTimeout(timer);
   }, [event, refreshEvent]);
-
-  // Keyed on the event's identity, not the object: the clip poll above replaces
-  // `event` every few seconds, and that should not refetch the siblings.
-  const eventId = event?.id;
-  const eventCamera = event?.camera;
-  const eventStart = event?.start_time;
-  useEffect(() => {
-    setSiblings([]);
-    if (eventId === undefined || eventCamera === undefined || eventStart === undefined) return;
-    let cancelled = false;
-    api
-      .events({
-        camera: eventCamera,
-        after: eventStart - GROUP_WINDOW_S,
-        before: eventStart + GROUP_WINDOW_S,
-        limit: 20,
-      })
-      .then((page) => {
-        if (cancelled) return;
-        setSiblings(
-          page.events
-            .filter((e) => String(e.id) !== String(eventId))
-            .sort((a, b) => a.start_time - b.start_time),
-        );
-      })
-      .catch(() => {
-        /* a convenience list — the event itself is already on screen */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [eventId, eventCamera, eventStart]);
 
   const doDelete = async () => {
     setDeleting(true);
@@ -340,40 +304,6 @@ export default function EventDetail() {
                 'track. The backend log has the detail.'}
           </p>
         </div>
-      )}
-
-      {siblings.length > 0 && (
-        <section className="event-siblings" aria-labelledby="event-siblings-title">
-          <h2 id="event-siblings-title" className="event-siblings-title">
-            Also detected at this moment
-          </h2>
-          <ul className="event-siblings-list">
-            {siblings.map((s) => {
-              const offset = Math.round(s.start_time - event.start_time);
-              const labels = (s.labels && s.labels.length > 0 ? s.labels : [s.label])
-                .map(titleCase)
-                .join(', ');
-              return (
-                <li key={String(s.id)}>
-                  <Link to={`/events/${s.id}`} className="event-sibling">
-                    <span>
-                      {labels}
-                      {s.count > 1 ? ` ×${s.count}` : ''}
-                    </span>
-                    <span className="muted small">
-                      {offset === 0 ? 'same time' : `${offset > 0 ? '+' : '−'}${Math.abs(offset)} s`}
-                    </span>
-                    {s.has_clip ? (
-                      <span className="event-sibling-media">clip</span>
-                    ) : s.has_snapshot ? (
-                      <span className="event-sibling-media event-sibling-media-dim">snapshot</span>
-                    ) : null}
-                  </Link>
-                </li>
-              );
-            })}
-          </ul>
-        </section>
       )}
 
       {clipReady && event.has_snapshot && (

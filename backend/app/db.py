@@ -1699,8 +1699,12 @@ class Database:
             where.append("camera = ?")
             params.append(camera)
         if label:
-            where.append("label = ?")
-            params.append(label)
+            # The event's name OR any type seen in it. Events are one per
+            # camera, so "car" must find the event named "person" that the
+            # car was also in. `labels` is stored as JSON text.
+            escaped = label.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            where.append("(label = ? OR labels LIKE ? ESCAPE '\\')")
+            params.extend([label, f'%"{escaped}"%'])
         if after is not None:
             where.append("start_time >= ?")
             params.append(after)

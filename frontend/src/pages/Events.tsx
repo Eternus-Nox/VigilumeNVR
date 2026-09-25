@@ -6,8 +6,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api, type NvrEvent } from '../lib/api';
 import EventCard from '../components/EventCard';
-import { groupEvents, groupKey } from '../lib/groupEvents';
-import { groupingEnabled, setGroupingEnabled } from '../lib/groupPref';
 import { useAppState } from '../state/AppState';
 import { localInputToEpochSeconds, titleCase } from '../lib/format';
 
@@ -24,8 +22,6 @@ export default function Events() {
   const beforeStr = params.get('before') ?? '';
 
   const [events, setEvents] = useState<NvrEvent[]>([]);
-  // Collapse near-simultaneous detections on one camera into a single row.
-  const [grouped, setGrouped] = useState<boolean>(groupingEnabled);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -142,20 +138,6 @@ export default function Events() {
             Clear
           </button>
         )}
-        {/* A person and the car they arrived in are two events on the server —
-            one per object type. Grouping is presentation only: nothing is
-            deleted, and the other records are listed on the event page. */}
-        <label className="checkbox events-group-toggle">
-          <input
-            type="checkbox"
-            checked={grouped}
-            onChange={(e) => {
-              setGrouped(e.target.checked);
-              setGroupingEnabled(e.target.checked);
-            }}
-          />
-          <span>Group detections at the same moment</span>
-        </label>
       </div>
 
       {error && (
@@ -174,20 +156,8 @@ export default function Events() {
         </div>
       ) : (
         <div className="event-grid">
-          {(grouped
-            ? groupEvents(events)
-            : events.map((e) => ({ lead: e, events: [e], labels: [] as string[] }))
-          ).map((group) => (
-            // ONE row per moment. The other detections in the group are not
-            // expanded inline — they are listed on the event's detail page,
-            // which is where someone who wants every record goes anyway, and
-            // keeping them out of the grid is the whole point of grouping.
-            <EventCard
-              key={groupKey(group)}
-              event={group.lead}
-              groupLabels={group.events.length > 1 ? group.labels : undefined}
-              groupCount={group.events.length}
-            />
+          {events.map((e) => (
+            <EventCard key={String(e.id)} event={e} />
           ))}
         </div>
       )}

@@ -258,7 +258,7 @@ async def _heartbeat_case() -> None:
     for i in range(4):  # >= MIN_HITS frames carrying tracker_id 5 -> confirmed
         obs = [Observation("person", 5, 0.9, _nudge(box, i))]
         await engine.process("cam", t0 + i * 0.2, obs, frame_bgr=None)
-    st = engine._events.get(("cam", "person"))
+    st = engine.open_event("cam", "person")
     check(st is not None, "a confirmed person track opened an event")
     check(pipeline.counts.get(("cam", "person")) == 1, "live count is 1 while the event is open")
 
@@ -288,9 +288,9 @@ async def _heartbeat_case() -> None:
 
         # Wait for the heartbeat to end the event by absence.
         deadline = time.monotonic() + 3.0
-        while ("cam", "person") in engine._events and time.monotonic() < deadline:
+        while engine.open_event("cam", "person") is not None and time.monotonic() < deadline:
             await asyncio.sleep(0.05)
-        check(("cam", "person") not in engine._events,
+        check(engine.open_event("cam", "person") is None,
               "heartbeat empty-observation ticks ended the open event by absence")
         check(pipeline.counts.get(("cam", "person")) == 0, "live count zeroed on the absence end")
         ended = [e for e in pipeline.events if e["type"] == "end"]

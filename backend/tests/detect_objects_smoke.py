@@ -238,11 +238,11 @@ async def _engine_cases() -> None:
         await engine.process("rec", t0 + i * 0.2, obs, frame_bgr=None)
         await engine.process("det", t0 + i * 0.2, obs, frame_bgr=None)
 
-    check(("rec", "person") not in engine._events,
+    check(engine.open_event("rec", "person") is None,
           "record-only camera opens NO event despite a confirmed person track")
     check(pipeline.counts.get(("rec", "person")) is None,
           "record-only camera never feeds a live count")
-    check(("det", "person") in engine._events,
+    check(engine.open_event("det", "person") is not None,
           "control camera with ['person'] still opens the event")
     check(pipeline.counts.get(("det", "person")) == 1,
           "control camera feeds the live count as before")

@@ -684,7 +684,7 @@ async def _pipeline_cases() -> None:
     check(len(tracker_ids) == 1, "ByteTrack keeps ONE track id across the moving frames")
 
     key = ("yard", "dog")
-    st = engine._events.get(key)
+    st = engine.open_event(*key)
     check(st is not None and st.fid.startswith("native."), "open event uses the native. id prefix")
     fid = st.fid
     check(st.best_score > 0.8 and st.best_frame is not None, "engine retained a best frame + score")
@@ -738,7 +738,7 @@ async def _pipeline_cases() -> None:
     gray = np.full((480, 704, 3), 114, dtype=np.uint8)
     last_seen = st.last_seen
     await engine.process("yard", t0 + 8 * 0.2 + 5.5, [], frame_bgr=gray)
-    check(key not in engine._events, "label absence past 5 s ends the event")
+    check(engine.open_event(*key) is None, "label absence past 5 s ends the event")
     row = await db.get_event(event_id)
     check(row is not None and abs(row["end_time"] - last_seen) < 1e-3,
           "end_time == last time the label was seen")

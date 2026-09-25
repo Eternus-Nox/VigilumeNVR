@@ -137,15 +137,32 @@ Pinned stack: `supervision>=0.29.1,<0.30` + `trackers==2.4.0` (`ByteTrackTracker
 instance **per camera**). Do NOT use `sv.ByteTrack` (removed in supervision 0.30) and do
 NOT bump `trackers` to 2.5.0 (broken/empty wheel on PyPI).
 
-Event state machine (per camera, per label — `backend/app/native/engine.py`):
+Event state machine (ONE event per camera — `backend/app/native/engine.py`):
 
 - A track **confirms** after 3 frames carrying its tracker_id; the first confirmed track
-  of a label opens an event (`type:"new"`).
-- One open event per `(camera, label)`; more simultaneous objects of that label raise
-  `count`, not extra events. `update` emits on best-score +0.02, active-count change, or
-  a 10 s heartbeat.
-- `end` after 5 s without the label; `end_time` = last time it was seen. The engine then
-  asks the recorder to cut a clip.
+  of ANY type opens the camera's event (`type:"new"`).
+- **One open event per camera.** It was one per `(camera, label)`, which made a person
+  and the car they arrived in two events a second apart. Now every type that appears
+  while the event is open joins it: the payload carries `labels` (every type seen, in
+  order) and `present_labels` (types in view now), and `label` is the event's NAME —
+  its most important type (`app/event_labels.py`: person, then vehicles, then animals,
+  then the rest), so a car's event becomes a "person" event when the driver gets out
+  and the pipeline renames the row. The best frame follows the same order (a more
+  important subject replaces it; among equals a higher score does), so that event's
+  snapshot shows the person.
+- `update` emits on best-score +0.02, a change in the number of objects, a type arriving
+  or leaving, or a 10 s heartbeat.
+- A type unseen for the absence timeout (default 5 s) leaves the event — its count goes
+  to 0 and its Home Assistant sensor turns off — while the event stays open for the
+  rest. **`end` only once NOTHING confirmed has been seen for the timeout**; `end_time`
+  = the last moment anything was. The engine then asks the recorder to cut a clip.
+- Notifications: the first alert names the event; a type on `notifications.labels`
+  that joins an already-alerted event (the person getting out of the car) gets its own
+  "… also detected at …" alert, with its own tag and cooldown, and restarts the
+  recognition hold so a face can be named. Loitering (`note_dwell`) is once per TYPE
+  per event, measured from when that type arrived.
+- `GET /api/events?label=car` matches events NAMED `car` or with `car` among their
+  `labels`. Events recorded before this change keep their one-type-per-row shape.
 - The engine synthesizes **Frigate-shaped** `{type: new|update|end, after: {...}}`
   payloads and calls the existing `EventsPipeline.handle_event()` **in-process**, and
   feeds the live in-frame count cache via `pipeline.update_count()` — so counts are
@@ -895,9 +912,10 @@ any event/count/notification.
 
 A detector has no notion of news: it answers "is there a car here?" on every
 frame, so a parked car is detected five times a second for as long as it is
-parked. Events are keyed `(camera, label)` and end only on ABSENCE, so that
+parked. Events end only on ABSENCE (they were keyed `(camera, label)` when this
+was written; they are one per camera now, which makes it matter more), so that
 parked car's event never ends, heartbeats an `update` every 10 s forever — and
-**while it is open no new `car` event can be.** A car pulling into the drive
+**while it is open no new event can be.** A car pulling into the drive
 arrives as a count change on a stale event rather than as a new event, which
 makes the arrival the least visible thing on the screen. That last one is a
 missed detection, not noise, and it is why this defaults on.
