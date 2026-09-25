@@ -484,9 +484,12 @@ async def _watcher_cases() -> None:
     state3 = AiCameraState()
     w3 = OnvifAiWatcher("skewed", "10.0.0.11", "u", "p", state3, handler)
 
+    skew_attempts: list[bool] = []
+
     def _clock_skewed(ip, port, u, pw, *, adjust_time=False):
+        skew_attempts.append(adjust_time)
         if not adjust_time:
-            raise RuntimeError("Device doesn`t support service: pullpoint")
+            raise RuntimeError("Unknown error: Wsse authorized time check failed.")
         return FakeOnvifCamera(FakePullPoint([]))
 
     ai_mod._build_onvif_camera = _clock_skewed  # type: ignore[assignment]
@@ -498,6 +501,14 @@ async def _watcher_cases() -> None:
         check(state3.ever_connected is True,
               "a clock-skewed camera CONNECTS on the adjust_time=True retry "
               "(the misleading 'doesn`t support pullpoint' case)")
+        skew_attempts.clear()
+        try:
+            await asyncio.wait_for(w3._connect_and_pull(), timeout=2.0)
+        except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+            pass
+        check(skew_attempts == [True],
+              "a RECONNECT goes straight to the camera's clock instead of failing "
+              f"and retrying every time (attempts: {skew_attempts})")
     finally:
         ai_mod._build_onvif_camera = real_build  # type: ignore[assignment]
 
@@ -924,16 +935,18 @@ async def _logging_case() -> None:
     import logging
 
     records: list[str] = []
+    levels: dict[str, int] = {}
 
     class _Capture(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
             records.append(record.getMessage())
+            levels[record.getMessage()] = record.levelno
 
     logger = logging.getLogger("app.amcrest.ai_events")
     handler = _Capture()
-    handler.setLevel(logging.INFO)
+    handler.setLevel(logging.DEBUG)
     prev_level = logger.level
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
     logger.addHandler(handler)
     try:
         listener = AiEventListener(_noop_event)
@@ -957,6 +970,11 @@ async def _logging_case() -> None:
           "raw logging: a recognized ONVIF notification is logged with the 'ai_event' prefix")
     check(any("HardwareFailure" in m and "[unmapped]" in m for m in ai_lines),
           "raw logging: an UNRECOGNIZED ONVIF topic is logged too (tagged [unmapped])")
+    check(all(levels[m] == logging.DEBUG for m in ai_lines if "[unmapped]" in m),
+          "...at DEBUG: every camera replays its property states on subscribe, "
+          "and at INFO they read like errors")
+    check(all(levels[m] == logging.INFO for m in ai_lines if "[unmapped]" not in m),
+          "while a real motion event stays at INFO")
 
 
 def config_checks() -> None:

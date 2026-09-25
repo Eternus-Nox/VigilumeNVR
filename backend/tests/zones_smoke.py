@@ -579,7 +579,44 @@ async def _migration_case() -> None:
         await db.close()
 
 
+def drop_log_checks() -> None:
+    """A car parked in an ignore zone used to write an INFO line per frame,
+    forever. Now: one line when the zone first hides something, then a count
+    once a minute."""
+    import logging
+    import app.native.engine as eng_mod
+    from app.native.engine import _CameraState
+
+    lines: list[str] = []
+
+    class Cap(logging.Handler):
+        def emit(self, record):
+            if record.levelno >= logging.INFO:
+                lines.append(record.getMessage())
+
+    logger = logging.getLogger("app.native.engine")
+    h = Cap()
+    logger.addHandler(h)
+    prev = logger.level
+    logger.setLevel(logging.INFO)
+    old_window = eng_mod._DROP_LOG_WINDOW_S
+    try:
+        cam = _CameraState(row={"name": "drive"})
+        for _ in range(500):
+            DetectionEngine._note_drop(cam, "drive", "ignore zone 'Zone 1'")
+        check(len(lines) == 1, f"500 masked detections in a burst log ONE line, not 500 (got {len(lines)})")
+        eng_mod._DROP_LOG_WINDOW_S = 0.0
+        DetectionEngine._note_drop(cam, "drive", "ignore zone 'Zone 1'")
+        check(len(lines) == 2 and "hid 500 detection" in lines[-1],
+              f"and the next summary reports how many it hid ({lines[-1] if lines else ''!r})")
+    finally:
+        eng_mod._DROP_LOG_WINDOW_S = old_window
+        logger.removeHandler(h)
+        logger.setLevel(prev)
+
+
 def main() -> None:
+    drop_log_checks()
     geometry_checks()
     scaling_checks()
     masking_predicate_checks()

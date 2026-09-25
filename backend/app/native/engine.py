@@ -76,6 +76,7 @@ UPDATE_HEARTBEAT_S = 10.0    # max seconds between "update" emits while open
 ENDED_FRAME_KEEP_S = 60.0    # keep an ended event's best frame for late enrichment
 _TRACK_FORGET_S = 60.0       # drop hit-counters for tracker_ids unseen this long
 _HOUSEKEEPING_S = 2.0
+_DROP_LOG_WINDOW_S = 60.0    # at most one "zone hid N detections" line per minute
 _JPEG_QUALITY = 80
 # Reject-suppression match radius as a fraction of detect_width (pixels). A
 # stationary phantom re-fires within a few→~20 px of tracker/box wobble; ~6% of
@@ -413,6 +414,9 @@ class _CameraState:
     exempt_names: list[str] = field(default_factory=list)
     # Running count of detections dropped by exempt-zone masking (debug/status).
     masked_dropped: int = 0
+    #: Per-reason drops not yet summarized in the log: key -> (window start
+    #: monotonic, count). See DetectionEngine._note_drop.
+    drop_log: dict[str, tuple[float, int]] = field(default_factory=dict)
     # Detect-space INCLUDE zones (native.zones), precomputed on every row change.
     # Empty => the whole frame is watched, exactly as before this existed. Any
     # entry flips the camera to allow-list mode: an object whose foot-center is
@@ -801,10 +805,16 @@ class DetectionEngine:
                 cam.masked_dropped += 1
                 fx, fy = box_foot_center(o.box)
                 zone_name = cam.exempt_names[zi] if zi < len(cam.exempt_names) else f"zone#{zi}"
-                log.info(
+                # Per detection at DEBUG only. At INFO this was one line per
+                # masked object per frame — a car parked in an ignore zone
+                # wrote three lines a second, forever, and buried everything
+                # else in the log. A once-a-minute summary still proves the
+                # zone is doing its job.
+                log.debug(
                     "masked %s at foot=(%.0f,%.0f) by exempt zone %s on %s",
                     o.label, fx, fy, zone_name, camera,
                 )
+                self._note_drop(cam, camera, f"ignore zone {zone_name!r}")
             obs = kept
 
         # --- reject-suppression masking ---
@@ -823,10 +833,11 @@ class DetectionEngine:
                     for (lbl, sx, sy) in cam.suppress_samples
                 ):
                     cam.suppress_dropped += 1
-                    log.info(
+                    log.debug(
                         "suppressed %s at foot=(%.0f,%.0f) near reject sample on %s",
                         o.label, fx, fy, camera,
                     )
+                    self._note_drop(cam, camera, "excluded objects (\"Not a …\")")
                 else:
                     kept_s.append(o)
             obs = kept_s
@@ -1466,6 +1477,29 @@ class DetectionEngine:
                 raise
             except Exception:  # noqa: BLE001
                 log.exception("engine housekeeping cycle failed")
+
+    @staticmethod
+    def _note_drop(cam: _CameraState, camera: str, reason: str) -> None:
+        """Count a dropped detection and log at most one summary a minute.
+
+        The first drop for a reason logs at once (so a newly drawn zone is seen
+        working immediately); after that, drops are counted and summarized once
+        per `_DROP_LOG_WINDOW_S`.
+        """
+        now = time.monotonic()
+        started, n = cam.drop_log.get(reason, (0.0, 0))
+        if started == 0.0:
+            cam.drop_log[reason] = (now, 0)
+            log.info("%s on %s is hiding detections (summarized once a minute from now)",
+                     reason, camera)
+            return
+        n += 1
+        if now - started >= _DROP_LOG_WINDOW_S:
+            log.info("%s on %s hid %d detection(s) in the last %.0f s",
+                     reason, camera, n, now - started)
+            cam.drop_log[reason] = (now, 0)
+        else:
+            cam.drop_log[reason] = (started, n)
 
     def open_event(self, camera: str, label: Optional[str] = None) -> Optional[_EventState]:
         """The camera's open event — and, given `label`, only if that type is

@@ -169,6 +169,12 @@ def event_labels(code: str, data: Any) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+def _short_error(exc: BaseException) -> str:
+    """The useful part of an onvif-zeep error, e.g. 'Wsse authorized time check failed.'"""
+    text = str(exc) or type(exc).__name__
+    return text.removeprefix("Unknown error: ").strip()[:160]
+
+
 def _local_name(tag: Any) -> str:
     """Local element name from a possibly namespaced lxml tag (``{ns}Name``).
     Non-string tags (comments/PIs) return ''."""
@@ -464,6 +470,10 @@ class OnvifAiWatcher:
         self._state = state
         self._on_notification = on_notification
         self._task: Optional[asyncio.Task] = None
+        # Learned once and kept: a camera that needed its own clock on the
+        # last connect needs it on every reconnect, so later reconnects go
+        # straight there instead of failing, logging and retrying each time.
+        self._adjust_time = False
 
     def start(self) -> None:
         if self._task is None or self._task.done():
@@ -518,14 +528,24 @@ class OnvifAiWatcher:
         # alone breaks fleet-wide.
         try:
             cam = await asyncio.to_thread(
-                _build_onvif_camera, self._ip, ONVIF_PORT, self._username, self._password
+                functools.partial(
+                    _build_onvif_camera,
+                    self._ip, ONVIF_PORT, self._username, self._password,
+                    adjust_time=self._adjust_time,
+                )
             )
-        except Exception:  # noqa: BLE001 — retry once with the device's own clock
+        except Exception as exc:  # noqa: BLE001 — retry once with the device's own clock
+            if self._adjust_time:
+                raise
+            # One line, not a traceback: this is the EXPECTED failure on a
+            # camera whose clock or timezone index disagrees with ours, and the
+            # retry below fixes it. The traceback is kept at DEBUG.
             log.info(
-                "ai-events %s: ONVIF connect failed; retrying with adjust_time=True "
-                "(device clock/timezone suspected)",
-                self.name, exc_info=True,
+                "ai-events %s: camera refused our ONVIF timestamp (%s); using the "
+                "camera's own clock from now on",
+                self.name, _short_error(exc),
             )
+            log.debug("ai-events %s: first ONVIF connect failure", self.name, exc_info=True)
             cam = await asyncio.to_thread(
                 functools.partial(
                     _build_onvif_camera,
@@ -533,6 +553,7 @@ class OnvifAiWatcher:
                     adjust_time=True,
                 )
             )
+            self._adjust_time = True
         pp = await asyncio.to_thread(self._subscribe, cam)
         self._state.connected = True
         self._state.ever_connected = True
@@ -744,10 +765,16 @@ class AiEventListener:
         # Topics this listener does not treat as a fire are logged too, tagged
         # "[unmapped]", so the operator can see exactly what topics the real
         # cameras emit and extend _FIRE_TOPIC_HINTS if needed.
-        log.info(
+        # Unmapped lines at DEBUG: on subscribe every camera replays its
+        # current property states (State, Value, Status timestamps …), which
+        # read like errors at INFO and are not events. `topic=-` means the
+        # camera did not send one — normal on Amcrest firmware (see
+        # _extract_topic); motion is recognized by its IsMotion item instead.
+        log.log(
+            logging.INFO if action else logging.DEBUG,
             "ai_event %s: topic=%s%s%s",
             name,
-            topic or "?",
+            topic or "-",
             _summarize_items(items),
             "" if action else " [unmapped]",
         )
