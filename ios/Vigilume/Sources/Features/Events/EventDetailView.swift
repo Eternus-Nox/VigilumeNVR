@@ -27,6 +27,9 @@ struct EventDetailView: View {
     @State private var rejecting = false
     /// Presents the event clip full-screen (landscape, tap to dismiss).
     @State private var showClipFullScreen = false
+    /// Other records from the same moment on this camera. The Events list shows
+    /// one row per moment, so this is where the rest of them are reachable.
+    @State private var siblings: [Event] = []
 
     /// ONE alert modifier, switched by this.
     ///
@@ -66,6 +69,7 @@ struct EventDetailView: View {
                 if let detail {
                     media(for: detail)
                     clipStatus(for: detail)
+                    siblingsCard(for: detail)
                     saveCard(for: detail)
                     metadata(for: detail)
                     rejectCard(for: detail)
@@ -322,6 +326,83 @@ struct EventDetailView: View {
         }
     }
 
+    // MARK: Same moment
+
+    /// The other events on this camera within the grouping window — the person
+    /// when this is the car, the car when this is the person. Hidden when there
+    /// are none, which is the usual case.
+    @ViewBuilder
+    private func siblingsCard(for detail: EventDetail) -> some View {
+        if !siblings.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Also detected at this moment", systemImage: "rectangle.stack")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.textPrimary)
+                ForEach(siblings) { sibling in
+                    // Destination-based rather than value-based: this screen is
+                    // pushed from the camera screen too, whose stack has no
+                    // destination registered for an event id.
+                    NavigationLink {
+                        EventDetailView(eventID: sibling.id)
+                    } label: {
+                        siblingRow(sibling, relativeTo: detail.startTime)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
+            .background(Theme.cardBackground())
+        }
+    }
+
+    private func siblingRow(_ sibling: Event, relativeTo start: Double) -> some View {
+        let offset = Int((sibling.startTime - start).rounded())
+        let when = offset == 0 ? "same time" : offset > 0 ? "+\(offset) s" : "−\(-offset) s"
+        let labels = sibling.allLabels.map(\.capitalized).joined(separator: ", ")
+        return HStack(spacing: 8) {
+            Circle()
+                .fill(EventLabelStyle.color(for: sibling.label))
+                .frame(width: 8, height: 8)
+            Text(sibling.count > 1 ? "\(labels) ×\(sibling.count)" : labels)
+                .font(.subheadline)
+                .foregroundStyle(Theme.textPrimary)
+                .lineLimit(1)
+            Text(when)
+                .font(.caption)
+                .foregroundStyle(Theme.textSecondary)
+            Spacer(minLength: 0)
+            if sibling.hasClip {
+                Text("clip")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(Theme.accent)
+            } else if sibling.hasSnapshot {
+                Text("snapshot")
+                    .font(.caption2)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+            Image(systemName: "chevron.right")
+                .font(.caption2)
+                .foregroundStyle(Theme.textSecondary)
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+    }
+
+    /// Best effort: the event itself is already on screen, so a failure here
+    /// just leaves the card hidden.
+    private func loadSiblings(for loaded: EventDetail, api: APIClient) async {
+        guard let page = try? await api.events(
+            camera: loaded.camera,
+            after: loaded.startTime - EventGrouping.windowSeconds,
+            before: loaded.startTime + EventGrouping.windowSeconds,
+            limit: 20
+        ) else { return }
+        siblings = page.events
+            .filter { $0.id != loaded.id }
+            .sorted { $0.startTime < $1.startTime }
+    }
+
     // MARK: Save (single action — the event CLIP to Photos, nothing else)
 
     /// One clear action: download the ready clip (mp4) and add it to the photo
@@ -470,6 +551,7 @@ struct EventDetailView: View {
         do {
             let loaded = try await api.event(id: eventID)
             apply(loaded, api: api)
+            await loadSiblings(for: loaded, api: api)
             if loaded.clipState == .processing {
                 await pollWhileProcessing()
             }

@@ -25,6 +25,9 @@ struct EventsView: View {
     @State private var errorMessage: String?
     @State private var requestSeq = 0
     @State private var path = NavigationPath()
+    /// Collapse near-simultaneous detections on one camera into one row. On by
+    /// default; the camera screen's recent strip follows the same switch.
+    @AppStorage(EventGrouping.preferenceKey) private var grouped = true
 
     private static let pageSize = 50
     private static let defaultLabels = ["person", "dog", "cat", "car"]
@@ -37,6 +40,19 @@ struct EventsView: View {
             }
             .background(Theme.bg)
             .navigationTitle("Events")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    // A person and the car they arrived in are two events on
+                    // the server. Grouping only changes the list; the other
+                    // records are listed on the event screen.
+                    Menu {
+                        Toggle("Group detections at the same moment", isOn: $grouped)
+                    } label: {
+                        Image(systemName: grouped ? "rectangle.stack.fill" : "rectangle.stack")
+                    }
+                    .accessibilityLabel("List options")
+                }
+            }
             .navigationDestination(for: Int.self) { id in
                 EventDetailView(eventID: id)
             }
@@ -246,14 +262,25 @@ struct EventsView: View {
             )
             .frame(maxHeight: .infinity)
         } else {
+            let rows = grouped ? EventGrouping.group(events) : events.map(EventGroup.init(single:))
             List {
-                ForEach(events) { event in
-                    NavigationLink(value: event.id) {
-                        EventRowView(event: event, cameraName: friendlyName(for: event.camera))
+                // ONE row per moment. The other detections in a group are not
+                // expanded here — they are listed on the event screen.
+                ForEach(rows) { group in
+                    NavigationLink(value: group.lead.id) {
+                        EventRowView(
+                            event: group.lead,
+                            cameraName: friendlyName(for: group.lead.camera),
+                            groupLabels: group.events.count > 1 ? group.labels : nil,
+                            groupCount: group.events.count
+                        )
                     }
                     .listRowBackground(Theme.surface)
                     .onAppear {
-                        if event.id == events.last?.id {
+                        // The last row may stand for several events; page on
+                        // when it holds the last one loaded.
+                        if let lastID = events.last?.id,
+                           group.events.contains(where: { $0.id == lastID }) {
                             Task { await loadMore() }
                         }
                     }
@@ -380,6 +407,11 @@ private struct EventRowView: View {
     @EnvironmentObject private var session: SessionModel
     let event: Event
     let cameraName: String
+    /// Every label across the MOMENT this row stands for, when grouping. The row
+    /// has to name them all or it would quietly misstate what was detected.
+    var groupLabels: [String]? = nil
+    /// How many events this row stands for. 1 = an ordinary row.
+    var groupCount: Int = 1
 
     var body: some View {
         HStack(spacing: 12) {
@@ -388,7 +420,7 @@ private struct EventRowView: View {
                 HStack(spacing: 8) {
                     // All detected classes (multi-object): a colored dot + name
                     // per label, so "person + car" shows both, not just one.
-                    ForEach(event.allLabels, id: \.self) { name in
+                    ForEach(groupLabels ?? event.allLabels, id: \.self) { name in
                         HStack(spacing: 4) {
                             Circle()
                                 .fill(EventLabelStyle.color(for: name))
@@ -413,9 +445,23 @@ private struct EventRowView: View {
                 if let recognition = event.headlineRecognition {
                     RecognitionBadge(recognition: recognition, compact: true)
                 }
-                Text(cameraName)
-                    .font(.caption)
-                    .foregroundStyle(Theme.textSecondary)
+                HStack(spacing: 6) {
+                    Text(cameraName)
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                    // Says the row stands for more than one record, so nobody
+                    // thinks something was lost. The rest are on the event screen.
+                    if groupCount > 1 {
+                        Text("\(groupCount) detections")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(Theme.textPrimary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Theme.surfaceAlt))
+                            .overlay(Capsule().stroke(Theme.border, lineWidth: 1))
+                            .accessibilityLabel("\(groupCount) separate detections within a few seconds")
+                    }
+                }
                 Text(Date(timeIntervalSince1970: event.startTime)
                         .formatted(date: .abbreviated, time: .shortened))
                     .font(.caption2)

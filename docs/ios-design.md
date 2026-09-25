@@ -580,7 +580,15 @@ connection to a private self-hosted server" (accepted category).
   matrix), plus all `/api/settings`, `/api/users`, `/api/detection/*` —
   viewers get 403; hide those affordances by `role`.
 - **Events list:** `GET /api/events?camera=&label=&after=&before=&limit=&offset=` →
-  `{events, total}`; snapshots/clips via `?token=` URLs (§2.4).
+  `{events, total}`; snapshots/clips via `?token=` URLs (§2.4). The list and
+  the camera screen's recent strip show ONE row per moment: events on the same
+  camera starting within 10 s of the group's first event collapse into a row
+  naming every label, with an "N detections" badge, led by the member with a
+  clip (else a snapshot, else the newest). The event screen lists the others
+  under "Also detected at this moment" (same `GET /api/events` with
+  `camera` and `after`/`before` = start ± 10 s). Client-side only, switched
+  by the Events tab's toolbar menu (`vigilume.groupEvents` in UserDefaults,
+  on by default). Same rules as the web's `frontend/src/lib/groupEvents.ts`.
 - **Groups:** full CRUD allowed for both roles (shared across users).
 - **Snapshot polling for tiles (fallback/low-power):**
   `GET /api/cameras/{name}/snapshot.jpg` (Bearer or `?token=`).
