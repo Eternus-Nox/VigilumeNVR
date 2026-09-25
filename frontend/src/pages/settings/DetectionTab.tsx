@@ -105,6 +105,7 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
     pass_interval_seconds: 0.6,
     face_on_vehicles: false,
     identify_quality: 0.45,
+    plate_hires: true,
     ...(savedRecognition ?? {}),
     ...(pending.recognition ?? {}),
   });
@@ -132,7 +133,7 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
   // Guarded: on a backend without the block the saved value is `undefined`, and
   // adopting that would blank the draft this form is bound to.
   useAdoptSaved(savedRecognition, (v) => {
-    if (v) setRecognition(v);
+    if (v) setRecognition({ ...v, plate_hires: v.plate_hires ?? true });
   });
 
   // Per-camera stationary overrides. NOT part of the draft: these are
@@ -616,6 +617,25 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
                   The driver through the windscreen. Off by default: on a road-facing
                   camera most windscreens are glare, and a plate identifies a car better
                   than a face does. It earns its keep on a driveway or at a gate.
+                </span>
+                <label className="row-label">
+                  <input
+                    type="checkbox"
+                    checked={recognition.plate_hires ?? true}
+                    onChange={(e) =>
+                      setRecognition({ ...recognition, plate_hires: e.target.checked })
+                    }
+                  />
+                  Read plates from full-resolution snapshots
+                </label>
+                <span className="control-hint">
+                  Detection watches a small copy of each camera (about 704&times;480), where
+                  a plate is usually too few pixels wide to read unless the car is right
+                  at the lens. With this on, a vehicle being tracked also gets a
+                  full-resolution snapshot from the camera about once a second, and the
+                  plate is read from that. Only cameras with plate reading on are asked,
+                  only while a vehicle is there, and it stops once the plate is read.
+                  Needs an Amcrest or Dahua camera.
                 </span>
                 <label>
                   Crop quality needed to identify: {Math.round(recognition.identify_quality * 100)}%

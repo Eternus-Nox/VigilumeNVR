@@ -96,7 +96,9 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
     tab: 'detection', card: 'Faces & plates', admin: true,
     label: 'How hard recognition looks (tuning)',
     terms: ['recognition', 'face tuning', 'shots per track', 'quality',
-            'plate tuning', 'retention', 'unknown faces', 'aggressive'],
+            'plate tuning', 'retention', 'unknown faces', 'aggressive',
+            'full resolution', 'snapshot', 'plates not reading',
+            'licence plate not working', 'license plate not working'],
   },
 
   // ---- Recording -------------------------------------------------------
@@ -130,6 +132,13 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
             'mute', 'silence', 'stop notifying me about me', 'watchlist',
             'always alert', 'my own door', 'household', 'family',
             'notify for one person'],
+  },
+  {
+    tab: 'faces', card: 'Plate reading by camera', admin: true,
+    label: 'Why plates are or are not being read',
+    terms: ['plate', 'licence plate', 'license plate', 'not reading', 'not working',
+            'no plates', 'anpr', 'lpr', 'plate diagnostics', 'too small',
+            'snapshot', 'full resolution'],
   },
   {
     tab: 'faces', card: 'Which cameras', admin: true,

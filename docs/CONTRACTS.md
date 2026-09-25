@@ -1394,6 +1394,46 @@ how `face_on_vehicles` is verified rather than assumed — see below.
 pass would accept a car and no car was ever offered. The filter lives in ONE
 place — `FacePass.labels`, driven by the setting — and the engine asks.
 
+#### Plates: full-resolution snapshots (`recognition.plate_hires`)
+
+The plate pass used to read only the DETECT frame — the substream scaled to
+704x480. A plate there is usually 35-55 px wide and the plate scorer reads
+nothing under 64 (`PLATE_MIN_PX`), so plates were read only with a car almost
+at the lens. Faces survived the same frame because a face near the camera is
+larger than a plate is.
+
+With `recognition.plate_hires` (bool, default **true**), a tracked vehicle on a
+camera with plate reading on also triggers a full-resolution look
+(`native/platesnap.py`): the camera's own `snapshot.cgi` (Amcrest/Dahua), the
+vehicle found in it by template matching against the detect-frame crop (the
+snapshot arrives a few hundred ms late and the car has moved), and the plate
+cut from the real pixels. Bounded: at most one look per vehicle per second,
+at most 8 per vehicle, none once the vote is settled (≥3 reads at ≥0.9), one
+snapshot shared by every vehicle on the camera, and a camera that fails 3
+times in a row is left alone for 5 minutes. It runs as a background task: the
+detection loop never waits on a camera, and a track that ends mid-look votes
+up to 3 s later instead of stalling the frame. The switch is read live.
+
+Two scorer/localizer fixes ship with it, because full-resolution crops exposed
+both: the localizer works at fixed widths (480 and 560 px, unioned) since its
+kernels are fixed-pixel, and `PLATE_ASPECT_MAX` is 5.0 (was 4.0) because the
+localizer's reconstructed strip for a square-on US plate lands at 3-4.2:1 and
+the veto was discarding reads the OCR had made with full confidence.
+
+`GET /api/recognition/status` → `plates` gains:
+
+- `hires` — whether full-resolution looks are on;
+- `cameras.{name}` — stage counters since boot: `passes`, `regions`,
+  `too_small`, `reads`, `rejected_reads`, `hires_requested`, `hires_frames`,
+  `hires_lost` (vehicle not found again in the snapshot), `hires_reads`,
+  `votes_stored`, `votes_discarded`, `last_plate`, `last_plate_at`,
+  `median_strip_px` (detect-frame strips). The first counter that stays at 0
+  while the one before it climbs is where plates are being lost;
+- `snapshots.{name}` — `{ok, failed, last_error, resolution, latency_ms,
+  backing_off_s, no_gain}`. `no_gain` is set when the camera's snapshot is no
+  larger than the detect frame; it is not asked again and the text says which
+  camera setting to raise.
+
 #### Recognition on events and alerts
 
 `GET /api/events` and `GET /api/events/{id}` carry `recognitions[]`:

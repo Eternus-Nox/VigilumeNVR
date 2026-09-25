@@ -732,6 +732,52 @@ export interface RecognitionStatus {
     drops?: Record<string, number>;
     tuning?: Record<string, number>;
   };
+  /**
+   * The plate pass's own accounting, per camera since boot. Each counter is a
+   * stage a plate has to get through; the first that stays at 0 while the one
+   * before it climbs is where plates are being lost. Absent on an older
+   * backend.
+   */
+  plates?: {
+    live_tracks?: number;
+    ready?: boolean;
+    vehicles?: number;
+    /** Whether full-resolution snapshot looks are on. */
+    hires?: boolean;
+    cameras?: Record<string, PlateCameraStats>;
+    snapshots?: Record<string, PlateSnapshotHealth>;
+  } | null;
+}
+
+export interface PlateCameraStats {
+  passes: number;
+  regions: number;
+  too_small: number;
+  reads: number;
+  rejected_reads: number;
+  hires_requested: number;
+  hires_frames: number;
+  /** The vehicle could not be found again in the snapshot (it had moved on). */
+  hires_lost: number;
+  hires_reads: number;
+  votes_stored: number;
+  votes_discarded: number;
+  last_plate: string;
+  last_plate_at: number;
+  /** Median width of plate-shaped strips on the DETECT frame; 64 is the floor. */
+  median_strip_px: number;
+}
+
+export interface PlateSnapshotHealth {
+  ok: number;
+  failed: number;
+  last_error: string;
+  /** What the camera actually serves, e.g. "2304x1296". */
+  resolution: string;
+  latency_ms: number;
+  backing_off_s: number;
+  /** Set when the snapshot is no larger than detection — a camera setting to raise. */
+  no_gain: string;
 }
 
 export interface NvrEvent {
@@ -928,6 +974,13 @@ export interface AppSettings {
     face_on_vehicles: boolean;
     /** Crop quality required before an embedding is computed. Lower is riskier. */
     identify_quality: number;
+    /**
+     * Read plates from a full-resolution camera snapshot as well as the detect
+     * stream. The detect stream is ~704x480, where a plate is usually too small
+     * to read; while a vehicle is tracked this asks the camera for about one
+     * snapshot a second. Optional: absent on a backend predating it.
+     */
+    plate_hires?: boolean;
   };
   detection: {
     model: DetectionModel;

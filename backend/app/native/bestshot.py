@@ -182,9 +182,17 @@ PLATE_MIN_PX = 64
 #: camera legitimately squeezes that, so the acceptable band is wide; outside
 #: it the "plate" is either not a plate or is being read at an angle no OCR
 #: will survive.
+#:
+#: The upper edge was 4.0 and is 5.0. What this scores is not the plate but
+#: the localizer's RECONSTRUCTION of it: the text row (5-7:1 on a US plate,
+#: see plates.py) grown by the character-height fraction, which lands at
+#: 3-4.2:1 for a plate seen square on. A camera mounted above a driveway
+#: foreshortens the plate vertically on top of that. At 4.0 the veto was
+#: throwing away strips the OCR had read with full confidence — on 144
+#: synthetic plates it rejected 34 correct reads, most of them at 4.0-4.4:1.
 PLATE_ASPECT_IDEAL = 2.0
 PLATE_ASPECT_MIN = 1.3
-PLATE_ASPECT_MAX = 4.0
+PLATE_ASPECT_MAX = 5.0
 
 #: Variance-of-Laplacian reference. The sharpness term is a saturating curve
 #: rather than a threshold, so there is no cliff: `1 - exp(-var/REF)` reaches

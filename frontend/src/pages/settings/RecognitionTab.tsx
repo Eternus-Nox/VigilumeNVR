@@ -42,6 +42,7 @@ import CandidateReview from '../../components/CandidateReview';
 import { ConfirmDialog } from '../../components/Modal';
 import { useAppState } from '../../state/AppState';
 import { formatDateTime, titleCase } from '../../lib/format';
+import PlateDiagnostics from './PlateDiagnostics';
 
 /** A profile kind and the candidate kind you enroll into it, in one place. */
 const CANDIDATE_OF: Record<ProfileKind, CandidateKind> = {
@@ -436,7 +437,7 @@ export default function RecognitionTab() {
           daylight and at night, rather than five frames of one moment.
         </p>
         <p className="muted small">
-          Recognition itself is switched on under <strong>Recording → Faces &amp; plates</strong>.
+          Recognition itself is switched on under <strong>Detection → Faces &amp; plates</strong>.
           Profiles can be set up either way; they start matching once it is on.
         </p>
 
@@ -578,10 +579,19 @@ export default function RecognitionTab() {
             <p className="control-hint">
               Looking at: <strong>{status.face.labels.join(', ')}</strong>.
               {!status.face.labels.some((l) => l !== 'person') &&
-                ' Turn on \u201calso look for faces on vehicles\u201d under Recording to include drivers through a windscreen.'}
+                ' Turn on \u201calso look for faces on vehicles\u201d under Detection to include drivers through a windscreen.'}
             </p>
           )}
         </section>
+      )}
+
+      {status?.plates && (
+        <PlateDiagnostics
+          plates={status.plates}
+          cameras={cameras}
+          refreshing={loading}
+          onRefresh={() => void reload()}
+        />
       )}
 
       {status?.devices && (

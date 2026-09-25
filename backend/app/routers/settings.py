@@ -484,6 +484,10 @@ class RecognitionSettings(BaseModel):
     # from. It is exposed so an operator who is missing people entirely can
     # trade the other way knowingly, not as a general accuracy dial.
     identify_quality: float = Field(default=0.45, ge=0.15, le=0.9)
+    # Read plates from a full-resolution camera snapshot as well as the detect
+    # stream (native/platesnap.py). On by default: at the detect stream's size
+    # a plate is usually too small to read unless the car is at the lens.
+    plate_hires: bool = True
 
 
 class AppSettings(BaseModel):

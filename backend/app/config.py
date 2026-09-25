@@ -355,6 +355,13 @@ DEFAULT_SETTINGS: dict = {
         # which is exactly where a wrong name comes from. Exposed so an operator
         # missing people entirely can make that trade knowingly.
         "identify_quality": 0.45,
+        # Read plates from a full-resolution snapshot of the camera, not only
+        # from the detect stream. The detect stream is scaled to ~704x480,
+        # where a plate is usually too few pixels wide to read at all; while a
+        # vehicle is tracked this asks the camera for about one snapshot a
+        # second (native/platesnap.py). Only cameras with plate reading on pay
+        # it, and only while a vehicle is actually there.
+        "plate_hires": True,
     },
     "notifications": {
         "enabled": True,

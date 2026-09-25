@@ -29,19 +29,33 @@ detector, for the licensing reason set out in plates.py. It is deliberately
 GENEROUS: the OCR returns an empty string at zero confidence for things that
 were never plates, so proposing four regions and discarding the duds costs less
 than a precise localizer would.
+
+TWO SOURCES OF PIXELS
+---------------------
+Every pass looks at the DETECT frame it was handed, as it always has. That
+frame is the camera's substream scaled to 704x480 or so, where a plate is
+usually too small to read — so, on top, a vehicle being tracked also triggers a
+FULL-RESOLUTION look (`platesnap`): a snapshot from the camera, the vehicle
+found in it, the plate cut from the real pixels. That runs as a background task
+because an HTTP round trip must never stall the detection loop; its reads land
+in the same buffer and the same vote, and they carry more weight there simply
+because a sharper, wider crop scores higher.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import statistics
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
 import numpy as np
 
+from . import platesnap
 from . import zones as zonelib
 from .bestshot import (
     KEEP_SHOTS, MIN_GAP_S, BestShotBuffer, Shot, encode_frame_box, score_plate,
@@ -49,6 +63,7 @@ from .bestshot import (
 )
 from .heatmap import HeatmapAccumulator
 from .plates import OCR_MIN_CONFIDENCE, PlateReader, candidate_regions, deskew, is_vehicle
+from .platesnap import SnapshotSource
 from .recognition import Gallery, Match, PlateRead, PlateVote, normalize_plate, vote_plate
 from .recognizer import crop_with_origin
 
@@ -73,6 +88,70 @@ MAX_CANDIDATES = 2000
 RUN_INTERVAL_S = 300.0
 DEFAULT_RETENTION_DAYS = 7.0
 
+#: Minimum spacing between two FULL-RESOLUTION looks at one vehicle. Each is an
+#: HTTP request to the camera, so this is set by what the camera will happily
+#: serve, not by what the OCR could absorb.
+HIRES_INTERVAL_S = 1.0
+
+#: Most full-resolution looks one vehicle gets. A car that parks and stays
+#: tracked must not cost a snapshot a second for as long as it sits there.
+HIRES_MAX_PER_TRACK = 8
+
+#: A vote this confident from this many reads is settled — further looks would
+#: only confirm it, so they are not taken.
+SETTLED_CONFIDENCE = 0.9
+SETTLED_READS = 3
+
+#: How long a vehicle's final vote waits for a full-resolution look that was
+#: still in flight when the track ended. The wait happens in the background;
+#: the detection loop never waits on it.
+HIRES_FINISH_WAIT_S = 3.0
+
+
+@dataclass
+class _CameraStats:
+    """Where plates are being lost, per camera, since the backend started.
+
+    Every counter is a stage a plate has to get through, so the first one that
+    stays at zero while the one before it climbs is the answer to "why is it
+    not reading plates" — and each has a different remedy.
+    """
+
+    passes: int = 0
+    regions: int = 0
+    too_small: int = 0
+    reads: int = 0
+    rejected_reads: int = 0
+    hires_requested: int = 0
+    hires_frames: int = 0
+    hires_lost: int = 0
+    hires_reads: int = 0
+    votes_stored: int = 0
+    votes_discarded: int = 0
+    last_plate: str = ""
+    last_plate_at: float = 0.0
+    #: Widths of recent plate-shaped strips from the detect frame, for the
+    #: "how far off is it" hint.
+    widths: deque = field(default_factory=lambda: deque(maxlen=50))
+
+    def report(self) -> dict[str, Any]:
+        return {
+            "passes": self.passes,
+            "regions": self.regions,
+            "too_small": self.too_small,
+            "reads": self.reads,
+            "rejected_reads": self.rejected_reads,
+            "hires_requested": self.hires_requested,
+            "hires_frames": self.hires_frames,
+            "hires_lost": self.hires_lost,
+            "hires_reads": self.hires_reads,
+            "votes_stored": self.votes_stored,
+            "votes_discarded": self.votes_discarded,
+            "last_plate": self.last_plate,
+            "last_plate_at": self.last_plate_at,
+            "median_strip_px": int(statistics.median(self.widths)) if self.widths else 0,
+        }
+
 
 @dataclass
 class _TrackState:
@@ -95,6 +174,18 @@ class _TrackState:
     vote: Optional[PlateVote] = None
     match: Optional[Match] = None
     event_fid: str = ""
+    #: The full-resolution look in flight for this vehicle, if any.
+    hires_task: Optional[asyncio.Task] = None
+    hires_last: float = float("-inf")
+    hires_requests: int = 0
+    #: Shots that came from a full-resolution frame, keyed like `read_shots`,
+    #: so the status screen can say which source the reads are coming from.
+    hires_keys: set[tuple[float, tuple[float, float, float, float]]] = field(
+        default_factory=set
+    )
+    #: Set once the vote has been stored (or discarded). A full-resolution look
+    #: that lands after that must not announce a different answer.
+    concluded: bool = False
 
 
 class PlatePass:
@@ -107,6 +198,7 @@ class PlatePass:
         images_dir: Path,
         heatmap: Optional[HeatmapAccumulator] = None,
         on_recognition: Optional[Any] = None,
+        snapshots: Optional[SnapshotSource] = None,
     ) -> None:
         # See FacePass.on_recognition — the live hook, not the stored row.
         self.on_recognition = on_recognition
@@ -125,6 +217,33 @@ class PlatePass:
         self.heatmap = heatmap if heatmap is not None else HeatmapAccumulator(db)
         self._gallery: Optional[Gallery] = None
         self._gallery_lock = asyncio.Lock()
+        # Full-resolution looks. None disables them outright (tests that want
+        # the detect-frame path alone); the setting switches them at runtime.
+        self._snapshots = snapshots
+        self._settings: Any = None
+        self._stats: dict[str, _CameraStats] = {}
+        # Final votes deferred behind an in-flight full-resolution look, held
+        # so they are not garbage-collected mid-flight.
+        self._finishing: set[asyncio.Task] = set()
+
+    def _stats_for(self, camera: str) -> _CameraStats:
+        st = self._stats.get(camera)
+        if st is None:
+            st = self._stats[camera] = _CameraStats()
+        return st
+
+    def _hires_on(self) -> bool:
+        """Whether full-resolution looks are wanted. Read live, not on the
+        five-minute maintenance tick, so the switch takes effect at once."""
+        if self._snapshots is None:
+            return False
+        if self._settings is None:
+            return True
+        try:
+            cfg = (self._settings.current or {}).get("recognition") or {}
+        except Exception:  # noqa: BLE001
+            return True
+        return bool(cfg.get("plate_hires", True))
 
     # ---------- gallery ----------
 
@@ -180,12 +299,12 @@ class PlatePass:
                 if not vehicles:
                     return
             for obs in vehicles:
-                await self._observe_one(camera, obs, frame_bgr, frame_time, event_fid)
+                await self._observe_one(cam, camera, obs, frame_bgr, frame_time, event_fid)
         except Exception:
             log.exception("plate pass failed on %s", camera)
 
     async def _observe_one(
-        self, camera: str, obs: Any, frame_bgr: np.ndarray,
+        self, cam: Any, camera: str, obs: Any, frame_bgr: np.ndarray,
         frame_time: float, event_fid: str,
     ) -> None:
         key = (camera, obs.tracker_id)
@@ -201,23 +320,60 @@ class PlatePass:
         if frame_time - st.last_pass < PASS_INTERVAL_S:
             return
         st.last_pass = frame_time
+        self._stats_for(camera).passes += 1
+
+        # Before the detect-frame work, so the snapshot request is on the wire
+        # while this frame is being searched.
+        self._maybe_look_hires(cam, camera, st, obs, frame_bgr, frame_time)
 
         cropped = crop_with_origin(frame_bgr, obs.box, pad=VEHICLE_CROP_PAD)
         if cropped is None:
             return
         vehicle, ox, oy = cropped
 
+        fh, fw = frame_bgr.shape[:2]
+        await self._offer_regions(
+            st, camera, obs.tracker_id, vehicle, ox, oy, fw, fh, frame_time, hires=False
+        )
+
+        # OCR whatever the buffer ACTUALLY kept, once the frame's regions have
+        # finished competing for its slots. Reading inside the loop above would
+        # read crops that a later, better region from the same frame then
+        # displaced.
+        await self._read_pending(st, obs.tracker_id)
+
+        # Vote as soon as there is something to vote on, so a notification can
+        # name the vehicle while it is still on the drive.
+        if len(st.reads) >= 2:
+            self._tally(st)
+
+    async def _offer_regions(
+        self, st: _TrackState, camera: str, tracker_id: int, vehicle: np.ndarray,
+        ox: int, oy: int, fw: int, fh: int, frame_time: float, *, hires: bool,
+    ) -> None:
+        """Localize plate strips in one vehicle crop and offer them to the buffer.
+
+        `fw`/`fh` are the dimensions of the frame the crop was cut from, which
+        is what makes the stored `frame_box` and the heatmap point normalized —
+        and so comparable between a detect frame and a full-resolution one.
+        """
+        stats = self._stats_for(camera)
         regions = await asyncio.to_thread(candidate_regions, vehicle)
         if not regions:
             return
 
-        fh, fw = frame_bgr.shape[:2]
         for (x1, y1, x2, y2) in regions:
             strip = vehicle[y1:y2, x1:x2]
             if strip.size == 0:
                 continue
             straight = await asyncio.to_thread(deskew, strip)
             quality = score_plate(straight)
+            if quality.resolution <= 0.0:
+                stats.too_small += 1
+            else:
+                stats.regions += 1
+            if not hires:
+                stats.widths.append(x2 - x1)
             # Where this strip sits in the FULL frame, for the review UI to
             # ring. Computed before offering because `shot.box` stays in the
             # vehicle crop's coordinates — see the heatmap note below for the
@@ -233,12 +389,14 @@ class PlatePass:
                 else None
             )
             shot = st.buffer.offer(
-                tracker_id=obs.tracker_id, kind="plate", crop_bgr=straight,
+                tracker_id=tracker_id, kind="plate", crop_bgr=straight,
                 box=(x1, y1, x2, y2), frame_time=frame_time, quality=quality,
                 frame_box=frame_box,
             )
             if shot is None:
                 continue
+            if hires:
+                st.hires_keys.add((shot.frame_time, shot.box))
 
             # Heatmap: the region is in the VEHICLE CROP's coordinates, so it
             # must be translated by the crop origin before it means anything on
@@ -249,16 +407,87 @@ class PlatePass:
                 cy = (oy + (y1 + y2) / 2.0) / fh
                 self.heatmap.record(camera, "plate", cx, cy, quality.total)
 
-        # OCR whatever the buffer ACTUALLY kept, once the frame's regions have
-        # finished competing for its slots. Reading inside the loop above would
-        # read crops that a later, better region from the same frame then
-        # displaced.
-        await self._read_pending(st, obs.tracker_id)
+    # ---------- full-resolution looks ----------
 
-        # Vote as soon as there is something to vote on, so a notification can
-        # name the vehicle while it is still on the drive.
-        if len(st.reads) >= 2:
-            self._tally(st)
+    def _maybe_look_hires(
+        self, cam: Any, camera: str, st: _TrackState, obs: Any,
+        frame_bgr: np.ndarray, frame_time: float,
+    ) -> None:
+        """Start a full-resolution look at this vehicle if one is due. Never awaits."""
+        if not self._hires_on():
+            return
+        assert self._snapshots is not None
+        if st.hires_task is not None and not st.hires_task.done():
+            return
+        if st.hires_requests >= HIRES_MAX_PER_TRACK:
+            return
+        if frame_time - st.hires_last < HIRES_INTERVAL_S:
+            return
+        if (st.vote is not None and st.vote.reads >= SETTLED_READS
+                and st.vote.confidence >= SETTLED_CONFIDENCE):
+            return
+        if not self._snapshots.available(camera):
+            return
+        fh, fw = frame_bgr.shape[:2]
+        x1, y1, x2, y2 = (float(v) for v in obs.box[:4])
+        xi1, yi1 = max(0, int(x1)), max(0, int(y1))
+        xi2, yi2 = min(fw, int(round(x2))), min(fh, int(round(y2)))
+        if xi2 - xi1 < platesnap.MIN_TEMPLATE_PX or yi2 - yi1 < platesnap.MIN_TEMPLATE_PX:
+            return
+        # A copy of the vehicle only, not the whole frame: the engine reuses
+        # its frames, and this is all the matcher needs.
+        template = frame_bgr[yi1:yi2, xi1:xi2].copy()
+        st.hires_last = frame_time
+        st.hires_requests += 1
+        self._stats_for(camera).hires_requested += 1
+        row = dict(getattr(cam, "row", None) or {})
+        row.setdefault("name", camera)
+        st.hires_task = asyncio.create_task(
+            self._look_hires(row, camera, st, obs.tracker_id, template,
+                             (xi1, yi1, xi2, yi2), (fh, fw)),
+            name=f"plate-hires-{camera}-{obs.tracker_id}",
+        )
+
+    async def _look_hires(
+        self, cam_row: dict[str, Any], camera: str, st: _TrackState, tracker_id: int,
+        template: np.ndarray, box: tuple[int, int, int, int],
+        detect_shape: tuple[int, int],
+    ) -> None:
+        """Fetch a full-resolution frame, find the vehicle in it, read its plate."""
+        assert self._snapshots is not None
+        stats = self._stats_for(camera)
+        try:
+            got = await self._snapshots.fetch(cam_row)
+            if got is None:
+                return
+            hires, taken = got
+            if hires.shape[1] < detect_shape[1] * platesnap.MIN_GAIN:
+                self._snapshots.note_no_gain(camera, hires.shape, detect_shape)
+                return
+            stats.hires_frames += 1
+            found = await asyncio.to_thread(platesnap.locate, template, box, detect_shape, hires)
+            if found is None:
+                stats.hires_lost += 1
+                return
+            hbox, _score = found
+            cropped = crop_with_origin(hires, hbox, pad=VEHICLE_CROP_PAD)
+            if cropped is None:
+                stats.hires_lost += 1
+                return
+            vehicle, ox, oy = cropped
+            hh, hw = hires.shape[:2]
+            await self._offer_regions(
+                st, camera, tracker_id, vehicle, ox, oy, hw, hh, taken, hires=True
+            )
+            await self._read_pending(st, tracker_id)
+            # Same bar as the detect-frame path: two reads before a live vote,
+            # so one misread cannot name a vehicle in a notification.
+            if not st.concluded and len(st.reads) >= 2:
+                self._tally(st)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("full-resolution plate look failed on %s", camera)
 
     async def _read_pending(self, st: _TrackState, tracker_id: int) -> None:
         """OCR every retained shot that has not been read yet, exactly once."""
@@ -269,8 +498,13 @@ class PlatePass:
             st.read_shots.add(key)
             text, confidence = await self._reader.read(shot.crop)
             text = normalize_plate(text)
+            stats = self._stats_for(st.camera)
             if not text or len(text) < MIN_PLATE_LENGTH or confidence < OCR_MIN_CONFIDENCE:
+                stats.rejected_reads += 1
                 continue
+            stats.reads += 1
+            if key in st.hires_keys:
+                stats.hires_reads += 1
             st.reads.append(
                 PlateRead(text=text, confidence=confidence, quality=shot.quality.total)
             )
@@ -313,10 +547,50 @@ class PlatePass:
     # ---------- track end ----------
 
     async def finish(self, camera: str, tracker_id: int) -> None:
-        """A vehicle left: vote over every read of it and store the answer."""
+        """A vehicle left: vote over every read of it and store the answer.
+
+        If a full-resolution look is still in flight — and it is often the look
+        that will actually read the plate — the vote waits for it IN THE
+        BACKGROUND. The engine awaits this method inside its frame loop, so
+        waiting here would stall detection on every camera for an HTTP round
+        trip. The track has already been removed, so a reused tracker id starts
+        clean regardless.
+        """
         st = self._tracks.pop((camera, tracker_id), None)
         if st is None:
             return
+        task = st.hires_task
+        if task is not None and not task.done():
+            deferred = asyncio.create_task(
+                self._conclude_after(st, camera, tracker_id, task),
+                name=f"plate-finish-{camera}-{tracker_id}",
+            )
+            self._finishing.add(deferred)
+            deferred.add_done_callback(self._finishing.discard)
+            return
+        await self._conclude(st, camera, tracker_id)
+
+    async def _conclude_after(
+        self, st: _TrackState, camera: str, tracker_id: int, task: asyncio.Task
+    ) -> None:
+        try:
+            await asyncio.wait_for(asyncio.shield(task), HIRES_FINISH_WAIT_S)
+        except asyncio.TimeoutError:
+            task.cancel()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — the look logs its own failures
+            pass
+        await self._conclude(st, camera, tracker_id)
+
+    async def wait_idle(self) -> None:
+        """Wait for every deferred vote. For tests and orderly shutdown."""
+        while self._finishing:
+            await asyncio.gather(*list(self._finishing), return_exceptions=True)
+
+    async def _conclude(self, st: _TrackState, camera: str, tracker_id: int) -> None:
+        st.concluded = True
+        stats = self._stats_for(camera)
         try:
             # The final best shot often arrives on the last pass before the
             # track retires, so sweep once more before voting.
@@ -325,6 +599,7 @@ class PlatePass:
                 return
             self._tally(st)
             if st.vote is None or st.vote.confidence < MIN_VOTE_CONFIDENCE:
+                stats.votes_discarded += 1
                 # A vote nobody would stand behind is not recorded at all: a
                 # wrong plate on an event is worse than no plate.
                 log.debug(
@@ -334,6 +609,9 @@ class PlatePass:
                 )
                 return
             await self._store(st, tracker_id)
+            stats.votes_stored += 1
+            stats.last_plate = st.vote.text
+            stats.last_plate_at = time.time()
         except Exception:
             log.exception("could not finish plate track %s/%s", camera, tracker_id)
 
@@ -451,6 +729,7 @@ class PlatePass:
         """Load/release the OCR as settings.recognition.enabled changes."""
         while True:
             try:
+                self._settings = settings
                 cfg = (settings.get() or {}).get("recognition") or {}
                 enabled = bool(cfg.get("enabled"))
                 self._shots, self._shot_gap = shot_params(cfg)
@@ -460,7 +739,10 @@ class PlatePass:
                 elif not enabled and self._reader.ready:
                     log.info("recognition disabled — releasing the plate OCR")
                     self._reader.close()
+                    self._cancel_hires()
                     self._tracks.clear()
+                    if self._snapshots is not None:
+                        await self._snapshots.close()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -469,13 +751,29 @@ class PlatePass:
 
     # ---------- lifetime ----------
 
+    def _cancel_hires(self, camera: Optional[str] = None) -> None:
+        for (cam, _tid), st in self._tracks.items():
+            if camera is not None and cam != camera:
+                continue
+            if st.hires_task is not None and not st.hires_task.done():
+                st.hires_task.cancel()
+
     def forget_camera(self, camera: str) -> None:
+        self._cancel_hires(camera)
         for key in [k for k in self._tracks if k[0] == camera]:
             del self._tracks[key]
+        self._stats.pop(camera, None)
+        if self._snapshots is not None:
+            self._snapshots.forget(camera)
 
     def status(self) -> dict[str, Any]:
         return {
             "live_tracks": len(self._tracks),
             "ready": self._reader.ready,
             "vehicles": len(self._gallery) if self._gallery is not None else 0,
+            # Whether full-resolution looks are on, and per camera how each
+            # stage is doing — see _CameraStats for how to read it.
+            "hires": self._hires_on(),
+            "cameras": {cam: s.report() for cam, s in sorted(self._stats.items())},
+            "snapshots": self._snapshots.status() if self._snapshots is not None else {},
         }

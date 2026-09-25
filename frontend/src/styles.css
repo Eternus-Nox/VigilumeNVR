@@ -3863,3 +3863,43 @@ label > select {
   font-size: 0.8rem;
   white-space: nowrap;
 }
+
+/* --- Plate reading diagnostics (Settings → Faces & plates) --------------- */
+
+.plate-diag-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+  padding: 0;
+  list-style: none;
+}
+
+.plate-diag {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-raise);
+  font-size: 0.88rem;
+}
+
+.plate-diag-ok {
+  border-left-color: var(--ok);
+}
+
+.plate-diag-warn {
+  border-left-color: var(--warn);
+}
+
+.plate-diag-idle {
+  border-left-color: var(--line);
+}
+
+.plate-diag .mono {
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}

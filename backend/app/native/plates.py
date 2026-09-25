@@ -110,6 +110,25 @@ MIN_PLATE_H = 12
 #: How many candidate strips to propose per vehicle, best-scoring first.
 MAX_REGIONS = 4
 
+#: Widths a LARGE vehicle crop is shrunk to before localizing (never enlarged).
+#:
+#: The morphology below uses fixed-pixel kernels, tuned on vehicle crops a few
+#: hundred pixels wide — which is what a 704x480 detect stream produces. A crop
+#: cut from a camera's full-resolution frame can be 1000-2000 px wide, and there
+#: the same kernels bound different shapes. Localizing at a working width makes
+#: the result independent of where the pixels came from; only the SEARCH is done
+#: small, and the strip handed to the OCR is cut from the original crop.
+#:
+#: Two widths, unioned, because no single one was reliable: over 144 synthetic
+#: plates (100-560 px, three strings, level and tilted, light and dark bodies)
+#: the unscaled crop read 120, 480 alone 141, and 480 + 560 read 143 at about
+#: two regions per vehicle. Crops no wider than the first width — every detect
+#: frame crop — take the original single pass, unchanged.
+LOCALIZE_WIDTHS = (480, 560)
+
+#: Two proposals overlapping this much are the same strip found twice.
+_DUPLICATE_IOU = 0.7
+
 #: Labels whose boxes are searched for plates.
 VEHICLE_LABELS = ("car", "truck", "bus", "motorcycle", "motorbike", "van")
 
@@ -137,7 +156,48 @@ def candidate_regions(
     plate-shaped candidates.
     """
     with TIMINGS.plate_localize.measure():
+        if vehicle_bgr is None or vehicle_bgr.size == 0:
+            return []
+        w = vehicle_bgr.shape[1]
+        if w <= LOCALIZE_WIDTHS[0]:
+            return _candidate_regions(vehicle_bgr, max_regions=max_regions)
+        found: list[tuple[int, int, int, int]] = []
+        for target in LOCALIZE_WIDTHS:
+            for box in _regions_at_width(vehicle_bgr, target, max_regions):
+                if all(_iou(box, other) < _DUPLICATE_IOU for other in found):
+                    found.append(box)
+        return found
+
+
+def _regions_at_width(
+    vehicle_bgr: np.ndarray, target_w: int, max_regions: int
+) -> list[tuple[int, int, int, int]]:
+    """Localize on a copy shrunk to `target_w`; boxes in the ORIGINAL's pixels."""
+    h, w = vehicle_bgr.shape[:2]
+    if w <= target_w:
         return _candidate_regions(vehicle_bgr, max_regions=max_regions)
+    scale = target_w / float(w)
+    small = cv2.resize(
+        vehicle_bgr, (target_w, max(1, int(round(h * scale)))),
+        interpolation=cv2.INTER_AREA,
+    )
+    return [
+        (
+            max(0, int(x1 / scale)), max(0, int(y1 / scale)),
+            min(w, int(round(x2 / scale))), min(h, int(round(y2 / scale))),
+        )
+        for (x1, y1, x2, y2) in _candidate_regions(small, max_regions=max_regions)
+    ]
+
+
+def _iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+    ix = max(0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    if inter == 0:
+        return 0.0
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
 
 
 def _candidate_regions(
