@@ -126,6 +126,10 @@ class TrackState:
     still_since: Optional[float] = None
     #: Last frame this track was offered, for pruning.
     last_seen: float = 0.0
+    #: When this track was FIRST offered. Distinguishes a thing that has just
+    #: appeared from one that has been in view all day, which is the whole
+    #: difference between a package someone left and the doormat.
+    first_seen: float = 0.0
 
     def is_still(self) -> bool:
         return self.still_since is not None
@@ -164,7 +168,8 @@ class Stillness:
             # A brand-new track starts NOT moved. It has to earn that, which is
             # precisely how something already parked when we started looking
             # never becomes an event.
-            st = TrackState(anchor=(cx, cy), anchor_diag=diag, still_since=frame_time)
+            st = TrackState(anchor=(cx, cy), anchor_diag=diag,
+                            still_since=frame_time, first_seen=frame_time)
             self.tracks[tracker_id] = st
 
         st.last_seen = frame_time
@@ -211,6 +216,23 @@ class Stillness:
         if st.still_since is None:
             return True
         return frame_time - st.still_since < self.stationary_after_s
+
+    def still_for(self, tracker_id: int, now: float) -> float:
+        """Seconds this track has been motionless, or 0.0 while it is moving.
+
+        0.0 is also the answer for a track never seen, which is the safe one
+        for every caller: "has not been sitting there" rather than "has been
+        sitting there forever".
+        """
+        st = self.tracks.get(tracker_id)
+        if st is None or st.still_since is None:
+            return 0.0
+        return max(0.0, now - st.still_since)
+
+    def age(self, tracker_id: int, now: float) -> float:
+        """Seconds since this track was first seen. 0.0 for an unknown track."""
+        st = self.tracks.get(tracker_id)
+        return 0.0 if st is None else max(0.0, now - st.first_seen)
 
     def all_still(self, tracker_ids: Iterable[int]) -> bool:
         """True when every one of these tracks is currently motionless.

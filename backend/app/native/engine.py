@@ -80,6 +80,25 @@ _JPEG_QUALITY = 80
 # well clear. Same-label matching prevents cross-class over-suppression.
 SUPPRESS_RADIUS_FRAC = 0.06
 
+#: What a "package" looks like to a COCO detector. There is no `package` or
+#: `box` class, so these are the carried containers the model DOES know, and
+#: they are what a parcel on a doorstep is most often reported as. The
+#: Objects365 tier knows more, but this list stays COCO-only on purpose: a
+#: label that only exists on one model tier would make the feature silently
+#: depend on which model is loaded.
+PACKAGE_LABELS = ("backpack", "handbag", "suitcase")
+
+#: How long a package-shaped object must sit motionless before it counts as
+#: LEFT rather than as being carried. Long enough that someone standing with a
+#: bag over their shoulder, or setting one down to find keys, does not trip it.
+PACKAGE_SETTLE_S = 45.0
+
+#: A package is only interesting if a PERSON was recently here — that is what
+#: separates "a parcel was delivered" from "the detector has decided the
+#: doormat is a handbag". Generous, because the person may leave frame before
+#: the object has finished settling.
+PACKAGE_PERSON_WINDOW_S = 180.0
+
 
 @dataclass(frozen=True)
 class Observation:
@@ -409,6 +428,11 @@ class _CameraState:
     # Per-camera override for settings.detection.dwell_alert_seconds. None
     # follows the global setting; 0 means off HERE specifically.
     dwell_seconds: Optional[int] = None
+    #: Frame time a person was last confirmed here, and the tracks already
+    #: reported as a left package. Both per camera: tracker ids are only
+    #: unique within one, and "a person was here" is a fact about this view.
+    last_person_at: float = 0.0
+    packages_reported: set[int] = field(default_factory=set)
     # tracker_id -> (hit count, last seen epoch)
     hits: dict[int, tuple[int, float]] = field(default_factory=dict)
     # Per-track motion state: what is moving, what arrived and settled, and
@@ -820,17 +844,25 @@ class DetectionEngine:
         # included: it is what gets boxed on the saved snapshot, and a picture
         # that omits the parked car is a picture that lies about the frame.
         scene = confirmed
+
+        # MOTION STATE IS ALWAYS KEPT, even when the filter below is off. It
+        # costs two subtractions and a hypot per observation, and two other
+        # features read it — the left-package pass here, and the loitering hold
+        # in `_stationary_after`. Keeping it behind the filter's own switch
+        # meant turning the filter off silently disabled them too, with nothing
+        # anywhere saying why.
+        #
+        # FED FROM `obs`, FILTERED ON `confirmed`. Motion history has to start
+        # when a track is first SEEN, not when it confirms: fed from `confirmed`
+        # instead, a track arrives at the event layer having been watched for
+        # zero frames, so it has by definition never moved and is held back
+        # until its NEXT step — which delays every real subject's event by a
+        # frame and moves its start time off the moment they actually arrived.
+        cam.stillness.stationary_after_s = self._stationary_after(cam)
+        for o in obs:
+            cam.stillness.update(o.tracker_id, o.box, frame_time)
+
         if self._ignore_stationary(cam):
-            cam.stillness.stationary_after_s = self._stationary_after(cam)
-            # FED FROM `obs`, FILTERED ON `confirmed`. Motion history has to
-            # start when a track is first SEEN, not when it confirms: fed from
-            # `confirmed` instead, a track arrives at the event layer having
-            # been watched for zero frames, so it has by definition never moved
-            # and is held back until its NEXT step — which delays every real
-            # subject's event by a frame and moves its start time off the
-            # moment they actually arrived.
-            for o in obs:
-                cam.stillness.update(o.tracker_id, o.box, frame_time)
             active: list[Observation] = []
             for o in confirmed:
                 if cam.stillness.is_active(o.tracker_id, frame_time):
@@ -838,6 +870,12 @@ class DetectionEngine:
                 else:
                     cam.stillness.count_drop(o.tracker_id)
             confirmed = active
+
+        # Left packages read the motion state DIRECTLY rather than the filtered
+        # `confirmed`, because a package that was set down and never moved
+        # again is precisely what the filter hides — so this runs on the full
+        # confirmed set, before any of it is dropped.
+        self._maybe_package(cam, scene, frame_time)
 
         # --- traces + line crossings (confirmed objects only) ---
         # Both are fed from `confirmed`, not `obs`: a crossing is only meaningful
@@ -1175,6 +1213,59 @@ class DetectionEngine:
         detection = self._settings.detection or {}
         value = detection.get(key)
         return default if value is None else value
+
+    def _maybe_package(
+        self, cam: _CameraState, confirmed: Sequence[Observation], frame_time: float
+    ) -> None:
+        """Report a package-shaped object that someone left behind.
+
+        THE WHOLE SIGNAL IS: something that can be carried is now sitting
+        still, it was not sitting there before, and a person was recently here.
+        Each of those three carries its weight:
+
+        * still for `PACKAGE_SETTLE_S` — a bag over a shoulder, or one set down
+          while someone finds their keys, is not a delivery;
+        * younger than the person window — otherwise the doormat the detector
+          has decided is a handbag would be reported every time the engine
+          restarted;
+        * a person seen recently — parcels do not arrive on their own, and this
+          is what separates a delivery from a persistent misdetection.
+
+        Deliberately NOT gated on the stillness filter being enabled: a left
+        package is exactly the "never moved" case that filter hides from the
+        event layer, so this reads the motion state directly. Reported once per
+        track, and never raises.
+        """
+        if not self._package_alerts():
+            return
+        for o in confirmed:
+            if o.label == "person":
+                cam.last_person_at = frame_time
+        if frame_time - cam.last_person_at > PACKAGE_PERSON_WINDOW_S:
+            return
+        for o in confirmed:
+            if o.label not in PACKAGE_LABELS:
+                continue
+            if o.tracker_id in cam.packages_reported:
+                continue
+            if cam.stillness.still_for(o.tracker_id, frame_time) < PACKAGE_SETTLE_S:
+                continue
+            # Age is bounded by the person window for the reason above: a thing
+            # that has been in view far longer than anyone has been here is
+            # furniture, however package-shaped the detector finds it.
+            if cam.stillness.age(o.tracker_id, frame_time) > PACKAGE_PERSON_WINDOW_S:
+                continue
+            cam.packages_reported.add(o.tracker_id)
+            note = getattr(self._pipeline, "note_package", None)
+            if note is None:
+                return
+            try:
+                note(cam.row["name"], o.label, list(o.box))
+            except Exception:
+                log.exception("could not announce a package on %s", cam.row["name"])
+
+    def _package_alerts(self) -> bool:
+        return bool(self._detection_setting("package_alerts", False))
 
     def _dwell_seconds(self, cam: _CameraState) -> int:
         """How long a subject may be present here before the loitering alert.

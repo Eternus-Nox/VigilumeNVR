@@ -958,6 +958,8 @@ export interface AppSettings {
     absence_timeout_s: number;
     /** Seconds before a "still there" alert. 0 = off (the default). */
     dwell_alert_seconds: number;
+    /** Alert when a carried object is left behind. Off by default. */
+    package_alerts: boolean;
     /**
      * Hold motionless objects back from the event layer. ON by default: a
      * detector reports a parked car every frame, and because events are keyed

@@ -68,6 +68,9 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
   const [dwellSeconds, setDwellSeconds] = useState<number>(
     pending.detection?.dwell_alert_seconds ?? settings.detection.dwell_alert_seconds ?? 0,
   );
+  const [packageAlerts, setPackageAlerts] = useState<boolean>(
+    pending.detection?.package_alerts ?? settings.detection.package_alerts ?? false,
+  );
   // Night contrast boost on the detector's frame only. Absent on an older
   // backend -> "off", which is also the shipped default: it changes what the
   // model sees, so it is opt-in.
@@ -121,6 +124,7 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
   useAdoptSaved(settings.detection.ignore_stationary ?? true, setIgnoreStationary);
   useAdoptSaved(settings.detection.stationary_after_s ?? 180, setStationaryAfter);
   useAdoptSaved(settings.detection.dwell_alert_seconds ?? 0, setDwellSeconds);
+  useAdoptSaved(settings.detection.package_alerts ?? false, setPackageAlerts);
   useAdoptSaved(settings.detection.night_boost ?? 'off', setNightBoost);
   useAdoptSaved(settings.detection.night_boost_threshold ?? 60, setNightBoostThreshold);
   useAdoptSaved(settings.detection.smoothing ?? false, setSmoothing);
@@ -226,7 +230,7 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
         confidence, default_mode: defaultMode, backend, coral_model: coralModel,
         absence_timeout_s: absenceTimeout,
         ignore_stationary: ignoreStationary, stationary_after_s: stationaryAfter,
-        dwell_alert_seconds: dwellSeconds,
+        dwell_alert_seconds: dwellSeconds, package_alerts: packageAlerts,
         night_boost: nightBoost, night_boost_threshold: nightBoostThreshold,
         smoothing, smoothing_frames: smoothingFrames,
       },
@@ -234,7 +238,7 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
     });
   }, [
     confidence, defaultMode, backend, coralModel, absenceTimeout,
-    ignoreStationary, stationaryAfter, dwellSeconds,
+    ignoreStationary, stationaryAfter, dwellSeconds, packageAlerts,
     nightBoost, nightBoostThreshold, smoothing, smoothingFrames,
     hasRecognition, recognition, onDraftChange,
   ]);
@@ -771,6 +775,34 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
             </table>
           </>
         )}
+      </section>
+
+      <section className="card">
+        <h2>Something left behind</h2>
+        <p className="muted small">
+          Tells you when something that can be carried has been put down and nobody has
+          taken it — a parcel on the step being the case worth catching. It waits for the
+          object to sit still, checks it wasn't there before, and requires a person to
+          have been around, because parcels don't arrive on their own.
+        </p>
+        <div className="form-stack">
+          <label className="checkbox">
+            <input
+              type="checkbox"
+              checked={packageAlerts}
+              onChange={(e) => setPackageAlerts(e.target.checked)}
+            />
+            <span>Tell me when something is left behind</span>
+          </label>
+          <p className="control-hint">
+            <strong>Expect this to be approximate.</strong> The detector has no “package”
+            class, so it reports bags, backpacks and suitcases — a plant pot or a folded
+            chair will get called one sooner or later. The three-part test (sitting still,
+            newly arrived, a person was here) is what keeps that from firing nightly, but
+            it's a useful nudge rather than a parcel tracker. Those object types also have
+            to be switched on for the camera, the same way faces need <em>person</em>.
+          </p>
+        </div>
       </section>
 
       <section className="card">

@@ -74,6 +74,12 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
             'constant events', 'repeat events', 'loitering'],
   },
   {
+    tab: 'detection', card: 'Something left behind', admin: true,
+    label: 'Alert when a parcel or bag is left',
+    terms: ['package', 'parcel', 'delivery', 'left behind', 'dropped off',
+            'amazon', 'courier', 'box', 'bag', 'abandoned', 'doorstep'],
+  },
+  {
     tab: 'detection', card: "Someone who doesn't leave", admin: true,
     label: 'Alert when someone arrives and stays',
     terms: ['loiter', 'loitering', 'still there', 'hanging around', 'waiting',

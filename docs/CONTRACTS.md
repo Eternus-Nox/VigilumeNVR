@@ -963,6 +963,33 @@ in `api.ts`, and `?? null` (never `||`) at the control. The full camera update
 does not write this column at all, so an unrelated camera save cannot un-pin a
 camera somebody deliberately pinned.
 
+#### Left packages (`detection.package_alerts`, off by default)
+
+There is no `package` class in COCO, so this rides the carried-container labels
+the detector does know — `backpack`, `handbag`, `suitcase` — which makes the
+LABEL weak evidence on its own. The strength comes from combining it with two
+things the label cannot fake, and all three are required:
+
+| | |
+|---|---|
+| still for `PACKAGE_SETTLE_S` (45 s) | a bag over a shoulder, or one set down while somebody finds their keys, is not a delivery |
+| younger than `PACKAGE_PERSON_WINDOW_S` (180 s) | a thing in view far longer than anyone has been here is furniture, however package-shaped |
+| a person seen recently on that camera | parcels do not arrive on their own — this is what stops a misdetected doormat reporting itself nightly |
+
+Reported once per track via `EventsPipeline.note_package`, which is **not tied
+to an event**: a left package is the ABSENCE of activity, and by the time it is
+worth reporting the delivery person's event has usually ended.
+
+The labels must also be in the camera's `detect_objects`, exactly as face
+recognition needs `person`. COCO-only on purpose: a label that exists on only
+one model tier would make the feature silently depend on which model is loaded.
+Expect it to be approximate, and the UI copy says so.
+
+**Motion state is now kept unconditionally** (`engine.process`), not only while
+`ignore_stationary` is on. Two features read it — this pass, and the loitering
+hold in `_stationary_after` — so keeping it behind that switch silently
+disabled both when the filter was turned off, with nothing saying why.
+
 #### Loitering — "someone is still there" (`detection.dwell_alert_seconds`)
 
 An ordinary alert says a subject ARRIVED, once, and is then suppressed by

@@ -293,6 +293,9 @@ class DetectionSettings(BaseModel):
     # Floor of 10 s on a non-zero value: below that it is not loitering, it is
     # the same alert twice.
     dwell_alert_seconds: int = Field(default=0, ge=0, le=3600)
+    # Alert when a carried object is left behind. Off by default —
+    # it adds notifications, and it is approximate by nature.
+    package_alerts: bool = False
 
     @field_validator("dwell_alert_seconds")
     @classmethod

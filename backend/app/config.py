@@ -506,6 +506,16 @@ DEFAULT_SETTINGS: dict = {
         # and restarting the clock there would mean a loiterer could avoid the
         # alert by standing somewhere with poor tracking.
         "dwell_alert_seconds": 0,
+        # LEFT PACKAGES. A carried object that is now sitting still, was not
+        # there before, and arrived while a person was about. Off by default
+        # for the same reason as the loitering alert: it ADDS notifications.
+        #
+        # Reported on COCO's carried-container classes (backpack / handbag /
+        # suitcase) because there is no `package` class; those labels must also
+        # be in the camera's detect_objects, exactly as face recognition needs
+        # `person`. Expect it to be approximate — it is a useful nudge, not a
+        # parcel tracker.
+        "package_alerts": False,
         # NIGHT CONTRAST BOOST for the detector's input frame only (see
         # native/enhance.py). For a camera run WITHOUT IR, where the scene is
         # dim rather than dark and the model has little to work with.

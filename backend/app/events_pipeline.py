@@ -543,6 +543,40 @@ class EventsPipeline:
     #: (a dog, a parcel) must never wait on a recognition that will not come.
     RECOGNIZABLE_LABELS = ("person", "car", "truck", "bus", "motorcycle", "van")
 
+    def note_package(self, camera: str, label: str, box: list) -> None:
+        """Something that can be carried has been left behind.
+
+        NOT tied to an event. A left package is the ABSENCE of activity — the
+        thing that makes it interesting is that nobody picked it up — so there
+        is no open event to hang it on, and by the time it is worth reporting
+        the delivery person's event has usually ended.
+
+        Best-effort and never raises. Deliberately plain: this signal is
+        approximate (COCO has no `package` class, so it rides the
+        carried-container labels), and the copy says so rather than asserting a
+        parcel arrived.
+        """
+        self._spawn(self._send_package(camera, label))
+
+    async def _send_package(self, camera: str, label: str) -> None:
+        ns = self._settings.notifications
+        if not ns.get("enabled", True):
+            return
+        friendly = await self._friendly_name(camera)
+        try:
+            await self._send_notification(
+                title=f"Something was left at {friendly}",
+                body=f"A {label} has been sitting there since someone was here",
+                event_id=None,
+                tag=f"vigilume-package-{camera}",
+                icon=ntfy_icon([label]),
+                with_image=False,
+                camera=camera,
+                camera_label=friendly,
+            )
+        except Exception:
+            log.exception("package notification failed for %s", camera)
+
     def note_dwell(self, fid: str, label: str, seconds: int) -> None:
         """A subject has been at this camera long enough to be worth saying so.
 
