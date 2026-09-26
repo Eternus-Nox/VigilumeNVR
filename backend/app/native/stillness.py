@@ -37,6 +37,15 @@ Two things count, because either alone misses a real case:
   Someone walking straight down a driveway at the lens barely moves their
   centre while their box doubles. Centre-only would call that parked.
 
+A displacement only COUNTS once it has held for MOVE_CONFIRM_FRAMES
+observations in a row. A single bad box — someone walking in front of a
+parked car, a passing car's headlights, a noisy IR frame — snaps back, and on
+the one-frame rule it used to flip a car that never moved to "arrived" and hold
+it active for `stationary_after_s`. And while another object covers a track's
+settled box, a change in the track's SHAPE is not evidence: the detector trims
+a partly hidden car's box, which moves its centre and shrinks it without the
+car going anywhere. Only a rigid shift counts then.
+
 Both are measured as a fraction of the box's own diagonal, so the threshold
 scales with distance automatically: a subject at 30 m has a smaller box and
 smaller absolute jitter, and needs to be held to a proportionally smaller
@@ -102,6 +111,31 @@ MOVE_FRACTION = 0.12
 #: detection. Genuine motion still clears this easily, because it accumulates.
 MIN_MOVE_PX = 6.0
 
+#: Size change needed to count as motion toward/away from the lens, as a
+#: fraction of the diagonal. Larger than MOVE_FRACTION because size is the
+#: noisier signal: headlight bloom, IR noise and partial occlusion all swell or
+#: shrink a parked car's box without it going anywhere. Real approach motion
+#: accumulates against the anchor, so this only delays it by a frame or two.
+SIZE_FRACTION = 0.2
+
+#: Consecutive observations a displacement must hold before it counts as
+#: motion. One was enough before, and one is exactly what a single bad box is:
+#: a person walking in front of a parked car, a passing car's headlights, a
+#: noisy IR frame. That flipped a parked car to "arrived" and held it active
+#: for `stationary_after_s`, which is how cars that never moved kept setting
+#: off detection. Real motion keeps being displaced frame after frame, so this
+#: costs a genuine arrival about half a second at 5 fps.
+MOVE_CONFIRM_FRAMES = 3
+
+#: Fraction of a track's SETTLED box (where it was last judged to be) that
+#: another object has to cover before its shape is no longer evidence of
+#: anything. While covered, only a rigid shift (centre moved, size kept)
+#: counts; a box that shrank because someone walked in front of it has not
+#: moved. Measured against the settled box, not the current one, because the
+#: detector trims the current box to stop at the occluder — so the box being
+#: cut barely overlaps the thing cutting it.
+OCCLUSION_FRACTION = 0.1
+
 #: How long a track that HAS moved may sit still before it stops sustaining its
 #: event. Three minutes: long enough that someone waiting at a door, or a
 #: delivery driver filling in a form, stays one event rather than being chopped
@@ -130,6 +164,11 @@ class TrackState:
     #: appeared from one that has been in view all day, which is the whole
     #: difference between a package someone left and the doormat.
     first_seen: float = 0.0
+    #: Consecutive observations displaced from the anchor that have not yet
+    #: been confirmed as motion (see MOVE_CONFIRM_FRAMES).
+    pending: int = 0
+    #: The whole box at the anchor, for the occlusion test.
+    anchor_box: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
 
     def is_still(self) -> bool:
         return self.still_since is not None
@@ -145,7 +184,9 @@ class Stillness:
 
     stationary_after_s: float = STATIONARY_AFTER_S
     move_fraction: float = MOVE_FRACTION
+    size_fraction: float = SIZE_FRACTION
     min_move_px: float = MIN_MOVE_PX
+    confirm_frames: int = MOVE_CONFIRM_FRAMES
     tracks: dict[int, TrackState] = field(default_factory=dict)
     #: How many observations this camera has dropped as furniture or dormant,
     #: for /api/recognition-style status and for answering "why is my parked
@@ -156,8 +197,11 @@ class Stillness:
     # ---------- per-frame ----------
 
     def update(self, tracker_id: int, box: tuple[float, float, float, float],
-               frame_time: float) -> TrackState:
+               frame_time: float, *, occluded: bool = False) -> TrackState:
         """Fold one observation in and return the track's state.
+
+        `occluded`: another tracked object overlaps this box this frame (see
+        `occluded_ids`), so a change in its SHAPE is not evidence it moved.
 
         Cheap enough to call for every confirmed observation on every frame:
         two subtractions, a hypot and a comparison.
@@ -169,20 +213,49 @@ class Stillness:
             # precisely how something already parked when we started looking
             # never becomes an event.
             st = TrackState(anchor=(cx, cy), anchor_diag=diag,
-                            still_since=frame_time, first_seen=frame_time)
+                            still_since=frame_time, first_seen=frame_time,
+                            anchor_box=tuple(float(v) for v in box))
             self.tracks[tracker_id] = st
 
         st.last_seen = frame_time
-        if self._moved(st, cx, cy, diag):
-            st.anchor = (cx, cy)
-            st.anchor_diag = diag
-            st.ever_moved = True
-            st.still_since = None
-        elif st.still_since is None:
-            st.still_since = frame_time
+        if self._moved(st, cx, cy, diag, occluded):
+            # Displaced — but it only COUNTS once it has stayed displaced for
+            # several observations in a row. A single bad box snaps back.
+            st.pending += 1
+            if st.pending >= self.confirm_frames:
+                st.anchor = (cx, cy)
+                st.anchor_diag = diag
+                st.anchor_box = tuple(float(v) for v in box)
+                st.ever_moved = True
+                st.still_since = None
+                st.pending = 0
+        else:
+            st.pending = 0
+            if st.still_since is None:
+                st.still_since = frame_time
         return st
 
-    def _moved(self, st: TrackState, cx: float, cy: float, diag: float) -> bool:
+    def update_frame(
+        self,
+        observations: Iterable[tuple[int, tuple[float, float, float, float]]],
+        frame_time: float,
+    ) -> None:
+        """Fold in one frame's observations, deciding occlusion for each.
+
+        A track counts as covered when any OTHER box this frame overlaps its
+        settled (anchor) box by OCCLUSION_FRACTION — see that constant for why
+        the settled box and not the current one.
+        """
+        obs = [(tid, tuple(float(v) for v in box)) for tid, box in observations]
+        for tid, box in obs:
+            st = self.tracks.get(tid)
+            ref = st.anchor_box if st is not None else box
+            others = [b for other, b in obs if other != tid]
+            self.update(tid, box, frame_time,
+                        occluded=_covered(ref, others, OCCLUSION_FRACTION))
+
+    def _moved(self, st: TrackState, cx: float, cy: float, diag: float,
+               occluded: bool = False) -> bool:
         """Has this track moved far enough from its anchor to count?
 
         Measured against the ANCHOR's diagonal rather than the current one, so
@@ -192,11 +265,17 @@ class Stillness:
         """
         scale = max(st.anchor_diag, diag)
         threshold = max(self.move_fraction * scale, self.min_move_px)
+        resized = abs(diag - st.anchor_diag) >= self.size_fraction * scale
+        if occluded and resized:
+            # Something is in front of it and its box changed shape: that is
+            # the box being cut, not the object moving. Its centre shifts too
+            # when it is cut, so neither measure can be trusted this frame.
+            return False
         if math.hypot(cx - st.anchor[0], cy - st.anchor[1]) >= threshold:
             return True
         # Size change: motion straight at or away from the lens, where the
         # centre can be almost perfectly still.
-        return abs(diag - st.anchor_diag) >= self.move_fraction * scale
+        return resized
 
     # ---------- reading ----------
 
@@ -282,6 +361,35 @@ class Stillness:
             "dropped_never_moved": self.dropped_never_moved,
             "dropped_dormant": self.dropped_dormant,
         }
+
+
+def occluded_ids(
+    boxes: Iterable[tuple[int, tuple[float, float, float, float]]],
+    fraction: float = OCCLUSION_FRACTION,
+) -> set[int]:
+    """Tracker ids whose box another box in the same frame covers by at least
+    `fraction` of its area. Quadratic, but over the handful of objects in one
+    frame."""
+    items = [(tid, tuple(float(v) for v in box)) for tid, box in boxes]
+    return {
+        tid for i, (tid, a) in enumerate(items)
+        if _covered(a, [b for j, (_, b) in enumerate(items) if j != i], fraction)
+    }
+
+
+def _covered(
+    a: tuple[float, ...], others: Iterable[tuple[float, ...]], fraction: float
+) -> bool:
+    """Does any box in `others` cover at least `fraction` of box `a`?"""
+    area = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
+    if area <= 0:
+        return False
+    for b in others:
+        ix = min(a[2], b[2]) - max(a[0], b[0])
+        iy = min(a[3], b[3]) - max(a[1], b[1])
+        if ix > 0 and iy > 0 and ix * iy >= fraction * area:
+            return True
+    return False
 
 
 def _centre_and_diag(

@@ -84,19 +84,21 @@ def check(cond: bool, msg: str) -> None:
 # The background capability probe would hang on a blackholed IP; the object
 # semantics don't need it — stub it out so CRUD returns instantly.
 def _nudge(box, i: int, step: float = 10.0):
-    """One box, shifted on alternate frames.
+    """A subject that ARRIVES: frame 0 is `step` px off, every later frame is
+    exactly where the case put it.
 
     A track that has NEVER moved is furniture (native/stillness.py): it opens
     no event, on purpose, because a detector reports a parked car five times a
-    second forever. So a fixture that feeds one fixed box is feeding a parked
-    car, and would assert that furniture raises an alarm.
+    second forever. And motion only counts once it has held for
+    MOVE_CONFIRM_FRAMES observations in a row — a box that jiggles back and
+    forth is exactly the jitter that made parked cars set off detection, so it
+    is no longer "moving". One step, then standing still, is: the displacement
+    from frame 0 holds on frames 1, 2 and 3.
 
-    Oscillating rather than drifting keeps the foot-center within `step` px of
-    where the case put it — these suites are about zones, labels and
-    annotation, and a box that wandered out of its zone would break them for a
-    reason that has nothing to do with what they test.
+    Settling on the case's own coordinates keeps the foot where the case put
+    it — these suites are about zones, labels and annotation.
     """
-    dx = step if i % 2 else 0.0
+    dx = -step if i == 0 else 0.0
     x1, y1, x2, y2 = box
     return (x1 + dx, y1, x2 + dx, y2)
 

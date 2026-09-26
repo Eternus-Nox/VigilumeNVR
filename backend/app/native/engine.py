@@ -904,8 +904,7 @@ class DetectionEngine:
         # until its NEXT step — which delays every real subject's event by a
         # frame and moves its start time off the moment they actually arrived.
         cam.stillness.stationary_after_s = self._stationary_after(cam)
-        for o in obs:
-            cam.stillness.update(o.tracker_id, o.box, frame_time)
+        cam.stillness.update_frame(((o.tracker_id, o.box) for o in obs), frame_time)
 
         if self._ignore_stationary(cam):
             active: list[Observation] = []

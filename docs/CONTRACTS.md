@@ -981,6 +981,20 @@ in `api.ts`, and `?? null` (never `||`) at the control. The full camera update
 does not write this column at all, so an unrelated camera save cannot un-pin a
 camera somebody deliberately pinned.
 
+
+**What counts as moving (hardened).** Parked cars were still setting off
+detection, because one out-of-place box was enough to count as motion: a
+person walking in front of the car, headlights, a noisy IR frame. Now:
+
+- a displacement must hold for `MOVE_CONFIRM_FRAMES` (3) observations in a row
+  — a real arrival keeps moving, a glitch snaps back (~0.5 s cost at 5 fps);
+- size change alone needs 20% of the diagonal (`SIZE_FRACTION`), not 12%,
+  since bloom and occlusion swell or shrink boxes;
+- while another object covers ≥10% of a track's SETTLED box, a change in its
+  shape does not count at all; only a rigid shift (same size, new place) does.
+  The settled box, not the current one, because the detector trims a partly
+  hidden car's box to stop at the person in front of it.
+
 #### Left packages (`detection.package_alerts`, off by default)
 
 There is no `package` class in COCO, so this rides the carried-container labels

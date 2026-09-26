@@ -84,18 +84,15 @@ def check(cond: bool, msg: str) -> None:
 
 
 def _nudge(box, i: int, step: float = 10.0):
-    """One box, shifted on alternate frames.
+    """A subject that ARRIVES: frame 0 is `step` px off, every later frame is
+    exactly where the case put it.
 
-    A track that has NEVER moved is furniture (native/stillness.py): it opens
-    no event, on purpose, because a detector reports a parked car five times a
-    second forever. So a fixture feeding one fixed box is feeding a parked car,
-    and would be asserting that furniture raises an alarm.
-
-    Oscillating rather than drifting keeps the foot-center within `step` px of
-    where the case put it — this suite is about self-healing, not geometry, and
-    a box that wandered somewhere new would break it for an unrelated reason.
+    A track that has NEVER moved is furniture (native/stillness.py), and
+    motion only counts once it has held for MOVE_CONFIRM_FRAMES observations in
+    a row — a box that jiggles back and forth is the jitter that made parked
+    cars set off detection. One step, then standing still, is real motion.
     """
-    dx = step if i % 2 else 0.0
+    dx = -step if i == 0 else 0.0
     x1, y1, x2, y2 = box
     return (x1 + dx, y1, x2 + dx, y2)
 

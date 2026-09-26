@@ -249,15 +249,16 @@ def main() -> int:  # noqa: C901 — a checklist, not a branchy algorithm
             self.counts[(camera, label)] = count
 
     async def drive(engine, camera, foot_x, foot_y, frames=MIN_HITS + 2, tid=9, t0=1000.0):
-        # Shuffle the foot 10 px between frames. A track that NEVER moves is
-        # furniture (native/stillness.py) and opens no event on purpose, so a
-        # fixed foot would be feeding a parked car and asserting it alarms.
-        # Alternating rather than drifting keeps the foot on the side of the
-        # include zone this case put it on, which is what is under test.
+        # Arrive 10 px from the left, then stand still. A track that NEVER
+        # moves is furniture (native/stillness.py) and opens no event on
+        # purpose, and motion only counts once it has held for several frames
+        # in a row — a foot shuffling back and forth is jitter now. Settling on
+        # the case's own position keeps the foot on the side of the include
+        # zone this case put it on, which is what is under test.
         for i in range(frames):
             await engine.process(
                 camera, t0 + i * 0.2,
-                [obs(foot_x + (10.0 if i % 2 else 0.0), foot_y, tid=tid)],
+                [obs(foot_x + (-10.0 if i == 0 else 0.0), foot_y, tid=tid)],
                 frame_bgr=None,
             )
 
@@ -314,9 +315,12 @@ def main() -> int:  # noqa: C901 — a checklist, not a branchy algorithm
             "the payload also carries the detect-space geometry for the snapshot",
         )
 
-        # A crossing, driven frame by frame the way ingest does.
+        # A crossing, driven frame by frame the way ingest does: a person
+        # walking steadily up the frame and over the line at y=240. (Not a
+        # stand-then-teleport: a 260 px jump in one frame reads as a glitch
+        # now that motion has to hold for several frames in a row.)
         add("gate", cross_lines=[{"name": "gate", "start": [0.0, 0.5], "end": [1.0, 0.5]}])
-        for i, y in enumerate((400, 400, 400, 380, 120, 100)):
+        for i, y in enumerate(range(420, 80, -30)):
             await engine.process("gate", 2000.0 + i * 0.2, [obs(320, y, tid=11)], frame_bgr=None)
         gate = engine.open_event("gate", "person")
         check(gate is not None and gate.zones == {"gate"},

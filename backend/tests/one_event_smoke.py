@@ -189,6 +189,32 @@ async def engine_checks() -> None:
           f"measured from the person's arrival ({cap.dwells[-1][2]} s)")
 
 
+async def parked_car_checks() -> None:
+    print("\nsomeone walks past a parked car (stationary objects ignored)")
+    engine, cap = make_engine(ignore_stationary=True)
+    parked = (300.0, 200.0, 600.0, 400.0)
+    t = 1000.0
+    for i in range(30):  # the car has been parked all along
+        await engine.process("drive", t, [Observation("car", 2, 0.95, parked)], frame_bgr=None)
+        t += 0.5
+    check(not cap.of("new"), "a parked car alone opens nothing")
+    for i in range(14):  # a person walks left to right, in front of it
+        x = 200.0 + i * 40.0
+        person_box = (x, 150.0, x + 60.0, 420.0)
+        # The detector's box on the car is cut where the person covers it.
+        car_box = (300.0, 200.0, 600.0, 400.0) if not 300 <= x <= 560 else (300.0, 200.0, 450.0, 400.0)
+        await engine.process("drive", t, [Observation("car", 2, 0.95, car_box),
+                                          Observation("person", 1, 0.85, person_box)],
+                             frame_bgr=None)
+        t += 0.3
+    news = cap.of("new")
+    check(len(news) == 1 and news[0]["label"] == "person", "the person opens the event")
+    all_labels = {l for p in cap.payloads for l in p["after"].get("labels", [])}
+    check("car" not in all_labels,
+          f"and the parked car never joins it, even though its box was cut in half "
+          f"while they passed (labels seen: {sorted(all_labels)})")
+
+
 def label_checks() -> None:
     print("\nnaming order")
     check(label_rank("person") < label_rank("car") < label_rank("dog") < label_rank("kite"),
@@ -314,6 +340,7 @@ async def filter_checks() -> None:
 async def main() -> int:
     label_checks()
     await engine_checks()
+    await parked_car_checks()
     await notify_checks()
     await presence_checks()
     await filter_checks()

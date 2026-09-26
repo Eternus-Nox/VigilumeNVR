@@ -43,7 +43,8 @@ from app.native.engine import (  # noqa: E402
     MIN_HITS, UPDATE_HEARTBEAT_S, DetectionEngine, Observation, _CameraState,
 )
 from app.native.stillness import (  # noqa: E402
-    MIN_MOVE_PX, STATIONARY_AFTER_S, Stillness, clamp_stationary_after,
+    MIN_MOVE_PX, MOVE_CONFIRM_FRAMES, STATIONARY_AFTER_S, Stillness,
+    clamp_stationary_after, occluded_ids,
 )
 
 _failures: list[str] = []
@@ -420,7 +421,92 @@ def settings_checks() -> None:
     check(bad, "an out-of-range stationary_after_s is a 422, not a silent clamp")
 
 
+def glitch_checks() -> None:
+    """Parked cars were setting off detection. One bad box was enough: a
+    person walking in front of the car, a passing car's headlights, a noisy
+    IR frame — any single frame displaced past the threshold flipped the car
+    to "arrived" and held it active for stationary_after_s."""
+    print("\na glitch is not an arrival")
+    s = Stillness()
+    parked = box_at(300.0, 300.0, w=180.0, h=120.0)
+    t = 1000.0
+    for i in range(20):
+        box = box_at(360.0, 300.0, w=180.0, h=120.0) if i == 10 else parked
+        s.update(1, box, t + i * 0.2)
+    check(not s.tracks[1].ever_moved,
+          "ONE frame with the box 60 px off, then back, does not make a parked car move")
+    for i in range(20):
+        box = box_at(360.0, 300.0, w=180.0, h=120.0) if i in (5, 6) else parked
+        s.update(1, box, t + 10 + i * 0.2)
+    check(not s.tracks[1].ever_moved,
+          f"nor do two in a row — it has to hold for {MOVE_CONFIRM_FRAMES}")
+    for i in range(20):
+        box = box_at(300.0, 300.0, w=260.0, h=180.0) if i % 3 == 0 else parked
+        s.update(1, box, t + 20 + i * 0.2)
+    check(not s.tracks[1].ever_moved,
+          "headlight bloom swelling the box every third frame is not movement")
+
+    print("\nreal motion still counts, a moment later")
+    for i in range(MOVE_CONFIRM_FRAMES + 1):
+        s.update(2, box_at(300.0 + i * 40.0, 300.0, w=180.0, h=120.0), t + i * 0.2)
+    check(s.tracks[2].ever_moved,
+          f"a car that keeps moving is 'moved' within {MOVE_CONFIRM_FRAMES + 1} frames "
+          "(under a second at 5 fps)")
+    s.update(3, parked, t)
+    for i in range(1, 5):
+        s.update(3, box_at(300.0, 300.0 - 60.0, w=180.0, h=120.0), t + i * 0.2)
+    check(s.tracks[3].ever_moved,
+          "a car that pulls out and STAYS in its new place is 'moved' — the "
+          "displacement held")
+
+    print("\nsomeone walking past a parked car")
+    car = (200.0, 200.0, 400.0, 330.0)
+    person_in_front = (260.0, 150.0, 320.0, 340.0)
+    ids = occluded_ids([(1, car), (2, person_in_front)])
+    check(1 in ids, "the car is recognised as covered by the person")
+    s = Stillness()
+    s.update(1, car, t)
+    for i in range(1, 15):
+        cut = (200.0, 200.0, 300.0, 330.0)  # the detector's box shrinks behind them
+        s.update(1, cut, t + i * 0.2, occluded=True)
+    for i in range(15, 25):
+        s.update(1, car, t + i * 0.2)
+    check(not s.tracks[1].ever_moved,
+          "the car's box being cut in half for 3 s while someone walks in front "
+          "of it is NOT the car moving")
+    s2 = Stillness()
+    s2.update(1, car, t)
+    for i in range(1, 15):
+        s2.update(1, (200.0, 200.0, 300.0, 330.0), t + i * 0.2)
+    check(s2.tracks[1].ever_moved,
+          "(the same change with nothing in front of it does count — the guard "
+          "is the occlusion, not a blind spot)")
+    s3 = Stillness()
+    s3.update(1, car, t)
+    for i in range(1, 6):
+        dx = i * 50.0
+        s3.update(1, (200.0 + dx, 200.0, 400.0 + dx, 330.0), t + i * 0.2, occluded=True)
+    check(s3.tracks[1].ever_moved,
+          "while a car that actually DRIVES past something (same size, new place) "
+          "still counts even though it is overlapped")
+
+    print("\na car that parked hours ago")
+    s = Stillness(stationary_after_s=180.0)
+    for i in range(6):
+        s.update(1, box_at(300.0 + i * 40.0, 300.0, w=180.0, h=120.0), t + i * 0.2)
+    home = box_at(500.0, 300.0, w=180.0, h=120.0)
+    for i in range(1000):
+        s.update(1, home, t + 2 + i)
+    later = t + 1100
+    check(not s.is_active(1, later), "it went dormant after it parked")
+    s.update(1, box_at(560.0, 300.0, w=180.0, h=120.0), later)
+    s.update(1, home, later + 0.2)
+    check(not s.is_active(1, later + 0.2),
+          "and one glitch hours later does not wake it back up")
+
+
 def main() -> int:
+    glitch_checks()
     motion_checks()
     state_checks()
     clamp_checks()

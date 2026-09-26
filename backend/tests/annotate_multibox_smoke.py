@@ -253,18 +253,17 @@ async def _engine_scene_cases() -> None:
 
     frame = np.full((480, 640, 3), BG, dtype=np.uint8)
     def scene_at(i: int):
-        # Shift every box on alternate frames. A track that NEVER moves is
-        # furniture (native/stillness.py) and opens no event by design, so
-        # three fixed boxes would be three parked cars and nothing would be
-        # emitted to annotate at all.
+        # Every box arrives 40 px from the left and then stands still. A track
+        # that NEVER moves is furniture (native/stillness.py) and opens no
+        # event by design, and motion only counts once it has held for
+        # several frames in a row — so the boxes step once and stay.
         #
         # 40 px because the threshold scales with the box: it is 12% of the
         # diagonal, and these boxes are ~270 px across the diagonal, so a
-        # 10 px shuffle reads as wobble. Alternating (rather than drifting)
-        # also means the frame that OPENS the event — the third, once the
-        # tracks confirm — is an even one, carrying the original coordinates
-        # these assertions are written against.
-        dx = 40.0 if i % 2 else 0.0
+        # 10 px step reads as wobble. Settling on the original coordinates
+        # means the frame that OPENS the event carries the coordinates these
+        # assertions are written against.
+        dx = -40.0 if i == 0 else 0.0  # arrive, then stand (see stillness)
         return [
             Observation("person", 0, 0.90, (50.0 + dx, 50.0, 150.0 + dx, 300.0)),
             Observation("person", 1, 0.80, (250.0 + dx, 60.0, 360.0 + dx, 320.0)),
@@ -392,18 +391,17 @@ async def _pipeline_multibox_cases() -> None:
 
     frame = np.full((480, 640, 3), BG, dtype=np.uint8)
     def scene_at(i: int):
-        # Shift every box on alternate frames. A track that NEVER moves is
-        # furniture (native/stillness.py) and opens no event by design, so
-        # three fixed boxes would be three parked cars and nothing would be
-        # emitted to annotate at all.
+        # Every box arrives 40 px from the left and then stands still. A track
+        # that NEVER moves is furniture (native/stillness.py) and opens no
+        # event by design, and motion only counts once it has held for
+        # several frames in a row — so the boxes step once and stay.
         #
         # 40 px because the threshold scales with the box: it is 12% of the
         # diagonal, and these boxes are ~270 px across the diagonal, so a
-        # 10 px shuffle reads as wobble. Alternating (rather than drifting)
-        # also means the frame that OPENS the event — the third, once the
-        # tracks confirm — is an even one, carrying the original coordinates
-        # these assertions are written against.
-        dx = 40.0 if i % 2 else 0.0
+        # 10 px step reads as wobble. Settling on the original coordinates
+        # means the frame that OPENS the event carries the coordinates these
+        # assertions are written against.
+        dx = -40.0 if i == 0 else 0.0  # arrive, then stand (see stillness)
         return [
             Observation("person", 0, 0.90, (50.0 + dx, 50.0, 150.0 + dx, 300.0)),
             Observation("person", 1, 0.80, (250.0 + dx, 60.0, 360.0 + dx, 320.0)),
