@@ -1446,6 +1446,16 @@ times in a row is left alone for 5 minutes. It runs as a background task: the
 detection loop never waits on a camera, and a track that ends mid-look votes
 up to 3 s later instead of stalling the frame. The switch is read live.
 
+**A plate zone is a fast lane.** On a camera with a plate zone drawn, every
+tracked vehicle in the zone is read from the first frame it is tracked —
+before the three-frame confirmation and the stationary filter, which decide
+what deserves an EVENT and cost half a second or more. In the zone the detect
+frame is searched every frame and a full-resolution look goes out every 0.5 s
+(1 s elsewhere). A plate read on a car that never opened an event (parked in
+the box, or through it faster than an event confirms) is kept as a candidate
+but writes no `event_recognitions` row. Without a zone, the pass reads
+confirmed, moving vehicles anywhere at the ordinary cadence, as before.
+
 Two scorer/localizer fixes ship with it, because full-resolution crops exposed
 both: the localizer works at fixed widths (480 and 560 px, unioned) since its
 kernels are fixed-pixel, and `PLATE_ASPECT_MAX` is 5.0 (was 4.0) because the

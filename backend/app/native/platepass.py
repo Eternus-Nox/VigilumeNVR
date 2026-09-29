@@ -93,6 +93,16 @@ DEFAULT_RETENTION_DAYS = 7.0
 #: serve, not by what the OCR could absorb.
 HIRES_INTERVAL_S = 1.0
 
+#: INSIDE A PLATE ZONE the pass runs flat out. The zone is the operator
+#: saying "plates are readable here — read them", and a car driving through a
+#: small box is in it for a second or two: at the ordinary cadence it could be
+#: gone before the second full-resolution look. So in a zone the detect frame
+#: is searched every frame (at 5 fps), a full-resolution look goes out every
+#: half second, and — see `observe` — the car is read from the first frame it
+#: is tracked, without waiting for it to be confirmed as a moving subject.
+ZONE_PASS_INTERVAL_S = 0.15
+ZONE_HIRES_INTERVAL_S = 0.5
+
 #: Most full-resolution looks one vehicle gets. A car that parks and stays
 #: tracked must not cost a snapshot a second for as long as it sits there.
 HIRES_MAX_PER_TRACK = 8
@@ -277,8 +287,19 @@ class PlatePass:
         frame_bgr: Optional[np.ndarray],
         frame_time: float,
         event_fid: str = "",
+        seen: Optional[Sequence[Any]] = None,
     ) -> None:
-        """Look for a plate on the confirmed vehicles in this frame. Never raises."""
+        """Look for a plate on the vehicles in this frame. Never raises.
+
+        `observations` are the CONFIRMED, moving objects — what the ordinary
+        pass reads. `seen` is every tracked object this frame, before
+        confirmation and before the stationary filter; on a camera with a
+        plate zone, any vehicle in it is read from `seen`, at the zone cadence.
+        That filter and the three-frame confirmation exist to decide what
+        deserves an EVENT, and cost half a second or more; for a plate the
+        only question is whether there is a readable one in the box, and the
+        OCR already rejects anything that is not a plate.
+        """
         if frame_bgr is None or not self._reader.ready:
             return
         # Per-camera opt-out, checked before any work — see the twin in
@@ -289,23 +310,26 @@ class PlatePass:
             return
         camera = cam.row.get("name", "")
         try:
-            vehicles = [o for o in observations if is_vehicle(o.label)]
+            plate_zones = getattr(cam, "plate_zones", None)
+            pool = seen if (plate_zones and seen is not None) else observations
+            vehicles = [o for o in pool if is_vehicle(o.label)]
             if not vehicles:
                 return
-            plate_zones = getattr(cam, "plate_zones", None)
             if plate_zones:
                 hits = zonelib.zone_hits(vehicles, plate_zones)
                 vehicles = [o for o, names in zip(vehicles, hits) if names]
                 if not vehicles:
                     return
+            fast = bool(plate_zones)
             for obs in vehicles:
-                await self._observe_one(cam, camera, obs, frame_bgr, frame_time, event_fid)
+                await self._observe_one(cam, camera, obs, frame_bgr, frame_time, event_fid,
+                                        fast=fast)
         except Exception:
             log.exception("plate pass failed on %s", camera)
 
     async def _observe_one(
         self, cam: Any, camera: str, obs: Any, frame_bgr: np.ndarray,
-        frame_time: float, event_fid: str,
+        frame_time: float, event_fid: str, *, fast: bool = False,
     ) -> None:
         key = (camera, obs.tracker_id)
         st = self._tracks.get(key)
@@ -317,14 +341,14 @@ class PlatePass:
             self._tracks[key] = st
         if event_fid:
             st.event_fid = event_fid
-        if frame_time - st.last_pass < PASS_INTERVAL_S:
+        if frame_time - st.last_pass < (ZONE_PASS_INTERVAL_S if fast else PASS_INTERVAL_S):
             return
         st.last_pass = frame_time
         self._stats_for(camera).passes += 1
 
         # Before the detect-frame work, so the snapshot request is on the wire
         # while this frame is being searched.
-        self._maybe_look_hires(cam, camera, st, obs, frame_bgr, frame_time)
+        self._maybe_look_hires(cam, camera, st, obs, frame_bgr, frame_time, fast=fast)
 
         cropped = crop_with_origin(frame_bgr, obs.box, pad=VEHICLE_CROP_PAD)
         if cropped is None:
@@ -411,7 +435,7 @@ class PlatePass:
 
     def _maybe_look_hires(
         self, cam: Any, camera: str, st: _TrackState, obs: Any,
-        frame_bgr: np.ndarray, frame_time: float,
+        frame_bgr: np.ndarray, frame_time: float, *, fast: bool = False,
     ) -> None:
         """Start a full-resolution look at this vehicle if one is due. Never awaits."""
         if not self._hires_on():
@@ -421,7 +445,7 @@ class PlatePass:
             return
         if st.hires_requests >= HIRES_MAX_PER_TRACK:
             return
-        if frame_time - st.hires_last < HIRES_INTERVAL_S:
+        if frame_time - st.hires_last < (ZONE_HIRES_INTERVAL_S if fast else HIRES_INTERVAL_S):
             return
         if (st.vote is not None and st.vote.reads >= SETTLED_READS
                 and st.vote.confidence >= SETTLED_CONFIDENCE):
@@ -621,19 +645,24 @@ class PlatePass:
         matched = st.match is not None and st.match.matched
         now = time.time()
 
-        await self._db.conn.execute(
-            "INSERT INTO event_recognitions (event_fid, kind, profile_id, name, plate, "
-            "score, quality, image_path, created_at) VALUES (?, 'plate', ?, ?, ?, ?, ?, '', ?)",
-            (
-                st.event_fid,
-                st.match.profile_id if matched else None,
-                st.match.name if matched else "",
-                st.vote.text,
-                float(st.match.score) if st.match is not None else 0.0,
-                float(shot.quality.total) if shot is not None else 0.0,
-                now,
-            ),
-        )
+        # Only against a real event. A plate zone reads cars that never open
+        # one (parked in the box, or through it faster than an event
+        # confirms); their plate still becomes a candidate below, but a
+        # recognition row with no event would belong to nothing.
+        if st.event_fid:
+            await self._db.conn.execute(
+                "INSERT INTO event_recognitions (event_fid, kind, profile_id, name, plate, "
+                "score, quality, image_path, created_at) VALUES (?, 'plate', ?, ?, ?, ?, ?, '', ?)",
+                (
+                    st.event_fid,
+                    st.match.profile_id if matched else None,
+                    st.match.name if matched else "",
+                    st.vote.text,
+                    float(st.match.score) if st.match is not None else 0.0,
+                    float(shot.quality.total) if shot is not None else 0.0,
+                    now,
+                ),
+            )
         if not matched:
             await self._store_candidate(st, shot, now)
         await self._db.conn.commit()

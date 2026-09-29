@@ -460,6 +460,69 @@ async def pass_checks(reader: PlateReader) -> None:
     check("drive" not in pp.status()["cameras"], "and the camera's stats go with it")
 
 
+def zoned_cam(detect_shape) -> Cam:
+    """A camera whose plate zone covers the lower half of the frame."""
+    import app.native.zones as zonelib
+
+    cam = Cam()
+    h, w = detect_shape[:2]
+    cam.row.update({"detect_width": w, "detect_height": h, "plate_zones": [
+        {"name": "gate", "points": [[0.0, 0.5], [1.0, 0.5], [1.0, 1.0], [0.0, 1.0]]}]})
+    cam.plate_zones = zonelib.polygon_zones(cam.row, "plate_zones", "plate")
+    return cam
+
+
+async def zone_checks(reader: PlateReader) -> None:
+    print("\na plate zone is a fast lane, not just a filter")
+    tmp = Path(tempfile.mkdtemp(prefix="vigilume-plate-zone-"))
+    frame, box = scene(plate_w=150)
+    det, dbox = to_detect(frame, box)
+
+    db = FakeDB(tmp / "z.db")
+    served = Served(frame)
+    pp = PlatePass(reader, db, tmp / "crops-z", snapshots=SnapshotSource(fetch_jpeg=served))
+    await pp.reload_gallery()
+    cam = zoned_cam(det.shape)
+    car = Obs(21, dbox)
+    # Not yet confirmed as a moving subject: `observations` is EMPTY, the car
+    # is only in `seen`. The ordinary pass would not look at it at all.
+    await pp.observe(cam, [], det, 10.0, event_fid="", seen=[car])
+    await asyncio.sleep(0.3)
+    check(served.calls == 1,
+          "a car in the zone gets a full-resolution look on the FIRST frame it is "
+          "tracked, before it is confirmed as an event")
+    for i in range(1, 4):
+        await pp.observe(cam, [], det, 10.0 + i * 0.2, event_fid="", seen=[car])
+        await asyncio.sleep(platesnap.SHARE_S + 0.05)
+    looks = pp.status()["cameras"]["drive"]["hires_requested"]
+    check(looks >= 2, f"and another every half second while it is in the box ({looks} "
+                      "looks in 0.6 s; the ordinary cadence is one a second)")
+    passes = pp.status()["cameras"]["drive"]["passes"]
+    check(passes == 4, f"the detect frame is searched on every frame in the zone ({passes}/4)")
+    await pp.finish("drive", 21)
+    await pp.wait_idle()
+    cands = db.rows("SELECT * FROM recognition_candidates")
+    check(len(cands) == 1 and cands[0]["plate"] == PLATE,
+          "the plate is read and kept as a candidate even though no event opened")
+    check(db.rows("SELECT * FROM event_recognitions") == [],
+          "without writing a recognition row that belongs to no event")
+
+    print("\n...and outside the zone nothing changes")
+    db = FakeDB(tmp / "o.db")
+    served = Served(frame)
+    pp = PlatePass(reader, db, tmp / "crops-o", snapshots=SnapshotSource(fetch_jpeg=served))
+    await pp.observe(Cam(), [], det, 10.0, event_fid="", seen=[car])
+    await asyncio.sleep(0.2)
+    check(served.calls == 0 and not pp._tracks,
+          "with no zone drawn, an unconfirmed car is not read — the ordinary pass "
+          "waits for confirmation as before")
+    far = Obs(22, (dbox[0], 10.0, dbox[2], 10.0 + (dbox[3] - dbox[1]) * 0.3))
+    pp2 = PlatePass(reader, FakeDB(tmp / "f.db"), tmp / "crops-f",
+                    snapshots=SnapshotSource(fetch_jpeg=Served(frame)))
+    await pp2.observe(zoned_cam(det.shape), [], det, 10.0, event_fid="", seen=[far])
+    check(not pp2._tracks, "and a car outside the drawn zone is still ignored")
+
+
 async def main() -> int:
     models_dir = Path(os.environ.get("VIGILUME_TEST_MODELS_DIR", "")
                       or tempfile.mkdtemp(prefix="vigilume-plate-models-"))
@@ -473,6 +536,7 @@ async def main() -> int:
     locate_checks()
     await source_checks()
     await pass_checks(reader)
+    await zone_checks(reader)
 
     print()
     if _failures:

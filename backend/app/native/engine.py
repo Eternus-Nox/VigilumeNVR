@@ -982,10 +982,15 @@ class DetectionEngine:
         # Fed the vehicle labels the camera is actually tracking. PlatePass
         # picks its own out of the set and throttles per track, so handing it
         # the whole confirmed scene costs nothing when there is no vehicle.
-        if self._plates is not None and confirmed:
+        # With a plate zone drawn, every tracked vehicle in it is handed over
+        # too (`seen`), before confirmation and the stationary filter: those
+        # decide what deserves an EVENT and cost half a second, and a car
+        # crossing a small box does not have half a second to spare.
+        if self._plates is not None and (confirmed or (obs and cam.plate_zones)):
             open_ev = self._events.get(camera)
             await self._plates.observe(cam, confirmed, frame_bgr, frame_time,
-                                       open_ev.fid if open_ev is not None else "")
+                                       open_ev.fid if open_ev is not None else "",
+                                       seen=obs)
 
         # The full confirmed set is the "scene" saved with the event's best
         # frame — every counted object, all labels.
