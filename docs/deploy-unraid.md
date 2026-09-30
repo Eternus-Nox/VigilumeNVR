@@ -28,8 +28,8 @@ first and treat the NVIDIA steps as optional. The big picture is in the
      nvidia-smi -L       # copy the "GPU-xxxxxxxx-..." UUID
      ```
    - Put that UUID in `.env` as `NVIDIA_VISIBLE_DEVICES=GPU-...`.
-   - Then **uncomment the `deploy:` block** in the backend service — it ships
-     commented out so the stack deploys on GPU-less boxes.
+   - The `deploy:` block in the backend service that hands the card to the
+     container ships **enabled** — nothing to edit on an NVIDIA box.
 3. **Docker Compose** — either the *Docker Compose Manager* plugin (by
    *dcflachs*), or just run `docker compose` from the Unraid terminal
    (available on current Unraid).
@@ -236,17 +236,17 @@ Coral can do detection while an AMD iGPU does transcoding:
 
 Everything is switched with **stack environment variables**, with exactly one
 exception: the NVIDIA reservation, which is a `deploy:` block and cannot be
-made conditional with a variable. It therefore ships **commented out** in both
-compose files, so the stack deploys unchanged on AMD, Intel and CPU-only boxes.
+made conditional with a variable. It ships **enabled**, so an NVIDIA box
+deploys unchanged; AMD, Intel and CPU-only boxes comment it out.
 
 | Your box | `deploy:` block | Variables to set |
 |---|---|---|
-| **NVIDIA GPU** | **uncomment** | *(none — defaults are right)*; optionally `NVIDIA_VISIBLE_DEVICES=GPU-…` |
-| **AMD / Intel iGPU + Coral** | leave commented | `VAAPI_DEVICE=/dev/dri/renderD128`, `CORAL_DEVICE=/dev/apex_0`, and pick *Coral* in Settings → Recording → Detection hardware |
-| **AMD / Intel iGPU, no Coral** | leave commented | `VAAPI_DEVICE=/dev/dri/renderD128`, `VIGILUME_DETECTOR=onnx_cpu`, `VIGILUME_REQUIRE_GPU=0` |
-| **CPU only** | leave commented | `VIGILUME_DETECTOR=onnx_cpu`, `VIGILUME_REQUIRE_GPU=0` |
+| **NVIDIA GPU** | leave on | *(none — defaults are right)*; optionally `NVIDIA_VISIBLE_DEVICES=GPU-…` |
+| **AMD / Intel iGPU + Coral** | **comment out** | `VAAPI_DEVICE=/dev/dri/renderD128`, `CORAL_DEVICE=/dev/apex_0`, and pick *Coral* in Settings → Recording → Detection hardware |
+| **AMD / Intel iGPU, no Coral** | **comment out** | `VAAPI_DEVICE=/dev/dri/renderD128`, `VIGILUME_DETECTOR=onnx_cpu`, `VIGILUME_REQUIRE_GPU=0` |
+| **CPU only** | **comment out** | `VIGILUME_DETECTOR=onnx_cpu`, `VIGILUME_REQUIRE_GPU=0` |
 
-The block to uncomment (backend service, both compose files):
+The block (backend service):
 
 ```yaml
     deploy:
@@ -258,10 +258,10 @@ The block to uncomment (backend service, both compose files):
               capabilities: [gpu]
 ```
 
-Uncommenting it **without** the Nvidia Driver plugin installed fails the whole
+Leaving it on **without** the Nvidia Driver plugin installed fails the whole
 stack with *could not select device driver "nvidia" with capabilities:
 [[gpu]]* — `docker compose up` aborts before any container starts, so nothing
-is left half-running. Installing the plugin but forgetting to uncomment is the quieter
+is left half-running. Commenting it out on an NVIDIA box is the quieter
 failure: the stack comes up and detection logs `GPU UNAVAILABLE` with
 `ready:false` (because `VIGILUME_REQUIRE_GPU` defaults to `1`), which is the
 intended loud-rather-than-slow behavior.

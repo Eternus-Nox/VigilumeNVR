@@ -45,11 +45,10 @@ def check(cond: bool, msg: str) -> None:
 # ${VAR:?msg} / ${VAR:-default} / ${VAR}
 VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::([?-])([^}]*))?\}")
 
-# The NVIDIA reservation, as it appears COMMENTED OUT in the backend service.
-# Matching the exact indented forms is the point: this block's only interface is
-# a human deleting the "# " prefixes, so its indentation has to be right.
+# The NVIDIA reservation's lines in the backend service. Commenting them out is
+# how a box without an NVIDIA card opts out, so this matches exactly those lines.
 NVIDIA_BLOCK_RE = re.compile(
-    r"^(\s*)# (deploy:"
+    r"^(\s*)(deploy:"
     r"|  resources:"
     r"|    reservations:"
     r"|      devices:"
@@ -106,12 +105,19 @@ def bind_sources(service: dict) -> list[str]:
     return out
 
 
-def uncomment_nvidia(text: str) -> str:
-    """The file as it would be after a user uncomments the NVIDIA block."""
-    return "\n".join(
-        (m.group(1) + m.group(2)) if (m := NVIDIA_BLOCK_RE.match(line)) else line
-        for line in text.split("\n")
-    )
+def comment_nvidia(text: str) -> str:
+    """The file as it would be after a non-NVIDIA box comments the block out."""
+    base = None
+    out = []
+    for line in text.split("\n"):
+        m = NVIDIA_BLOCK_RE.match(line)
+        if m and m.group(2) == "deploy:":
+            base = m.group(1)
+        if m and base is not None and m.group(1) == base:
+            out.append(f"{base}# {m.group(2)}")
+        else:
+            out.append(line)
+    return "\n".join(out)
 
 
 def main() -> None:
@@ -233,20 +239,19 @@ def main() -> None:
           "naming CORAL_DEVICE / VAAPI_DEVICE maps them through at the same path "
           "inside the container (app code needs no separate config)")
 
-    # ── 7. The NVIDIA reservation ships COMMENTED OUT, and uncomments clean ──
-    # An active `deploy.reservations.devices[driver: nvidia]` makes the backend
+    # ── 7. The NVIDIA reservation ships ON, and comments out clean ────────
+    # The deployed box is NVIDIA, so the reservation is active by default. An
+    # active `deploy.reservations.devices[driver: nvidia]` makes the backend
     # refuse to start on a box with no NVIDIA container runtime ("could not
-    # select device driver"). AMD, Intel and CPU-only boxes are the common case,
-    # so the block is opt-in — and because opting in means UNCOMMENTING, the
-    # commented form has to stay correctly indented or the people who need it
-    # get a YAML error instead of a GPU.
-    check("deploy" not in services["backend"],
-          "no active NVIDIA reservation — the stack starts on an AMD/Intel/CPU box")
+    # select device driver"), so AMD / Intel / CPU boxes comment it out — and
+    # the result must be a valid stack with no reservation left behind.
+    check(services["backend"].get("deploy") == NVIDIA_RESERVATION,
+          "the NVIDIA reservation is active by default (CUDA + NVENC with no edit)")
 
-    on, _ = interpolate(without_comments(uncomment_nvidia(raw)), {"ADMIN_PASSWORD": "pw"})
-    check(yaml.safe_load(on)["services"]["backend"].get("deploy") == NVIDIA_RESERVATION,
-          "uncommenting the block yields exactly the NVIDIA reservation "
-          "(indentation of the commented form is correct)")
+    off, _ = interpolate(without_comments(comment_nvidia(raw)), {"ADMIN_PASSWORD": "pw"})
+    check("deploy" not in yaml.safe_load(off)["services"]["backend"],
+          "commenting the block out leaves no reservation — the stack starts on "
+          "an AMD/Intel/CPU box")
 
     print(f"\nAll {PASS} compose checks passed.")
 
