@@ -362,6 +362,11 @@ DEFAULT_SETTINGS: dict = {
         # second (native/platesnap.py). Only cameras with plate reading on pay
         # it, and only while a vehicle is actually there.
         "plate_hires": True,
+        # Find plates with the learned plate detector (native/plates.py) rather
+        # than the classical localizer. Far more reliable on real footage; its
+        # weights are MIT-published but were trained with the GPL-3.0 YOLOv9
+        # codebase, which is why it can be switched off.
+        "plate_detector": True,
     },
     "notifications": {
         "enabled": True,

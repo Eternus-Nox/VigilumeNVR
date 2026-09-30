@@ -1,46 +1,50 @@
 """Plate localization and OCR.
 
-NO LEARNED PLATE DETECTOR, DELIBERATELY
-=======================================
-Every high-accuracy license-plate detector available today descends from a
-GPL-3.0 (YOLOv9) or AGPL-3.0 (Ultralytics) training codebase. AGPL in
-particular would oblige VigilumeNVR to offer its own source to anyone using it
-over a network, which is not a licence this project can absorb for one feature.
-So plates are localized WITHOUT a dedicated model:
+A LEARNED PLATE DETECTOR, AND TWO READERS
+=========================================
+Plates are found by a small learned detector and read by two OCR models:
 
-    D-FINE already found the vehicle  ->  crop its lower region
-    classical CV finds plate-shaped high-contrast strips in that crop
-    a permissively-licensed OCR (MIT) reads each strip
-    multi-frame voting reconciles the reads
+    the vehicle (or a full-resolution snapshot around it)
+      -> `yolo-v9-t-384-license-plates-end2end` finds the plate itself
+      -> `cct_xs_v2_global` AND `cct_s_v2_global` each read the crop
+      -> a per-character, confidence-weighted vote across reads and frames
 
-This is the pre-deep-learning ANPR pipeline, and it is honest about what it
-buys: it reads a plate on a driveway well and a plate across the street badly.
-That trade was made knowingly. If the licence position ever changes, only
-`candidate_regions` has to be replaced — everything downstream takes boxes.
+WHY IT CHANGED. This module used to ship NO learned detector: classical CV
+(blackhat + Sobel + morphology) proposed plate-shaped strips in the lower part
+of the vehicle box. On a real photograph (tests/plate_hires_smoke.py) that
+localizer lost the plate as soon as it was under ~65 px wide, while the learned
+detector found it at 0.87-0.91 confidence at every size, blur, noise and
+darkness level tried, and even in the whole frame with no vehicle box at all —
+which is what lets the full-resolution path skip re-finding the car.
 
-WHY A CRUDE LOCALIZER IS ACCEPTABLE HERE
-----------------------------------------
-Because the OCR is a good discriminator on its own. Fed pure noise the pinned
-model returns an EMPTY string at zero confidence rather than inventing
-characters (verified in plates_smoke). That means this stage can afford to be
-GENEROUS — proposing several regions per vehicle and letting OCR confidence,
-the aspect-ratio veto in bestshot, and multi-frame voting throw away the ones
-that were never plates. A localizer that has to be precise would need the model
-we are deliberately not shipping; one that only has to be *inclusive* does not.
+THE LICENCE POSITION, stated rather than assumed. The detector's weights are
+published under MIT by the fast-plate-ocr author (github.com/ankandrew/
+open-image-models) and are DOWNLOADED at runtime, pinned by SHA-256, never
+committed here. They were trained with the YOLOv9 codebase, which is GPL-3.0
+(not AGPL: no network-use clause). The earlier decision against a learned
+detector was about AGPL; this is recorded so the trade is visible. Operators
+who want the old behaviour set `recognition.plate_detector: false`, and the
+classical localizer (`candidate_regions`) is kept for exactly that, and as the
+fallback when the detector cannot be loaded.
 
-THE OCR MODEL
--------------
-`cct_xs_v2_global` from fast-plate-ocr (MIT, github.com/ankandrew/cnn-ocr-lp) —
-3.3 MB, a Compact Convolutional Transformer trained in Keras. Nothing in its
-lineage touches YOLO. It covers the Latin-alphabet regions including the United
-States, takes a 128x64 RGB uint8 image, and emits 10 slots x 37 classes.
+WHY TWO READERS. Measured on the same photograph: the small reader misread a
+46 px plate (5AJ5341, weakest character 0.54) that the larger one read right
+(0.83); the larger misread light motion blur (0.36) that the small one read
+right (0.77). Each is unsure when it is wrong, so voting per character by
+confidence takes the right answer in both. The small one is 3 ms, the larger
+14 ms, and they only run on plate crops.
+
+Both readers are fast-plate-ocr (MIT, github.com/ankandrew/cnn-ocr-lp), take a
+128x64 RGB uint8 image, and emit 10 slots x 37 classes. Fed pure noise they
+return an EMPTY string at zero confidence rather than inventing characters
+(verified in plates_smoke), which is what keeps the classical fallback safe.
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import cv2
 import numpy as np
@@ -63,7 +67,44 @@ PLATE_MODELS: dict[str, dict[str, Any]] = {
         "sha256": "8031afb5fdc6b4d80462c9d542f1284ebd2cfddf5dbacd62609848d7e2855f44",
         "license": "MIT",
     },
+    # The larger reader. Same alphabet, input and output as plate_ocr (its
+    # companion config is byte-identical), so it decodes with the same code.
+    "plate_ocr_s": {
+        "url": (
+            "https://github.com/ankandrew/cnn-ocr-lp/releases/download/"
+            "arg-plates/cct_s_v2_global.onnx"
+        ),
+        "bytes": 5_262_230,
+        "sha256": "384bbbd2cea3ef54761d3df70822ef3a349ee1a112aeafddbe0e3ba06bc6e47b",
+        "license": "MIT",
+    },
+    # The plate detector: input `images` [1,3,384,384] float RGB 0..1,
+    # letterboxed; output [N,7] = batch, x1, y1, x2, y2, class, score in the
+    # letterboxed frame (NMS is inside the graph — "end2end").
+    "plate_detector": {
+        "url": (
+            "https://github.com/ankandrew/open-image-models/releases/download/"
+            "assets/yolo-v9-t-384-license-plates-end2end.onnx"
+        ),
+        "bytes": 7_771_218,
+        "sha256": "888397b96d761c89db40bc9c305838e8652660f5e282c2cadebbe8d2951a77a8",
+        "license": "MIT (weights; trained with the GPL-3.0 YOLOv9 codebase)",
+    },
 }
+
+#: Which pins are REQUIRED. The other two improve accuracy and are loaded when
+#: they can be; without them the pass still reads plates, the old way.
+REQUIRED_MODELS = ("plate_ocr",)
+
+#: Detector input size and the score a box must reach to be treated as a
+#: plate. Low on purpose: the readers and the vote reject what is not a plate,
+#: and a missed plate is the failure people notice.
+DETECTOR_SIZE = 384
+DETECTOR_MIN_SCORE = 0.3
+
+#: Margin added around a detected plate before it is read, as a fraction of
+#: its size. The readers were trained on plates with a little border.
+DETECTED_PLATE_PAD = 0.08
 
 #: Decode configuration for the pinned model. These come from its companion
 #: `cct_xs_v2_global_plate_config.yaml` and are inlined rather than fetched
@@ -322,7 +363,8 @@ def deskew(strip_bgr: np.ndarray) -> np.ndarray:
 class PlateReader:
     """The pinned OCR model. Loads lazily; never raises into the caller."""
 
-    def __init__(self, models_dir: Path, detector: Any = None) -> None:
+    def __init__(self, models_dir: Path, detector: Any = None, *,
+                 use_plate_detector: bool = True) -> None:
         # The DETECTOR, so this session can follow whatever silicon it
         # actually resolved to (native/accel.py). Optional so a test can
         # construct a reader with no engine around it; None resolves to CPU.
@@ -334,14 +376,37 @@ class PlateReader:
         self._session: Any = None
         self._input_name = ""
         self._failed = False
+        # Optional extras (see REQUIRED_MODELS): the larger reader and the
+        # plate detector. None when absent, disabled, or failed to load.
+        self._session_s: Any = None
+        self._input_name_s = ""
+        self._det: Any = None
+        self._det_input = ""
+        self.use_plate_detector = use_plate_detector
+        self._extras_error = ""
 
     @property
     def ready(self) -> bool:
         return self._session is not None
 
+    @property
+    def has_detector(self) -> bool:
+        return self._det is not None and self.use_plate_detector
+
     async def ensure_models(self) -> None:
+        for key in REQUIRED_MODELS:
+            await ensure_model(self._models_dir, key, pin=PLATE_MODELS[key])
+        # The extras are best-effort: a box that cannot reach GitHub for them
+        # still reads plates with the required reader.
+        self._extras_error = ""
         for key, pin in PLATE_MODELS.items():
-            await ensure_model(self._models_dir, key, pin=pin)
+            if key in REQUIRED_MODELS:
+                continue
+            try:
+                await ensure_model(self._models_dir, key, pin=pin)
+            except Exception as exc:  # noqa: BLE001
+                self._extras_error = f"{key}: {exc}"
+                log.warning("plate model %s unavailable (%s) — reading without it", key, exc)
 
     async def load(self) -> bool:
         """Download, verify and open the session. Never raises."""
@@ -386,9 +451,33 @@ class PlateReader:
             str(path), self._detector, label="plate OCR"
         )
         self._input_name = self._session.get_inputs()[0].name
+        self._session_s = self._optional_session("plate_ocr_s", "plate OCR (large)")
+        if self._session_s is not None:
+            self._input_name_s = self._session_s.get_inputs()[0].name
+        self._det = self._optional_session("plate_detector", "plate detector")
+        if self._det is not None:
+            self._det_input = self._det.get_inputs()[0].name
+
+    def _optional_session(self, key: str, label: str) -> Any:
+        """Open an optional model, verified like the required one; None on any
+        problem, logged once. Never raises."""
+        path = model_path(self._models_dir, key)
+        try:
+            if not path.is_file():
+                return None
+            if sha256_file(path) != PLATE_MODELS[key]["sha256"]:
+                log.warning("%s on disk does not match its pin — not using it", label)
+                return None
+            session, _device = accel.make_session(str(path), self._detector, label=label)
+            return session
+        except Exception:  # noqa: BLE001
+            log.exception("%s could not be loaded — reading without it", label)
+            return None
 
     def close(self) -> None:
         self._session = None
+        self._session_s = None
+        self._det = None
 
     def read_blocking(self, strip_bgr: np.ndarray) -> tuple[str, float]:
         """Read one plate strip. Returns ``(text, mean_confidence)``.
@@ -417,24 +506,99 @@ class PlateReader:
             log.exception("plate OCR inference failed")
             return "", 0.0
 
-        slots = np.asarray(outputs[0])[0]  # (OCR_MAX_SLOTS, len(alphabet))
-        chars: list[str] = []
-        confs: list[float] = []
-        for slot in range(min(OCR_MAX_SLOTS, slots.shape[0])):
-            idx = int(slots[slot].argmax())
-            if idx >= len(OCR_ALPHABET):
-                continue
-            ch = OCR_ALPHABET[idx]
-            if ch == OCR_PAD_CHAR:
-                continue
-            chars.append(ch)
-            confs.append(float(slots[slot][idx]))
-        if not chars:
+        text, confs = _decode(outputs[0])
+        if not text:
             return "", 0.0
         # MEAN over the characters actually emitted. The weakest character is
         # what `vote_plate` cares about and it computes that itself across
         # frames; here the useful number is how confident this whole read was.
-        return "".join(chars), sum(confs) / len(confs)
+        return text, sum(confs) / len(confs)
+
+    def read_all_blocking(
+        self, strip_bgr: np.ndarray
+    ) -> list[tuple[str, float, tuple[float, ...]]]:
+        """Every loaded reader's read of one strip: ``(text, mean, per_char)``.
+
+        Unreadable reads are included as ``("", 0.0, ())`` so a caller can
+        count them; the vote ignores them.
+        """
+        if not self.ready or strip_bgr is None or strip_bgr.size == 0:
+            return []
+        with TIMINGS.plate_ocr.measure():
+            try:
+                resized = cv2.resize(
+                    strip_bgr, (OCR_INPUT_W, OCR_INPUT_H), interpolation=cv2.INTER_LINEAR
+                )
+                rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)[None].astype(np.uint8)
+            except Exception:
+                log.exception("plate strip could not be prepared")
+                return []
+            out: list[tuple[str, float, tuple[float, ...]]] = []
+            for session, name in ((self._session, self._input_name),
+                                  (self._session_s, self._input_name_s)):
+                if session is None:
+                    continue
+                try:
+                    text, confs = _decode(session.run(None, {name: rgb})[0])
+                except Exception:
+                    log.exception("plate OCR inference failed")
+                    continue
+                mean = sum(confs) / len(confs) if confs else 0.0
+                out.append((text, mean, tuple(confs)))
+            return out
+
+    def detect_blocking(
+        self, image_bgr: np.ndarray
+    ) -> Optional[list[tuple[int, int, int, int, float]]]:
+        """Plates in an image, as padded ``(x1, y1, x2, y2, score)`` boxes in its
+        pixels, best first. None when no detector is loaded (callers then use
+        `candidate_regions`); [] when it looked and found none."""
+        if not self.has_detector or image_bgr is None or image_bgr.size == 0:
+            return None
+        h, w = image_bgr.shape[:2]
+        if w < 8 or h < 8:
+            return []
+        with TIMINGS.plate_localize.measure():
+            try:
+                r = min(DETECTOR_SIZE / h, DETECTOR_SIZE / w)
+                nw, nh = max(1, int(round(w * r))), max(1, int(round(h * r)))
+                im = cv2.resize(image_bgr, (nw, nh), interpolation=cv2.INTER_LINEAR)
+                left, top = (DETECTOR_SIZE - nw) // 2, (DETECTOR_SIZE - nh) // 2
+                boxed = cv2.copyMakeBorder(
+                    im, top, DETECTOR_SIZE - nh - top, left, DETECTOR_SIZE - nw - left,
+                    cv2.BORDER_CONSTANT, value=(114, 114, 114),
+                )
+                x = cv2.cvtColor(boxed, cv2.COLOR_BGR2RGB).transpose(2, 0, 1)[None]
+                rows = np.asarray(
+                    self._det.run(None, {self._det_input: x.astype(np.float32) / 255.0})[0]
+                ).reshape(-1, 7)
+            except Exception:
+                log.exception("plate detector inference failed")
+                return []
+        found: list[tuple[int, int, int, int, float]] = []
+        for row in rows:
+            score = float(row[6])
+            if score < DETECTOR_MIN_SCORE:
+                continue
+            x1, y1 = (row[1] - left) / r, (row[2] - top) / r
+            x2, y2 = (row[3] - left) / r, (row[4] - top) / r
+            px, py = (x2 - x1) * DETECTED_PLATE_PAD, (y2 - y1) * DETECTED_PLATE_PAD
+            box = (
+                max(0, int(x1 - px)), max(0, int(y1 - py)),
+                min(w, int(round(x2 + px))), min(h, int(round(y2 + py))),
+            )
+            if box[2] - box[0] >= 4 and box[3] - box[1] >= 2:
+                found.append((*box, score))
+        found.sort(key=lambda b: b[4], reverse=True)
+        return found
+
+    def find_plates(self, vehicle_bgr: np.ndarray) -> list[tuple[int, int, int, int]]:
+        """Plate boxes in a vehicle crop: the detector when loaded, else the
+        classical localizer."""
+        boxes = self.detect_blocking(vehicle_bgr)
+        if boxes is None:
+            return candidate_regions(vehicle_bgr)
+        return [b[:4] for b in boxes[:MAX_REGIONS]]
 
     async def read(self, strip_bgr: np.ndarray) -> tuple[str, float]:
         import asyncio
@@ -445,6 +609,10 @@ class PlateReader:
         return {
             "ready": self.ready,
             "failed": self._failed,
+            # Which way plates are being FOUND, and how many readers read them.
+            "localizer": "detector" if self.has_detector else "classic",
+            "readers": 1 + (self._session_s is not None),
+            "extras_error": self._extras_error,
             "models": {
                 key: {
                     "present": model_path(self._models_dir, key).is_file(),
@@ -454,6 +622,23 @@ class PlateReader:
                 for key, pin in PLATE_MODELS.items()
             },
         }
+
+
+def _decode(output: Any) -> tuple[str, list[float]]:
+    """(text, per-character confidences) from one reader's (1, slots, 37) output."""
+    slots = np.asarray(output)[0]
+    chars: list[str] = []
+    confs: list[float] = []
+    for slot in range(min(OCR_MAX_SLOTS, slots.shape[0])):
+        idx = int(slots[slot].argmax())
+        if idx >= len(OCR_ALPHABET):
+            continue
+        ch = OCR_ALPHABET[idx]
+        if ch == OCR_PAD_CHAR:
+            continue
+        chars.append(ch)
+        confs.append(float(slots[slot][idx]))
+    return "".join(chars), confs
 
 
 def is_vehicle(label: str) -> bool:

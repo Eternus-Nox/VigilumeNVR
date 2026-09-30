@@ -208,6 +208,11 @@ class PlateRead:
     confidence: float = 1.0
     #: bestshot.Quality.total for the crop it was read from, 0..1.
     quality: float = 1.0
+    #: The reader's confidence in EACH character, when it reported them. Lets
+    #: the vote weigh a doubtful character by its own doubt rather than by the
+    #: read's average — two readers that disagree on one letter are usually
+    #: sure of every other one, and differ in how sure they are of that one.
+    char_conf: tuple[float, ...] = ()
 
     @property
     def weight(self) -> float:
@@ -254,7 +259,12 @@ def vote_plate(reads: Sequence[PlateRead]) -> Optional[PlateVote]:
 
     by_length: dict[int, float] = defaultdict(float)
     for r in usable:
-        by_length[len(normalize_plate(r.text))] += r.weight
+        # A read's say in the LENGTH is only as strong as its weakest
+        # character: a reader that tacks a doubtful extra character on the end
+        # (seen: 7ABC1233 with the last '3' at 0.60) must not tie a read that
+        # is sure of every character it gave.
+        doubt = min(r.char_conf) if r.char_conf else 1.0
+        by_length[len(normalize_plate(r.text))] += r.weight * max(0.0, doubt)
     best_len = max(by_length, key=lambda k: (by_length[k], k))
 
     cohort = [r for r in usable if len(normalize_plate(r.text)) == best_len]
@@ -267,10 +277,17 @@ def vote_plate(reads: Sequence[PlateRead]) -> Optional[PlateVote]:
     for pos in range(best_len):
         tally: dict[str, float] = defaultdict(float)
         for r in cohort:
-            tally[normalize_plate(r.text)[pos]] += r.weight
+            text = normalize_plate(r.text)
+            w = r.weight
+            if len(r.char_conf) == len(text):
+                w *= max(0.0, float(r.char_conf[pos]))
+            tally[text[pos]] += w
+        position_total = sum(tally.values())
+        if position_total <= 0:
+            return None
         winner = max(tally, key=lambda c: (tally[c], c))
         chars.append(winner)
-        agreement.append(tally[winner] / total_weight)
+        agreement.append(tally[winner] / position_total)
 
     text = "".join(chars)
     # Overall confidence is the WEAKEST position, not the mean: a plate with

@@ -1446,6 +1446,22 @@ times in a row is left alone for 5 minutes. It runs as a background task: the
 detection loop never waits on a camera, and a track that ends mid-look votes
 up to 3 s later instead of stalling the frame. The switch is read live.
 
+**Finding and reading the plate (`recognition.plate_detector`, default true).**
+A learned plate detector (`yolo-v9-t-384-license-plates-end2end`, 7.8 MB,
+~18 ms CPU; MIT-published weights trained with the GPL-3.0 YOLOv9 code — hence
+the switch) finds the plate, in the vehicle crop and directly in the
+full-resolution snapshot around the vehicle (tight crop first, wider if
+nothing is found), so the snapshot no longer depends on re-finding the car.
+Each crop is read by TWO readers (`cct_xs_v2_global` and `cct_s_v2_global`),
+and the vote weighs every character by that reader's confidence in it, and a
+read's say in the plate's LENGTH by its weakest character. On a real
+photograph (tests/plate_real_smoke.py) the classical localizer lost the plate
+at half size while the detector found it; the two readers disagreed under
+motion blur and the vote picked the right one. With the switch off, or if the
+extra models cannot be downloaded, the classical localizer and one reader are
+used as before. `plates.reader` on `/api/recognition/status` reports
+`{localizer: "detector"|"classic", readers, extras_error}`.
+
 **A plate zone is a fast lane.** On a camera with a plate zone drawn, every
 tracked vehicle in the zone is read from the first frame it is tracked —
 before the three-frame confirmation and the stationary filter, which decide

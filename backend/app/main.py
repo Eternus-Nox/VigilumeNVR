@@ -431,10 +431,10 @@ async def lifespan(app: FastAPI):
     face_recognizer = FaceRecognizer(config.models_dir)
     face_pass = FacePass(face_recognizer, db, config.candidate_crops_dir)
     engine.set_face_pass(face_pass)
-    # Plates. No learned detector ships (see native/plates.py on the licensing);
-    # localization is classical CV over D-FINE's vehicle box and only the OCR is
-    # a model. Shares the face pass's heatmap accumulator so one flush covers
-    # both kinds.
+    # Plates: a learned plate detector finds the plate and two OCR models read
+    # it (see native/plates.py, including the licensing note); the classical
+    # localizer is the fallback. Shares the face pass's heatmap accumulator so
+    # one flush covers both kinds.
     # The detector is handed in so the OCR session FOLLOWS IT onto whatever
     # silicon it actually resolved to (native/accel.py): CUDA when the detector
     # is on CUDA, CPU when it is on CPU, and CPU on a Coral box — an Edge TPU

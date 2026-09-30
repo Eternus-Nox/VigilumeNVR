@@ -141,6 +141,17 @@ export default function PlateDiagnostics({
           ? ' — each tracked vehicle is also read from the camera’s full-resolution picture.'
           : ' — plates are read from the small detection stream only, where they are usually too small.'}
       </p>
+      {plates.reader?.localizer && (
+        <p className="muted small">
+          Plates are found by the{' '}
+          <strong>{plates.reader.localizer === 'detector' ? 'plate detector' : 'older shape-based search'}</strong>{' '}
+          and read by <strong>{plates.reader.readers ?? 1}</strong> reader
+          {(plates.reader.readers ?? 1) === 1 ? '' : 's'}.
+          {plates.reader.extras_error
+            ? ` The newer models could not be downloaded (${plates.reader.extras_error}), so the older method is in use.`
+            : ''}
+        </p>
+      )}
       {names.size === 0 ? (
         <p className="control-hint">No camera has plate reading on.</p>
       ) : (

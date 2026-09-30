@@ -488,6 +488,9 @@ class RecognitionSettings(BaseModel):
     # stream (native/platesnap.py). On by default: at the detect stream's size
     # a plate is usually too small to read unless the car is at the lens.
     plate_hires: bool = True
+    # Find plates with the learned plate detector instead of the classical
+    # localizer (native/plates.py explains the trade, including licensing).
+    plate_detector: bool = True
 
 
 class AppSettings(BaseModel):

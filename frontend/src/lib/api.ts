@@ -744,6 +744,8 @@ export interface RecognitionStatus {
     vehicles?: number;
     /** Whether full-resolution snapshot looks are on. */
     hires?: boolean;
+    /** How plates are found ("detector" | "classic") and by how many readers. */
+    reader?: { localizer?: string; readers?: number; extras_error?: string };
     cameras?: Record<string, PlateCameraStats>;
     snapshots?: Record<string, PlateSnapshotHealth>;
   } | null;
@@ -981,6 +983,12 @@ export interface AppSettings {
      * snapshot a second. Optional: absent on a backend predating it.
      */
     plate_hires?: boolean;
+    /**
+     * Find plates with the learned plate detector rather than the classical
+     * localizer. Far more reliable on real footage. Optional: absent on a
+     * backend predating it.
+     */
+    plate_detector?: boolean;
   };
   detection: {
     model: DetectionModel;

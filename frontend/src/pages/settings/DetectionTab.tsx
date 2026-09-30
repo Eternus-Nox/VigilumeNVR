@@ -106,6 +106,7 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
     face_on_vehicles: false,
     identify_quality: 0.45,
     plate_hires: true,
+    plate_detector: true,
     ...(savedRecognition ?? {}),
     ...(pending.recognition ?? {}),
   });
@@ -133,7 +134,12 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
   // Guarded: on a backend without the block the saved value is `undefined`, and
   // adopting that would blank the draft this form is bound to.
   useAdoptSaved(savedRecognition, (v) => {
-    if (v) setRecognition({ ...v, plate_hires: v.plate_hires ?? true });
+    if (v)
+      setRecognition({
+        ...v,
+        plate_hires: v.plate_hires ?? true,
+        plate_detector: v.plate_detector ?? true,
+      });
   });
 
   // Per-camera stationary overrides. NOT part of the draft: these are
@@ -636,6 +642,23 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
                   plate is read from that. Only cameras with plate reading on are asked,
                   only while a vehicle is there, and it stops once the plate is read.
                   Needs an Amcrest or Dahua camera.
+                </span>
+                <label className="row-label">
+                  <input
+                    type="checkbox"
+                    checked={recognition.plate_detector ?? true}
+                    onChange={(e) =>
+                      setRecognition({ ...recognition, plate_detector: e.target.checked })
+                    }
+                  />
+                  Find plates with the plate detector
+                </label>
+                <span className="control-hint">
+                  A small model trained to find license plates, then two readers that vote
+                  on every character. Much more reliable on real footage than the older
+                  shape-based search, which is used when this is off. The detector&rsquo;s
+                  weights are published under MIT but were trained with the GPL-3.0 YOLOv9
+                  code — turn this off if that matters for how you use Vigilume.
                 </span>
                 <label>
                   Crop quality needed to identify: {Math.round(recognition.identify_quality * 100)}%
