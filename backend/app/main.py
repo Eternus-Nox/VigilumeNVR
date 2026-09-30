@@ -342,6 +342,12 @@ async def lifespan(app: FastAPI):
     orphaned = await db.close_open_doorbell_events(DOORBELL_MAX_S)
     if orphaned:
         log.warning("closed %d doorbell event(s) left open by the previous run", orphaned)
+    # Same for detection events: the engine's are in memory, so any still open
+    # now were abandoned by a process that died. Closed here, their clips are
+    # then cut by the recorder's clip recovery.
+    orphaned = await db.close_orphaned_native_events()
+    if orphaned:
+        log.warning("closed %d detection event(s) left open by the previous run", orphaned)
 
     settings = SettingsStore(db, env_public_url=config.public_url)
     await settings.load()
@@ -461,6 +467,16 @@ async def lifespan(app: FastAPI):
     # per (re)connect cycle; a slow sweep backstops missed reconnects.
     ir_reasserter = IrReasserter(db)
     recorder.set_on_connect(ir_reasserter.reassert_soon)
+
+    # A clip lands ~20 s after its event ends (later for a long or HEVC one,
+    # or after a restart's recovery). Tell open clients, so an events list
+    # picks it up without a reload.
+    async def _clip_landed(event_id: int) -> None:
+        row = await db.get_event(event_id)
+        if row:
+            await ws.broadcast({"type": "event_update", "event": row})
+
+    recorder.set_on_clip(_clip_landed)
     # Automatic camera clock correction: push the correct local wall-clock time
     # (for the configured IANA timezone) and DISABLE the device NTP client the
     # first time each Dahua/Amcrest camera is reachable — fixes doorbell/camera

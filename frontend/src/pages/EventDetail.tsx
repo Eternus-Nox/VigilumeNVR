@@ -90,17 +90,19 @@ export default function EventDetail() {
     };
   }, [id]);
 
-  // Auto-poll while the clip is still processing, then give up gracefully.
+  // Auto-poll while the clip is still processing. Past the usual schedule it
+  // says so, but keeps checking at the slowest step: the server only reports
+  // "processing" while the event is still open or its clip job is queued or
+  // running, so the clip IS coming (a long visit, an HEVC re-encode, clips
+  // queued behind others) and should appear without a manual refresh.
   useEffect(() => {
     if (!event || event.clip_state !== 'processing') {
       attemptsRef.current = 0;
       return;
     }
-    if (attemptsRef.current >= REFETCH_DELAYS_MS.length) {
-      setStalled(true);
-      return;
-    }
-    const delay = REFETCH_DELAYS_MS[attemptsRef.current];
+    if (attemptsRef.current >= REFETCH_DELAYS_MS.length) setStalled(true);
+    const delay =
+      REFETCH_DELAYS_MS[Math.min(attemptsRef.current, REFETCH_DELAYS_MS.length - 1)];
     const timer = setTimeout(() => {
       attemptsRef.current += 1;
       refreshEvent();

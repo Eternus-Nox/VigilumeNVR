@@ -255,7 +255,13 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
         case 'event_end': {
           const ev = msg.event;
           if (!ev || typeof ev.camera !== 'string') return;
-          setLastEvents((prev) => ({ ...prev, [ev.camera]: ev }));
+          // An update can be for an OLDER event — its clip landing late, or
+          // cut after a restart — and must not replace the camera's latest.
+          setLastEvents((prev) => {
+            const cur = prev[ev.camera];
+            if (msg.type !== 'event_new' && cur && cur.id > ev.id) return prev;
+            return { ...prev, [ev.camera]: ev };
+          });
           if (msg.type === 'event_new') {
             setUnseenEvents((n) => n + 1);
             pushToast({

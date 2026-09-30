@@ -1736,6 +1736,36 @@ class Database:
         await self.conn.commit()
         return max(cur.rowcount, 0)
 
+    async def events_missing_clips(
+        self, *, since: float, until: float, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Engine events that ended in [since, until] with no clip and no
+        recorded clip failure — the ones a restart left uncut. Newest first."""
+        cur = await self.conn.execute(
+            "SELECT id, frigate_id, camera, start_time, end_time FROM events "
+            "WHERE has_clip = 0 AND (clip_error IS NULL OR clip_error = '') "
+            "AND end_time IS NOT NULL AND end_time BETWEEN ? AND ? "
+            "AND frigate_id LIKE 'native.%' ORDER BY end_time DESC LIMIT ?",
+            (since, until, limit),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def close_orphaned_native_events(self, *, estimate_s: float = 60.0) -> int:
+        """Close engine events a previous process left open.
+
+        Engine events live in memory; one still open at start-up belongs to a
+        process that died without ending it (a crash, or the restart
+        watchdog's force-exit). Left open it reads "processing" forever and
+        never gets a clip. Its real end is unknown, so it is closed at
+        start + `estimate_s` — enough footage for the clip recovery to cut."""
+        cur = await self.conn.execute(
+            "UPDATE events SET end_time = start_time + ? "
+            "WHERE end_time IS NULL AND frigate_id LIKE 'native.%'",
+            (estimate_s,),
+        )
+        await self.conn.commit()
+        return max(cur.rowcount, 0)
+
     async def prune_events_older_than(self, cutoff_epoch: float) -> list[int]:
         cur = await self.conn.execute("SELECT id FROM events WHERE start_time < ?", (cutoff_epoch,))
         ids = [int(r[0]) for r in await cur.fetchall()]

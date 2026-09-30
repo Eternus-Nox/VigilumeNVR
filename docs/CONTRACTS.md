@@ -287,6 +287,16 @@ WSDL tree as package data; imported lazily so the app boots without a camera rea
   `/media/native/clips/{event_id}.mp4` (`-movflags +faststart`; `event_id` is the DB row
   id), then sets `has_clip`. Missing segments ⇒ log once, `has_clip` stays false, no
   retry loop.
+- **Clip recovery.** Clip jobs live in memory, so a restart (update, crash,
+  watchdog) used to cancel every queued job for good. 30 s after start and every
+  30 min, `Recorder.recover_clips` queues a clip for each `native.` event that
+  ended in the last 6 h with `has_clip = 0` and no `clip_error` — skipping
+  cameras that are gone, not recording or private, events still inside their own
+  job's delay, and events it already tried in this process (at most 100 per
+  pass). Engine events still open at start-up (`end_time IS NULL`) belong to the
+  dead process: they are closed at `start + 60 s`
+  (`db.close_orphaned_native_events`) so they stop reading "processing" forever
+  and the recovery can cut them. Pinned in `clip_recovery_smoke`.
 - **Retention** (driven by `settings.recording`): recording hour-dirs older than
   `continuous_days`; clip files older than `event_days`; event rows + snapshots pruned
   at max(`event_days`, `snapshot_days`). Low-disk guard: <5 GB free on the media
@@ -603,7 +613,9 @@ Events (backend's own SQLite DB, produced by the native engine):
     derived so the UI can tell "the clip is still coming" from "it is never
     coming":
     - `ready` — `has_clip` (the clip file exists);
-    - `processing` — recording on, event ended < 45 s ago, clip not written yet;
+    - `processing` — recording on, clip not written yet, and either the event
+      ended < 45 s ago or the recorder has its clip job queued or running
+      (`Recorder.clip_pending`; a long or HEVC clip can take well past 45 s);
     - `recording_disabled` — the camera isn't recording (also synthetic
       `doorbell.`/`audio.` events, which never produce a clip);
     - `unavailable` — recording on but the clip never landed (recorder was down
@@ -1583,6 +1595,29 @@ Rules that are easy to get backwards and are pinned in
 - `unknown_only` **suppresses permanently** (sets `notified`), never defers;
   deferring would fire the very alert that was opted out of once the hold ran
   out.
+
+**Named alerts** (`app/notify/wording.py`). A recognized subject's alert reads
+as a sentence: title `"{names} is/are {place}"` — "Adam is at the front door",
+"The car is in the driveway" (a vehicle profile's own name), "Adam and Sarah are
+in the back yard" — body `"Recognized {names}"` plus ` — plate {plate}` when a
+plate was read. Names are every non-muted known profile on the event, the
+gate's choice (a watchlisted profile) first. The place comes from the camera's
+friendly name: an ordinary place name gets an article, lower case and its
+preposition (`in` the driveway/yard/garage…, `on` the porch/patio/deck…, `at`
+the door/gate…); anything else ("Cam 2", "Adam's Office") is used as typed
+after `at`/`in`/`on`. Dwell: `"{names} is still {place}"`. Unrecognized alerts
+keep `"{Label} detected at {Camera}"`.
+
+**A name matched after the alert went out is put on it**
+(`_name_sent_alert`). The hold is short, and a face is often matched later (a
+visitor walking up turned away). When `note_recognition` lands a known profile
+on an event whose alert was already SENT (`state["alert"]`), the alert is
+re-sent named, with the **same tag** (web push replaces by tag, APNs by
+collapse id = event id), so the phone updates it instead of stacking a second.
+Only for a name the alert did not already carry; never for a muted profile; in
+`unknown_only` only for a watchlisted one; not when notifications are off.
+Plates read from the recording after the car has gone land after the event has
+ended, so they name the event row, not the alert.
 
 Recognitions reach the pipeline **live** via `note_recognition`, called by the
 passes the moment they identify — not when they store, which happens at track

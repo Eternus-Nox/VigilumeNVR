@@ -26,6 +26,7 @@ from .native.media import MediaProvider
 from .native.recognition import normalize_alert_mode
 from .notify.ntfy import NTFY_ICON_DEFAULT, NTFY_ICON_DOORBELL, ntfy_icon
 from .notify.push import PushService
+from .notify.wording import distinct_names, join_names, named_title
 from .settings_store import SettingsStore
 from .ws import WSManager
 
@@ -697,10 +698,14 @@ class EventsPipeline:
 
         minutes = seconds // 60
         how_long = f"{minutes} min" if minutes >= 1 else f"{seconds}s"
-        who = recognized_name or label.replace("_", " ").capitalize()
+        title = (
+            named_title(self._alert_names(state, recognized_name), friendly, still=True)
+            if recognized_name
+            else f"{label.replace('_', ' ').capitalize()} still at {friendly}"
+        )
         try:
             await self._send_notification(
-                title=f"{who} still at {friendly}",
+                title=title,
                 body=f"Still there after {how_long}",
                 event_id=state.get("event_id"),
                 # A DIFFERENT tag from the arrival alert, so a phone shows it
@@ -778,6 +783,78 @@ class EventsPipeline:
             # on the next frame's update, so a named alert is not delayed by a
             # further heartbeat.
             self._spawn(self._renotify(fid))
+        elif profile_id is not None and state.get("alert") is not None:
+            # The alert already went out — usually unnamed, because the face
+            # was matched after the hold ran out (a person walking up turned
+            # away, a plate read on the second look). Put the name on it.
+            self._spawn(self._name_sent_alert(fid))
+
+    async def _name_sent_alert(self, fid: str) -> None:
+        """Re-send an alert that has gone out, now naming who it is.
+
+        Same tag as the original, so the phone REPLACES it (web push by tag,
+        APNs by collapse id = event id) rather than stacking a second alert for
+        one visit. Only for a name the alert did not already carry, only for a
+        profile that is not muted, and not in "unknown_only" mode unless the
+        profile is watchlisted — the original alert went out because nobody
+        had been recognized yet, and "only strangers" still holds.
+        """
+        state = self._active.get(fid)
+        alert = state.get("alert") if state else None
+        if alert is None:
+            return
+        known = [
+            r for r in (state.get("recognitions") or [])
+            if r.get("profile_id") is not None and r.get("name")
+            and normalize_alert_mode(r.get("alert_mode")) != "mute"
+        ]
+        unknown_only = str(self._settings.recognition.get("notify_mode") or "all") == "unknown_only"
+        if unknown_only:
+            known = [r for r in known if normalize_alert_mode(r.get("alert_mode")) == "alert"]
+        had = {n.lower() for n in alert["names"]}
+        names = distinct_names([*alert["names"], *(r["name"] for r in known)])
+        if not any(r["name"].strip().lower() not in had for r in known):
+            return
+        # Claimed BEFORE the first await, so a second recognition landing in
+        # the same moment cannot send the same name twice.
+        alert["names"] = names
+        if not self._settings.notifications.get("enabled", True):
+            return
+        camera = alert["camera"]
+        friendly = await self._friendly_name(camera)
+        try:
+            await self._send_notification(
+                title=named_title(names, friendly),
+                body=self._named_body(names, state),
+                event_id=state["event_id"],
+                tag=alert["tag"],
+                icon=ntfy_icon([alert["label"]]),
+                with_image=state.get("snap_time") is not None,
+                camera=camera,
+                camera_label=friendly,
+            )
+        except Exception:
+            log.exception("named follow-up notification failed for %s", fid)
+
+    @staticmethod
+    def _alert_names(state: dict[str, Any], lead: str) -> list[str]:
+        """Everyone recognized on this event worth naming, `lead` (the name
+        the gate chose — a watchlisted profile when there is one) first.
+        Muted profiles are left out: muting someone means not being told
+        about them, and that includes their name on a stranger's alert."""
+        names = [lead] if lead else []
+        for r in state.get("recognitions") or []:
+            if (r.get("profile_id") is not None and r.get("name")
+                    and normalize_alert_mode(r.get("alert_mode")) != "mute"):
+                names.append(r["name"])
+        return distinct_names(names)
+
+    @staticmethod
+    def _named_body(names: list[str], state: dict[str, Any]) -> str:
+        body = f"Recognized {join_names(names)}"
+        plate = next((r.get("plate") for r in (state.get("recognitions") or [])
+                      if r.get("plate")), "")
+        return f"{body} — plate {plate}" if plate else body
 
     async def _renotify(self, fid: str) -> None:
         state = self._active.get(fid)
@@ -945,22 +1022,30 @@ class EventsPipeline:
             name = label.replace('_', ' ').capitalize()
             title = f"{name} {'detected' if first_alert else 'also detected'} at {friendly}"
             body = f"{annotate.plural_label(label, count)} in frame"
-        if recognized_name:
+        names = self._alert_names(state, recognized_name) if recognized_name else []
+        if names:
             # A name is the most useful thing an alert can carry, so it LEADS
             # rather than being appended: the notification is read from a lock
-            # screen where the tail is truncated.
-            title = f"{recognized_name} at {friendly}"
-            body = f"Recognized {recognized_name}"
-        plate = next((r.get("plate") for r in (state.get("recognitions") or [])
-                      if r.get("plate")), "")
-        if plate and not recognized_name:
-            body = f"{body} — plate {plate}"
+            # screen where the tail is truncated. "Adam is at the front door",
+            # "The car is in the driveway" — the profile's own name, person or
+            # vehicle.
+            title = named_title(names, friendly)
+            body = self._named_body(names, state)
+        else:
+            plate = next((r.get("plate") for r in (state.get("recognitions") or [])
+                          if r.get("plate")), "")
+            if plate:
+                body = f"{body} — plate {plate}"
         has_snapshot = state.get("snap_time") is not None
+        tag = f"vigilume-{camera}-{label}"
+        # What went out, so a name that is only matched AFTER this (the hold
+        # ran out first) can be put on this same alert — see _name_sent_alert.
+        state["alert"] = {"tag": tag, "camera": camera, "label": label, "names": names}
         await self._send_notification(
             title=title,
             body=body,
             event_id=state["event_id"],
-            tag=f"vigilume-{camera}-{label}",
+            tag=tag,
             icon=ntfy_icon([label]),
             with_image=has_snapshot,
             camera=camera,

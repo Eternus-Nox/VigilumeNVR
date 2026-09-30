@@ -155,6 +155,21 @@ _CLIP_FFMPEG_TIMEOUT_S = 120.0
 # export path's semaphore; 2 keeps a hardware encoder busy without thrashing CPU.
 CLIP_CONCURRENCY = 2
 
+# Clip RECOVERY. A clip job waits clip_delay_s after its event ends and lives
+# only in memory, so a restart (an update, a crash, the restart watchdog)
+# cancelled every queued job — and every event still open at shutdown — and
+# nothing ever cut those clips. The event then showed "no recording" forever.
+# So, at start-up and every CLIP_RECOVER_INTERVAL_S, events that ended in the
+# last CLIP_RECOVER_S with no clip, no recorded failure and no job queued get
+# their clip cut. A failure is recorded (clip_error), so a clip that genuinely
+# cannot be made is tried once, not every half hour.
+CLIP_RECOVER_S = 6 * 3600
+CLIP_RECOVER_INTERVAL_S = 1800
+CLIP_RECOVER_FIRST_S = 30
+#: At most this many clips recovered per pass, oldest last, so a long outage
+#: cannot queue an afternoon of ffmpeg in one go.
+CLIP_RECOVER_BATCH = 100
+
 # Timeline range export (the recordings router's export.mp4). The window is
 # capped by the router (EXPORT_MAX_SECONDS); finished exports live in a bounded
 # on-disk LRU (identical windows share the cached file + one in-flight build).
@@ -577,6 +592,14 @@ class Recorder:
         self._cams: dict[str, _CameraRecorder] = {}
         self._tasks: list[asyncio.Task] = []
         self._clip_tasks: set[asyncio.Task] = set()
+        # Events with a clip job queued or running. The event page asks this
+        # before it gives up on a clip: an event that ended a minute ago whose
+        # clip is still in the queue is "processing", not "unavailable".
+        self._clip_pending: set[str] = set()
+        # Events the clip recovery has already queued once in this process. A
+        # job that crashes records no clip_error, and must not be retried
+        # every recovery pass for the next six hours.
+        self._clip_recovered: set[str] = set()
         # Serializes an admin purge_all_recordings against camera-CRUD reload()
         # (both contend on this lock) so nothing respawns ffmpeg mid-wipe.
         self._purge_lock = asyncio.Lock()
@@ -619,12 +642,22 @@ class Recorder:
         # is confirmed live (first segment of the cycle). Used to re-assert
         # doorbell IR, which the AD410 resets when RTSP streaming starts.
         self._on_connect: Optional[Callable[[str], None]] = None
+        # Optional async hook fired with the event row id when that event's
+        # clip lands, so open clients can swap the snapshot for the clip
+        # without a reload. Best-effort, like _on_connect.
+        self._on_clip: Optional[Callable[[int], Awaitable[None]]] = None
 
     def set_on_connect(self, callback: Optional[Callable[[str], None]]) -> None:
         """Register a sync callback ``cb(camera_name)`` fired each time a
         camera's ffmpeg confirms a fresh connection (first segment per spawn
         cycle). Best-effort — exceptions are logged, never propagated."""
         self._on_connect = callback
+
+    def set_on_clip(self, callback: Optional[Callable[[int], Awaitable[None]]]) -> None:
+        """Register ``await cb(event_id)``, fired after an event's clip is
+        written and the row marked has_clip. Exceptions are logged, never
+        propagated."""
+        self._on_clip = callback
 
     def _notify_connect(self, name: str) -> None:
         cb = self._on_connect
@@ -680,6 +713,7 @@ class Recorder:
         self._tasks.append(asyncio.create_task(self._retention_loop(), name="recorder-retention"))
         self._tasks.append(asyncio.create_task(self._space_loop(), name="recorder-space"))
         self._tasks.append(asyncio.create_task(self._boot_check_loop(), name="recorder-boot-check"))
+        self._tasks.append(asyncio.create_task(self._clip_recovery_loop(), name="recorder-clip-recovery"))
 
     async def stop(self) -> None:
         """Terminate ffmpeg children and cancel internal tasks. Idempotent."""
@@ -1202,18 +1236,74 @@ class Recorder:
         if self._settings.is_private(camera):
             log.info("clip for %s dropped — %s is in privacy mode", frigate_id, camera)
             return
+        self._queue_clip(camera, frigate_id, start_time, end_time, delay=self._clip_delay())
+
+    def clip_pending(self, frigate_id: str) -> bool:
+        """Is a clip job for this event queued or running right now?"""
+        return frigate_id in self._clip_pending
+
+    def _queue_clip(
+        self, camera: str, frigate_id: str, start_time: float, end_time: float,
+        *, delay: float,
+    ) -> None:
+        self._clip_pending.add(frigate_id)
         task = asyncio.create_task(
-            self._clip_worker(camera, frigate_id, start_time, end_time),
+            self._clip_worker(camera, frigate_id, start_time, end_time, delay),
             name=f"recorder-clip-{frigate_id}",
         )
         self._clip_tasks.add(task)
         task.add_done_callback(self._clip_tasks.discard)
 
+    async def recover_clips(self, now: Optional[float] = None) -> int:
+        """Queue clips for recently ended events that never got one. Returns
+        how many were queued. See CLIP_RECOVER_S."""
+        if not self._running or self._ffmpeg_path is None:
+            return 0
+        now = time.time() if now is None else now
+        # Leave events that ended inside their own job's delay to that job.
+        until = now - self._clip_delay() - 30.0
+        rows = await self._db.events_missing_clips(
+            since=now - CLIP_RECOVER_S, until=until, limit=CLIP_RECOVER_BATCH
+        )
+        if not rows:
+            return 0
+        cams = {c["name"]: c for c in await self._db.list_cameras()}
+        queued = 0
+        for row in rows:
+            fid = row["frigate_id"]
+            cam = cams.get(row["camera"])
+            if fid in self._clip_pending or fid in self._clip_recovered:
+                continue
+            if cam is None or not cam.get("record_enabled", True):
+                continue
+            if self._settings.is_private(row["camera"]):
+                continue
+            self._clip_recovered.add(fid)
+            self._queue_clip(row["camera"], fid, float(row["start_time"]),
+                             float(row["end_time"]), delay=0.0)
+            queued += 1
+        if queued:
+            log.info("recorder: recovering %d event clip(s) that were never cut "
+                     "(restart or interrupted job)", queued)
+        return queued
+
+    async def _clip_recovery_loop(self) -> None:
+        await asyncio.sleep(CLIP_RECOVER_FIRST_S)
+        while True:
+            try:
+                await self.recover_clips()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                log.exception("clip recovery pass failed")
+            await asyncio.sleep(CLIP_RECOVER_INTERVAL_S)
+
     async def _clip_worker(
-        self, camera: str, frigate_id: str, start_time: float, end_time: float
+        self, camera: str, frigate_id: str, start_time: float, end_time: float,
+        delay: float,
     ) -> None:
         try:
-            await asyncio.sleep(self._clip_delay())
+            await asyncio.sleep(delay)
             # Acquire AFTER the delay: the wait is per-event pacing, not work,
             # and holding a slot through it would serialize unrelated events.
             async with self._clip_sem:
@@ -1222,6 +1312,8 @@ class Recorder:
             raise
         except Exception:  # noqa: BLE001 — clip failure must never propagate
             log.exception("clip extraction crashed for %s (%s)", frigate_id, camera)
+        finally:
+            self._clip_pending.discard(frigate_id)
 
     async def _note_clip_error(self, event_id: Optional[int], reason: str) -> None:
         """Record WHY a clip never landed, so the UI can say it.
@@ -1336,6 +1428,11 @@ class Recorder:
                 "recorder: clip ready event=%s -> %s (bytes=%d, %d segments)",
                 frigate_id, out_path.name, size, len(segments),
             )
+            if self._on_clip is not None:
+                try:
+                    await self._on_clip(event_id)
+                except Exception:  # noqa: BLE001 — a bad hook must not undo the clip
+                    log.exception("recorder: on_clip hook failed for event %d", event_id)
             return out_path
         finally:
             leftovers = (concat_path,) if ok else (concat_path, part_path)

@@ -119,6 +119,16 @@ def _is_synthetic(event: dict[str, Any]) -> bool:
     return not fid or fid.startswith(_SYNTHETIC_PREFIXES)
 
 
+def _clip_pending(request: Request, event: dict[str, Any]) -> bool:
+    """Whether the recorder has this event's clip queued or running."""
+    recorder = getattr(request.app.state, "recorder", None)
+    check = getattr(recorder, "clip_pending", None)
+    try:
+        return bool(check(event.get("frigate_id") or "")) if check else False
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _never_has_clip(event: dict[str, Any]) -> bool:
     """This event can never produce a clip, so a missing file is final rather
     than "still processing". An event with no frigate_id at all was never
@@ -154,7 +164,8 @@ async def _record_enabled_for(request: Request, event: dict[str, Any]) -> bool:
 
 
 def _clip_state(
-    event: dict[str, Any], record_enabled: bool, file_present: bool = True
+    event: dict[str, Any], record_enabled: bool, file_present: bool = True,
+    pending: bool = False,
 ) -> str:
     """Derive the clip's lifecycle state so the UI can tell "still processing"
     apart from "never coming":
@@ -177,6 +188,12 @@ def _clip_state(
         return "ready"
     if _never_has_clip(event) or not record_enabled:
         return "recording_disabled"
+    # The recorder has a job for it queued or running. Clips are cut two at a
+    # time and a long event's clip (or an HEVC camera's, which is re-encoded
+    # for browsers) can take well past the processing window below — which
+    # used to read as "no recording", and then the clip quietly appeared.
+    if pending:
+        return "processing"
     # end_time is NULL while an event is still open — a doorbell visit in
     # progress, or a detection the engine has not ended yet. That is the
     # earliest possible moment, so it reads as "processing", which is exactly
@@ -263,7 +280,7 @@ async def get_event(event_id: int, request: Request) -> dict[str, Any]:
         "clip_url": f"/api/events/{event_id}/clip.mp4",
         "snapshot_url": f"/api/events/{event_id}/snapshot.jpg",
         "record_enabled": record_enabled,
-        "clip_state": _clip_state(event, record_enabled),
+        "clip_state": _clip_state(event, record_enabled, pending=_clip_pending(request, event)),
     }
 
 
@@ -315,7 +332,8 @@ async def event_clip(
         # file_present=False: we are here BECAUSE the file is missing, so a
         # stale has_clip=1 must not be allowed to answer "ready" — that maps to
         # no detail string at all and 404s with a bare fallback message.
-        state = _clip_state(event, record_enabled, file_present=False)
+        state = _clip_state(event, record_enabled, file_present=False,
+                            pending=_clip_pending(request, event))
         detail = _CLIP_STATE_DETAIL.get(state, "Clip not available")
         raise HTTPException(status_code=404, detail=detail)
     # Inline by default (Range/seek works either way — Starlette's FileResponse

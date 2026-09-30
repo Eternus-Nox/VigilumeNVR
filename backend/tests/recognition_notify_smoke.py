@@ -314,10 +314,140 @@ def mqtt_checks() -> None:
     check(len(st3["recognitions"]) == 1, "...and the recognition is still recorded")
 
 
+def wording_checks() -> None:
+    from app.notify.wording import named_title, place_phrase
+
+    print("\nwho is where — the wording")
+    for friendly, want in (
+        ("Front Door", "at the front door"),
+        ("Driveway", "in the driveway"),
+        ("Drive Way", "in the drive way"),
+        ("Back Yard", "in the back yard"),
+        ("Front Porch", "on the front porch"),
+        ("The Garage", "in the garage"),
+        ("front_door", "at the front door"),
+        ("Cam 2", "at Cam 2"),
+        ("Adam's Office", "in Adam's Office"),
+        ("IPC-4K", "at IPC-4K"),
+    ):
+        check(place_phrase(friendly) == want, f"{friendly!r} -> {want!r} (got {place_phrase(friendly)!r})")
+    check(named_title(["Adam"], "Front Door") == "Adam is at the front door", "one person: 'is'")
+    check(named_title(["the car"], "Driveway") == "The car is in the driveway",
+          "a vehicle profile's own name leads, capitalised")
+    check(named_title(["Adam", "Sarah", "adam"], "Back Yard", still=True)
+          == "Adam and Sarah are still in the back yard",
+          "two names: 'are', duplicates dropped, 'still' for a dwell")
+    check(named_title([], "Front Door") == "", "no name, no named title")
+
+
+def named_pipeline(**recognition) -> EventsPipeline:
+    """A pipeline that runs the real alert path and records what it sends."""
+    import asyncio
+
+    p = pipeline_with(enabled=True, **recognition)
+    p._settings.notifications = {"enabled": True, "labels": ["person", "car"],
+                                 "min_score": 0.5, "cooldown_seconds": 60}
+    p.counts = {}
+    p.sent = []
+
+    async def friendly(camera):
+        return {"front_door": "Front Door", "drive": "Driveway"}.get(camera, camera)
+
+    async def send(**kw):
+        p.sent.append(kw)
+
+    p._friendly_name = friendly
+    p._send_notification = send
+    loop = asyncio.new_event_loop()
+    p._spawn = lambda coro: loop.run_until_complete(coro)
+    p._run = p._spawn
+    return p
+
+
+def live(p: EventsPipeline, fid: str, camera: str, label: str, *, age_s: float) -> dict:
+    st = state(age_s=age_s)
+    st.update(max_count=1, labels=[label], label=label, snap_time=None,
+              last_after={**after(label, camera), "score": 0.9})
+    p._active[fid] = st
+    return st
+
+
+def named_alert_checks() -> None:
+    print("\nan alert names who it is — 'Adam is at the front door'")
+    p = named_pipeline()
+    live(p, "native.a", "front_door", "person", age_s=0.0)
+    p.note_recognition("native.a", "face", name="Adam", profile_id=7, score=0.9)
+    check([s["title"] for s in p.sent] == ["Adam is at the front door"],
+          f"a face matched inside the hold names the alert (got {[s['title'] for s in p.sent]})")
+    check(p.sent and p.sent[0]["body"] == "Recognized Adam", "...and the body says so")
+
+    p = named_pipeline()
+    live(p, "native.b", "drive", "car", age_s=0.0)
+    p.note_recognition("native.b", "plate", name="the car", profile_id=3, plate="7ABC123")
+    check([s["title"] for s in p.sent] == ["The car is in the driveway"],
+          f"an enrolled vehicle is named by its profile (got {[s['title'] for s in p.sent]})")
+    check(p.sent and p.sent[0]["body"] == "Recognized the car — plate 7ABC123",
+          "...with the plate in the body")
+
+    print("\na name matched AFTER the alert went out is put on that alert")
+    p = named_pipeline()
+    st = live(p, "native.c", "front_door", "person", age_s=5.0)
+    p._run(p._maybe_notify_object("native.c", st["last_after"], st))
+    check([s["title"] for s in p.sent] == ["Person detected at Front Door"],
+          "the hold ran out first, so the alert went unnamed")
+    p.note_recognition("native.c", "face", name="Adam", profile_id=7, score=0.9)
+    check(len(p.sent) == 2 and p.sent[1]["title"] == "Adam is at the front door",
+          "the late match re-sends it named")
+    check(len(p.sent) == 2 and p.sent[1]["tag"] == p.sent[0]["tag"]
+          and p.sent[1]["event_id"] == p.sent[0]["event_id"],
+          "with the SAME tag and event, so the phone replaces the first rather than stacking")
+    p.note_recognition("native.c", "face", name="Adam", profile_id=7, score=0.95)
+    check(len(p.sent) == 2, "the same name matched again sends nothing more")
+    p.note_recognition("native.c", "face", name="Sarah", profile_id=8, score=0.9)
+    check(len(p.sent) == 3 and p.sent[2]["title"] == "Adam and Sarah are at the front door",
+          "a second person joins the name")
+
+    print("\n...but not when the operator asked not to hear it")
+    p = named_pipeline()
+    st = live(p, "native.d", "front_door", "person", age_s=5.0)
+    p._run(p._maybe_notify_object("native.d", st["last_after"], st))
+    p.note_recognition("native.d", "face", name="Adam", profile_id=7, alert_mode="mute")
+    check(len(p.sent) == 1, "a MUTED profile is not named on the alert")
+    p.note_recognition("native.d", "plate", plate="7ABC123")
+    check(len(p.sent) == 1, "an unmatched plate is not a name")
+
+    p = named_pipeline(notify_mode="unknown_only")
+    st = live(p, "native.e", "front_door", "person", age_s=5.0)
+    p._run(p._maybe_notify_object("native.e", st["last_after"], st))
+    p.note_recognition("native.e", "face", name="Adam", profile_id=7)
+    check(len(p.sent) == 1,
+          "'only strangers' mode does not follow up to say it was someone known")
+    p.note_recognition("native.e", "face", name="Mallory", profile_id=9, alert_mode="alert")
+    check(len(p.sent) == 2 and p.sent[1]["title"] == "Mallory is at the front door",
+          "...except for a WATCHLISTED profile, which is always named")
+
+    p = named_pipeline()
+    st = live(p, "native.f", "front_door", "person", age_s=5.0)
+    p._run(p._maybe_notify_object("native.f", st["last_after"], st))
+    p._settings.notifications["enabled"] = False
+    p.note_recognition("native.f", "face", name="Adam", profile_id=7)
+    check(len(p.sent) == 1, "notifications switched off in the meantime: nothing sent")
+
+    print("\nstill there — 'Adam is still at the front door'")
+    p = named_pipeline()
+    st = live(p, "native.g", "front_door", "person", age_s=0.0)
+    st["recognitions"].append({**KNOWN, "alert_mode": "default"})
+    p._run(p._send_dwell("native.g", "person", 300))
+    check([s["title"] for s in p.sent] == ["Adam is still at the front door"],
+          f"a dwell alert names them too (got {[s['title'] for s in p.sent]})")
+
+
 def main() -> int:
     gate_checks()
     note_checks()
     mqtt_checks()
+    wording_checks()
+    named_alert_checks()
     events_join_checks()
     print()
     if _failures:
