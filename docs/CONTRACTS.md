@@ -1462,6 +1462,16 @@ extra models cannot be downloaded, the classical localizer and one reader are
 used as before. `plates.reader` on `/api/recognition/status` reports
 `{localizer: "detector"|"classic", readers, extras_error}`.
 
+**US plates (`recognition.plate_region`, "us" default | "any").** Measured on
+OpenALPR's US benchmark (222 real photos, used for evaluation only — it is
+AGPL and is not in this repo): the plate detector found 98% of plates on a
+vehicle crop and 100% in the whole frame (classical localizer: 69%); the two
+readers with the per-character vote read 89% exactly (classical + one reader:
+62%). Most misses were O/0 and I/1, which US standard plates avoid, so "us"
+stores reads with O->0, I->1, Q->0: 93% exact, and wrong plates confidently
+stored fell from 14 to 9. The vote floor (`MIN_VOTE_CONFIDENCE`) is 0.7, up
+from 0.6: 200 right / 5 wrong stored instead of 203 / 9, single frame.
+
 **A plate zone is a fast lane.** On a camera with a plate zone drawn, every
 tracked vehicle in the zone is read from the first frame it is tracked —
 before the three-frame confirmation and the stationary filter, which decide

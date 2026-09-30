@@ -65,7 +65,10 @@ from .bestshot import (
 from .heatmap import HeatmapAccumulator
 from .plates import OCR_MIN_CONFIDENCE, PlateReader, deskew, is_vehicle
 from .platesnap import SnapshotSource
-from .recognition import Gallery, Match, PlateRead, PlateVote, normalize_plate, vote_plate
+from .recognition import (
+    PLATE_REGIONS, Gallery, Match, PlateRead, PlateVote, regional_plate,
+    vote_plate,
+)
 from .recognizer import crop_with_origin
 
 log = logging.getLogger(__name__)
@@ -80,7 +83,12 @@ VEHICLE_CROP_PAD = 0.04
 
 #: A vote below this is not worth recording. Plate voting reports its WEAKEST
 #: character as the confidence, so this means "no character was a coin flip".
-MIN_VOTE_CONFIDENCE = 0.6
+#:
+#: 0.7, raised from 0.6 on measurement: on 222 real US plates, single frame,
+#: 0.6 stored 203 right plates and 9 wrong ones; 0.7 stored 200 right and 5
+#: wrong. A wrong plate on an event is worse than none, and more frames of the
+#: same car push a right answer's confidence up, not a wrong one's.
+MIN_VOTE_CONFIDENCE = 0.7
 
 #: Plates shorter than this are almost always a partial read of a longer one.
 MIN_PLATE_LENGTH = 4
@@ -269,6 +277,17 @@ class PlatePass:
             self._reader.use_plate_detector = bool(cfg.get("plate_detector", True))
         except Exception:  # noqa: BLE001
             pass
+
+    def _plate_region(self) -> str:
+        """`recognition.plate_region`, read live. "us" by default."""
+        if self._settings is None:
+            return "us"
+        try:
+            cfg = (self._settings.current or {}).get("recognition") or {}
+        except Exception:  # noqa: BLE001
+            return "us"
+        region = str(cfg.get("plate_region") or "us").lower()
+        return region if region in PLATE_REGIONS else "us"
 
     def _hires_on(self) -> bool:
         """Whether full-resolution looks are wanted. Read live, not on the
@@ -605,8 +624,9 @@ class PlatePass:
             st.read_shots.add(key)
             results = await asyncio.to_thread(self._reader.read_all_blocking, shot.crop)
             stats = self._stats_for(st.camera)
+            region = self._plate_region()
             for raw, confidence, char_conf in results:
-                text = normalize_plate(raw)
+                text = regional_plate(raw, region)
                 if not text or len(text) < MIN_PLATE_LENGTH or confidence < OCR_MIN_CONFIDENCE:
                     stats.rejected_reads += 1
                     continue

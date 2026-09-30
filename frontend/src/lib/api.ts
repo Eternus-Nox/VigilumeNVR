@@ -989,6 +989,11 @@ export interface AppSettings {
      * backend predating it.
      */
     plate_detector?: boolean;
+    /**
+     * Which plates this system sees. "us" reads letter O/I/Q as 0/1/0, since
+     * US standard plates leave them out; "any" keeps reads as given.
+     */
+    plate_region?: 'us' | 'any';
   };
   detection: {
     model: DetectionModel;

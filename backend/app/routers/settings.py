@@ -491,6 +491,9 @@ class RecognitionSettings(BaseModel):
     # Find plates with the learned plate detector instead of the classical
     # localizer (native/plates.py explains the trade, including licensing).
     plate_detector: bool = True
+    # "us" reads letter O/I/Q as 0/1/0 (US standard plates omit them); "any"
+    # keeps reads as the readers gave them. A Literal so a typo is a 422.
+    plate_region: Literal["us", "any"] = "us"
 
 
 class AppSettings(BaseModel):

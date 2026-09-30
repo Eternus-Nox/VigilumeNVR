@@ -367,6 +367,10 @@ DEFAULT_SETTINGS: dict = {
         # weights are MIT-published but were trained with the GPL-3.0 YOLOv9
         # codebase, which is why it can be switched off.
         "plate_detector": True,
+        # Which plates this system sees. "us": letter O/I/Q are read as 0/1/0,
+        # because US standard plates leave them out for exactly that reason
+        # (native/recognition.py). "any": reads are kept as the readers gave them.
+        "plate_region": "us",
     },
     "notifications": {
         "enabled": True,

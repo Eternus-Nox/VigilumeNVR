@@ -48,6 +48,7 @@ from app.native.recognition import (  # noqa: E402
     normalize,
     normalize_plate,
     plate_distance,
+    regional_plate,
     to_blob,
     vote_plate,
 )
@@ -559,7 +560,34 @@ def plate_checks() -> None:
     )
 
 
+def region_checks() -> None:
+    print("\nUS plates: O, I and Q are read as 0, 1 and 0")
+    check(regional_plate("hl okty1", "us") == "HL0KTY1",
+          "a US read 'HLOKTY1' is stored as HL0KTY1 — US standard plates leave "
+          "the letter O off because it reads as zero")
+    check(regional_plate("CJIP5G", "us") == "CJ1P5G" and regional_plate("SHQR7X", "us") == "SH0R7X",
+          "I becomes 1 and Q becomes 0")
+    check(regional_plate("CJBP4V", "us") == "CJBP4V",
+          "and nothing else is touched: B and 8 are both real US plate characters")
+    check(regional_plate("HLOKTY1", "any") == "HLOKTY1",
+          "in 'any' mode reads are kept as the readers gave them")
+    check(regional_plate("HLOKTY1", "martian") == "HLOKTY1",
+          "an unknown region means no mapping, never a mapping nobody chose")
+
+    print("\nwhy it matters to the vote")
+    split = [PlateRead("HLOKTY1", 0.95, 1.0, (0.99, 0.99, 0.55, 0.99, 0.99, 0.99, 0.99)),
+             PlateRead("HL0KTY1", 0.97, 1.0, (0.99, 0.99, 0.62, 0.99, 0.99, 0.99, 0.99))]
+    raw = vote_plate(split)
+    us = vote_plate([PlateRead(regional_plate(r.text, "us"), r.confidence, r.quality, r.char_conf)
+                     for r in split])
+    check(raw is not None and raw.confidence < 0.6,
+          f"two readers splitting O/0 leave the raw vote a coin flip ({raw.confidence:.2f})")
+    check(us is not None and us.text == "HL0KTY1" and us.confidence == 1.0,
+          "read the US way they agree, and the plate is stored")
+
+
 def main() -> int:
+    region_checks()
     quality_checks()
     buffer_checks()
     embedding_checks()
