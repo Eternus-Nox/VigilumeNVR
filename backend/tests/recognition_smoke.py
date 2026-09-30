@@ -35,6 +35,7 @@ from app.native.bestshot import (  # noqa: E402
     KEEP_SHOTS,
     MIN_QUALITY,
     BestShotBuffer,
+    Quality,
     score_face,
     score_plate,
 )
@@ -586,7 +587,31 @@ def region_checks() -> None:
           "read the US way they agree, and the plate is stored")
 
 
+def overflow_checks() -> None:
+    print("\na full buffer drops the new shot without comparing images")
+    # Regression: Shot's generated __eq__ compared every field, crop arrays
+    # included, so `shot in dropped` raised on a full buffer and aborted the
+    # full-resolution plate look it happened in.
+    buf = BestShotBuffer(keep=2, min_gap_s=0.1)
+    rng = np.random.default_rng(3)
+    kept = []
+    for i, (w, q) in enumerate(((120, 0.9), (90, 0.8), (60, 0.3), (140, 0.85))):
+        crop = rng.integers(0, 255, (w // 2, w, 3), dtype=np.uint8)
+        try:
+            kept.append(buf.offer(tracker_id=1, kind="plate", crop_bgr=crop,
+                                  box=(0, 0, w, w // 2), frame_time=float(i),
+                                  quality=Quality(q, q, q, q, q, "t")))
+        except Exception as exc:  # noqa: BLE001
+            kept.append(exc)
+    check(not any(isinstance(k, Exception) for k in kept),
+          f"offering past capacity with crops of different sizes never raises ({kept})")
+    check(kept[2] is None, "the worst shot, offered to a full buffer, is dropped")
+    check([round(s.quality.total, 2) for s in buf.shots(1, "plate")] == [0.9, 0.85],
+          "and the buffer keeps the best two")
+
+
 def main() -> int:
+    overflow_checks()
     region_checks()
     quality_checks()
     buffer_checks()

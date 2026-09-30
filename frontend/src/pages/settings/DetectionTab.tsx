@@ -108,6 +108,7 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
     plate_hires: true,
     plate_detector: true,
     plate_region: 'us' as 'us' | 'any',
+    plate_replay: true,
     ...(savedRecognition ?? {}),
     ...(pending.recognition ?? {}),
   });
@@ -141,6 +142,7 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
         plate_hires: v.plate_hires ?? true,
         plate_detector: v.plate_detector ?? true,
         plate_region: v.plate_region ?? 'us',
+        plate_replay: v.plate_replay ?? true,
       });
   });
 
@@ -683,6 +685,23 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
                     with a wrong character from 14 to 9.
                   </span>
                 </label>
+                <label className="row-label">
+                  <input
+                    type="checkbox"
+                    checked={recognition.plate_replay ?? true}
+                    onChange={(e) =>
+                      setRecognition({ ...recognition, plate_replay: e.target.checked })
+                    }
+                  />
+                  Re-read plates from the recording
+                </label>
+                <span className="control-hint">
+                  A passing car usually gets one or two live looks, often late or blurred.
+                  With this on, once a car has gone and its plate is still unsure, the
+                  recorded full-resolution video of exactly those seconds is read frame by
+                  frame — dozens of looks instead of one or two. The plate reaches the event
+                  about a minute after the car leaves. Needs the camera to be recording.
+                </span>
                 <label>
                   Crop quality needed to identify: {Math.round(recognition.identify_quality * 100)}%
                   <input

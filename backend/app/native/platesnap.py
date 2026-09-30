@@ -161,13 +161,19 @@ class SnapshotSource:
 
     # ---------- asking ----------
 
+    def proven(self, camera: str) -> bool:
+        """This camera has served a usable full-resolution snapshot and is not
+        currently failing — so its snapshots, not the detect frame, are what
+        plates should be read from."""
+        h = self._health.get(camera)
+        return (h is not None and h.ok > 0 and not h.no_gain
+                and h.retry_at <= time.monotonic() and h.consecutive == 0)
+
     def available(self, camera: str) -> bool:
         """Whether it is worth asking this camera right now."""
         h = self._health.get(camera)
         if h is None:
             return True
-        if h.no_gain:
-            return False
         return h.retry_at <= time.monotonic()
 
     async def fetch(self, cam_row: dict[str, Any]) -> Optional[tuple[np.ndarray, float]]:
@@ -230,17 +236,30 @@ class SnapshotSource:
 
     def note_no_gain(self, camera: str, hires_shape: Sequence[int],
                      detect_shape: Sequence[int]) -> None:
-        """The camera's snapshot is no bigger than the detect frame: stop asking.
+        """The camera's snapshot is no bigger than the detect frame: stop asking
+        FOR A WHILE (BACKOFF_S), not for good.
 
         Recorded as a standing reason rather than a failure, because nothing
-        failed — the fix is a camera setting, and the status screen says which.
+        failed — the fix is usually a camera setting, and the status screen
+        says which. But it used to be permanent until restart, so ONE small
+        snapshot (a camera mid-reboot serving its substream size) switched
+        full-resolution plate reading off for the life of the process. Now it
+        is re-checked after the backoff, and `note_gain` clears it.
         """
         h = self._health.setdefault(camera, _Health())
+        h.retry_at = time.monotonic() + BACKOFF_S
         h.no_gain = (
             f"the camera's snapshot is only {hires_shape[1]}x{hires_shape[0]}, no more "
             f"detail than detection's {detect_shape[1]}x{detect_shape[0]}. Raise the "
             "snapshot resolution in the camera's encode settings."
         )
+
+    def note_gain(self, camera: str) -> None:
+        """A snapshot was big enough to be worth reading: clear any standing
+        no-gain reason."""
+        h = self._health.get(camera)
+        if h is not None:
+            h.no_gain = ""
 
     async def _amcrest_jpeg(self, cam_row: dict[str, Any]) -> bytes:
         from ..amcrest.client import AmcrestClient

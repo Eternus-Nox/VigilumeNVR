@@ -1472,6 +1472,27 @@ stores reads with O->0, I->1, Q->0: 93% exact, and wrong plates confidently
 stored fell from 14 to 9. The vote floor (`MIN_VOTE_CONFIDENCE`) is 0.7, up
 from 0.6: 200 right / 5 wrong stored instead of 203 / 9, single frame.
 
+**Reading the recording back (`recognition.plate_replay`, default true).**
+Offline the readers are right ~90% of the time on a clean look; live, a plate
+was read about one pass in three. The gap is the number of looks: a passing
+car gets one or two late snapshots. When a vehicle's track ends without a
+settled vote, `native/platereplay.py` decodes the recorded full-resolution
+footage for exactly the seconds it was in view (±0.7 s, at most 15 s),
+cropped to its path, at 6 fps, and every frame's plate — only one on the
+vehicle's own position at that moment, so a parked neighbour's is never read —
+is read by both readers into the vote. One replay at a time; never on the
+frame loop; no recording or no ffmpeg means no replay. The plate lands on the
+event when the track is concluded (about a minute after the car leaves).
+`plates.cameras.{name}` adds `replays`, `replay_frames`, `replay_reads`.
+
+Two fixes from simulating the live path on the 222 US photos: `bestshot.Shot`
+is compared by identity (its generated `__eq__` compared crop arrays and
+raised, aborting the whole full-resolution look); and once a camera has
+served a usable snapshot, the detect frame is no longer read (846 of 1,425
+reads had come from it, diluting sharp reads). A camera's "snapshot no bigger
+than detection" state now expires after 5 minutes instead of lasting until
+restart.
+
 **A plate zone is a fast lane.** On a camera with a plate zone drawn, every
 tracked vehicle in the zone is read from the first frame it is tracked —
 before the three-frame confirmation and the stationary filter, which decide

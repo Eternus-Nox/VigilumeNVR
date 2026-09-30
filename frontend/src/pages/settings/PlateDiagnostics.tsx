@@ -96,6 +96,9 @@ function counters(c: PlateCameraStats, snap: PlateSnapshotHealth | undefined): s
     `${c.passes} look${c.passes === 1 ? '' : 's'}`,
     `${c.hires_frames}/${c.hires_requested} snapshots`,
     `${c.reads} read${c.reads === 1 ? '' : 's'}${c.hires_reads ? ` (${c.hires_reads} full-res)` : ''}`,
+    ...(c.replays
+      ? [`${c.replays} recording replay${c.replays === 1 ? '' : 's'} (${c.replay_frames ?? 0} frames, ${c.replay_reads ?? 0} reads)`]
+      : []),
     `${c.votes_stored} plate${c.votes_stored === 1 ? '' : 's'} stored`,
   ];
   if (c.votes_discarded) parts.push(`${c.votes_discarded} discarded`);

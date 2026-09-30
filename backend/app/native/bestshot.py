@@ -229,9 +229,15 @@ class Quality:
         return self.total >= MIN_QUALITY
 
 
-@dataclass
+@dataclass(eq=False)
 class Shot:
-    """One retained candidate crop and everything needed to use or show it."""
+    """One retained candidate crop and everything needed to use or show it.
+
+    eq=False: shots are compared by IDENTITY. The generated __eq__ compared
+    every field, including the crop's numpy array, and `shot in dropped`
+    raised "operands could not be broadcast" (or "truth value is ambiguous")
+    — aborting the whole full-resolution plate look it happened in.
+    """
 
     crop: np.ndarray
     quality: Quality
@@ -598,7 +604,7 @@ class BestShotBuffer:
         if len(slot.shots) > self._keep:
             dropped = slot.shots[self._keep :]
             del slot.shots[self._keep :]
-            if shot in dropped:
+            if any(d is shot for d in dropped):
                 return None
         return shot
 

@@ -45,6 +45,7 @@ from .native.recorder import Recorder
 from .native.facepass import FacePass
 from .native.platepass import PlatePass
 from .native.plates import PlateReader
+from .native.platereplay import PlateReplay
 from .native.platesnap import SnapshotSource
 from .native.recognizer import FaceRecognizer
 from .native.spotlight import SpotlightController
@@ -448,8 +449,12 @@ async def lifespan(app: FastAPI):
     # read a plate at any distance (native/platesnap.py), so a tracked vehicle
     # also triggers an occasional snapshot from the camera itself.
     plate_snapshots = SnapshotSource()
+    # And the recording, read back after a vehicle leaves when the live looks
+    # did not settle its plate (native/platereplay.py).
+    plate_replay = PlateReplay(recorder.camera_dir)
     plate_pass = PlatePass(plate_reader, db, config.candidate_crops_dir,
-                           heatmap=face_pass.heatmap, snapshots=plate_snapshots)
+                           heatmap=face_pass.heatmap, snapshots=plate_snapshots,
+                           replay=plate_replay)
     engine.set_plate_pass(plate_pass)
     # Re-assert stored desired IR on doorbells (the AD410 resets IR Mode to Auto
     # whenever RTSP streaming (re)connects). The recorder fires on_connect once

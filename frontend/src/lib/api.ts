@@ -762,6 +762,10 @@ export interface PlateCameraStats {
   /** The vehicle could not be found again in the snapshot (it had moved on). */
   hires_lost: number;
   hires_reads: number;
+  /** Times the recording was read back for a vehicle, frames decoded, reads. */
+  replays?: number;
+  replay_frames?: number;
+  replay_reads?: number;
   votes_stored: number;
   votes_discarded: number;
   last_plate: string;
@@ -994,6 +998,11 @@ export interface AppSettings {
      * US standard plates leave them out; "any" keeps reads as given.
      */
     plate_region?: 'us' | 'any';
+    /**
+     * Read the plate again from the recording after a vehicle leaves, when the
+     * live looks did not settle it. Optional: absent on an older backend.
+     */
+    plate_replay?: boolean;
   };
   detection: {
     model: DetectionModel;

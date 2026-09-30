@@ -64,6 +64,7 @@ from .bestshot import (
 )
 from .heatmap import HeatmapAccumulator
 from .plates import OCR_MIN_CONFIDENCE, PlateReader, deskew, is_vehicle
+from .platereplay import PlateReplay
 from .platesnap import SnapshotSource
 from .recognition import (
     PLATE_REGIONS, Gallery, Match, PlateRead, PlateVote, regional_plate,
@@ -133,6 +134,11 @@ SETTLED_READS = 3
 #: the detection loop never waits on it.
 HIRES_FINISH_WAIT_S = 3.0
 
+#: A replayed plate crop scoring below this is not read. The same floor the
+#: best-shot buffer applies, so a replay cannot add votes from crops the live
+#: path would have thrown away.
+MIN_REPLAY_QUALITY = 0.25
+
 
 @dataclass
 class _CameraStats:
@@ -152,6 +158,9 @@ class _CameraStats:
     hires_frames: int = 0
     hires_lost: int = 0
     hires_reads: int = 0
+    replays: int = 0
+    replay_frames: int = 0
+    replay_reads: int = 0
     votes_stored: int = 0
     votes_discarded: int = 0
     last_plate: str = ""
@@ -171,6 +180,9 @@ class _CameraStats:
             "hires_frames": self.hires_frames,
             "hires_lost": self.hires_lost,
             "hires_reads": self.hires_reads,
+            "replays": self.replays,
+            "replay_frames": self.replay_frames,
+            "replay_reads": self.replay_reads,
             "votes_stored": self.votes_stored,
             "votes_discarded": self.votes_discarded,
             "last_plate": self.last_plate,
@@ -212,6 +224,10 @@ class _TrackState:
     #: Set once the vote has been stored (or discarded). A full-resolution look
     #: that lands after that must not announce a different answer.
     concluded: bool = False
+    #: Where the vehicle was, over time: (wall time, box as FRACTIONS of the
+    #: frame). What the recording replay needs to know which seconds to decode
+    #: and which plate in each frame is this vehicle's.
+    path: deque = field(default_factory=lambda: deque(maxlen=600))
 
 
 def _expand(
@@ -235,6 +251,7 @@ class PlatePass:
         heatmap: Optional[HeatmapAccumulator] = None,
         on_recognition: Optional[Any] = None,
         snapshots: Optional[SnapshotSource] = None,
+        replay: Optional[PlateReplay] = None,
     ) -> None:
         # See FacePass.on_recognition — the live hook, not the stored row.
         self.on_recognition = on_recognition
@@ -256,6 +273,9 @@ class PlatePass:
         # Full-resolution looks. None disables them outright (tests that want
         # the detect-frame path alone); the setting switches them at runtime.
         self._snapshots = snapshots
+        # Reading the recording after a vehicle leaves (platereplay.py). None
+        # disables it (tests that want the live path alone).
+        self._replay = replay
         self._settings: Any = None
         self._stats: dict[str, _CameraStats] = {}
         # Final votes deferred behind an in-flight full-resolution look, held
@@ -389,6 +409,11 @@ class PlatePass:
             self._tracks[key] = st
         if event_fid:
             st.event_fid = event_fid
+        # Every sighting, before the throttle: the replay needs the whole path.
+        fh0, fw0 = frame_bgr.shape[:2]
+        if fw0 > 0 and fh0 > 0:
+            x1, y1, x2, y2 = (float(v) for v in obs.box[:4])
+            st.path.append((frame_time, (x1 / fw0, y1 / fh0, x2 / fw0, y2 / fh0)))
         if frame_time - st.last_pass < (ZONE_PASS_INTERVAL_S if fast else PASS_INTERVAL_S):
             return
         st.last_pass = frame_time
@@ -397,6 +422,17 @@ class PlatePass:
         # Before the detect-frame work, so the snapshot request is on the wire
         # while this frame is being searched.
         self._maybe_look_hires(cam, camera, st, obs, frame_bgr, frame_time, fast=fast)
+
+        # Once this camera has PROVEN it serves full-resolution snapshots, the
+        # detect frame is not read at all. Measured on 222 real US plates run
+        # through this pass: 846 of 1,425 reads came from the detect frame,
+        # where the plate is a few dozen pixels, and they were most of why a
+        # vote came out wrong or too unsure to store — a blurry read of the
+        # same plate disagrees with a sharp one and dilutes it. Until a
+        # snapshot has worked (or when they stop working), the detect frame is
+        # all there is and it is read as before.
+        if self._hires_on() and self._snapshots is not None and self._snapshots.proven(camera):
+            return
 
         cropped = crop_with_origin(frame_bgr, obs.box, pad=VEHICLE_CROP_PAD)
         if cropped is None:
@@ -538,6 +574,7 @@ class PlatePass:
             if hires.shape[1] < detect_shape[1] * platesnap.MIN_GAIN:
                 self._snapshots.note_no_gain(camera, hires.shape, detect_shape)
                 return
+            self._snapshots.note_gain(camera)
             stats.hires_frames += 1
             found = await asyncio.to_thread(platesnap.locate, template, box, detect_shape, hires)
             if self._reader.has_detector:
@@ -689,6 +726,14 @@ class PlatePass:
         if st is None:
             return
         task = st.hires_task
+        if self._wants_replay(st):
+            deferred = asyncio.create_task(
+                self._conclude_after_replay(st, camera, tracker_id, task),
+                name=f"plate-replay-{camera}-{tracker_id}",
+            )
+            self._finishing.add(deferred)
+            deferred.add_done_callback(self._finishing.discard)
+            return
         if task is not None and not task.done():
             deferred = asyncio.create_task(
                 self._conclude_after(st, camera, tracker_id, task),
@@ -711,6 +756,108 @@ class PlatePass:
         except Exception:  # noqa: BLE001 — the look logs its own failures
             pass
         await self._conclude(st, camera, tracker_id)
+
+    # ---------- reading the recording ----------
+
+    def _replay_on(self) -> bool:
+        if self._replay is None or not self._replay.available:
+            return False
+        if self._settings is None:
+            return True
+        try:
+            cfg = (self._settings.current or {}).get("recognition") or {}
+        except Exception:  # noqa: BLE001
+            return True
+        return bool(cfg.get("plate_replay", True))
+
+    def _wants_replay(self, st: _TrackState) -> bool:
+        """Replay unless the live looks already settled the plate."""
+        if not self._replay_on() or len(st.path) < 2:
+            return False
+        v = vote_plate(st.reads) if st.reads else None
+        return not (v is not None and v.reads >= SETTLED_READS
+                    and v.confidence >= SETTLED_CONFIDENCE)
+
+    async def _conclude_after_replay(
+        self, st: _TrackState, camera: str, tracker_id: int,
+        task: Optional[asyncio.Task],
+    ) -> None:
+        if task is not None and not task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), HIRES_FINISH_WAIT_S)
+            except asyncio.TimeoutError:
+                task.cancel()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            await self._replay_reads(st, camera, tracker_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("plate replay failed on %s/%s", camera, tracker_id)
+        await self._conclude(st, camera, tracker_id)
+
+    async def _replay_reads(self, st: _TrackState, camera: str, tracker_id: int) -> None:
+        """Decode the seconds this vehicle was in view and read every frame."""
+        assert self._replay is not None
+        stats = self._stats_for(camera)
+        path = list(st.path)
+        start, end = path[0][0], path[-1][0]
+        region = (
+            min(b[0] for _, b in path), min(b[1] for _, b in path),
+            max(b[2] for _, b in path), max(b[3] for _, b in path),
+        )
+        frames = await self._replay.frames(camera, start, end, region)
+        if not frames:
+            return
+        stats.replays += 1
+        stats.replay_frames += len(frames)
+        times = [t for t, _ in path]
+        region_name = self._plate_region()
+        for fr in frames:
+            # Where THIS vehicle was at that moment (nearest sighting), in the
+            # crop's pixels — so a parked neighbour's plate in the same crop is
+            # not read as this car's.
+            i = min(range(len(times)), key=lambda k: abs(times[k] - fr.time))
+            bx1, by1, bx2, by2 = path[i][1]
+            vb = (bx1 * fr.width - fr.ox, by1 * fr.height - fr.oy,
+                  bx2 * fr.width - fr.ox, by2 * fr.height - fr.oy)
+            ch, cw = fr.crop.shape[:2]
+            nx1, ny1, nx2, ny2 = _expand(vb, 0.3, cw, ch)
+            plates = await asyncio.to_thread(self._reader.detect_blocking, fr.crop) or []
+            mine = [p for p in plates
+                    if nx1 <= (p[0] + p[2]) / 2.0 <= nx2 and ny1 <= (p[1] + p[3]) / 2.0 <= ny2]
+            if not mine:
+                continue
+            x1, y1, x2, y2, _score = max(mine, key=lambda p: p[4])
+            strip = fr.crop[y1:y2, x1:x2]
+            quality = score_plate(strip)
+            if quality.total < MIN_REPLAY_QUALITY:
+                continue
+            # Offer it too, so the stored candidate crop is the best look of
+            # the whole visit rather than whatever the live path managed.
+            st.buffer.offer(
+                tracker_id=tracker_id, kind="plate", crop_bgr=strip,
+                box=(x1, y1, x2, y2), frame_time=fr.time, quality=quality,
+                frame_box=(max(0.0, (fr.ox + x1) / fr.width), max(0.0, (fr.oy + y1) / fr.height),
+                           min(1.0, (fr.ox + x2) / fr.width), min(1.0, (fr.oy + y2) / fr.height)),
+            )
+            st.read_shots.add((fr.time, (x1, y1, x2, y2)))
+            for raw, confidence, char_conf in await asyncio.to_thread(
+                self._reader.read_all_blocking, strip
+            ):
+                text = regional_plate(raw, region_name)
+                if not text or len(text) < MIN_PLATE_LENGTH or confidence < OCR_MIN_CONFIDENCE:
+                    stats.rejected_reads += 1
+                    continue
+                stats.reads += 1
+                stats.replay_reads += 1
+                st.reads.append(PlateRead(
+                    text=text, confidence=confidence, quality=quality.total,
+                    char_conf=char_conf if len(char_conf) == len(text) else (),
+                ))
 
     async def wait_idle(self) -> None:
         """Wait for every deferred vote. For tests and orderly shutdown."""
