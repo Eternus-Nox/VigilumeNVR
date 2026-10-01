@@ -191,7 +191,7 @@ async def main() -> int:
     check(db.rows("SELECT * FROM event_recognitions") == [],
           "a ~35 px plate on the detect frame is not read, so nothing is stored")
 
-    print("\nwith the replay: the recording is read after the car has gone")
+    print("\nwith the replay: the recording is read (in bursts, and after the car has gone)")
     db = FakeDB(tmp / "b.db")
     pp = PlatePass(reader, db, tmp / "crops-b", replay=replay)
     await pp.reload_gallery()
@@ -205,9 +205,9 @@ async def main() -> int:
           f"the plate is read from the recording and stored as {TRUTH} "
           f"(got {[r['plate'] for r in rows]})")
     stats = pp.status()["cameras"]["drive"]
-    check(stats["replays"] == 1 and stats["replay_frames"] >= 20,
-          f"from one replay of {stats['replay_frames']} frames — dozens of looks, "
-          "not the one or two the live path gets")
+    check(1 <= stats["replays"] <= 7 and stats["replay_frames"] >= 20,
+          f"from {stats['replays']} read(s) of the recording, {stats['replay_frames']} frames "
+          "— dozens of looks, not the one or two the live path gets")
     check(stats["replay_reads"] >= 10, f"{stats['replay_reads']} reads went into the vote")
     cands = db.rows("SELECT * FROM recognition_candidates")
     crop = cv2.imread(str(tmp / "crops-b" / cands[0]["image_path"])) if cands else None
