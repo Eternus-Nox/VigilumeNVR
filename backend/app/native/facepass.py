@@ -74,6 +74,26 @@ the face from those pixels. The shot joins the same best-shot buffer, where a
 sharp 150 px face simply outscores a 35 px one. It runs in the background —
 the engine's frame loop never waits on a camera — and stops once the person is
 identified from a good shot, or after HIRES_MAX_PER_TRACK looks.
+
+RECORDED BURSTS (native/burst.py)
+---------------------------------
+A face is often only frontal for a moment — as someone walks up, glances at
+the camera, or turns at the door — and that moment is frequently BEFORE
+detection has confirmed them, or between two snapshots. So the pass also
+reads the camera's own recording: starting a second after the person is first
+seen, from two seconds before that up to now, ten frames a second, cropped
+around where they were in each frame; again every ~1.2 s while they are in
+view; and once more just after they leave. Every frame's face (only one in the
+upper part of THIS person's box at that moment) is scored into the same
+best-shot buffer, so the shot identified from is the best of all of them.
+
+Identification still uses the single best shot. Combining several was
+measured on degraded copies of real faces: averaging the best three raised
+the match rate on clean single-person crops (97% -> 98.5-100%), but on crops
+with a second face nearby it doubled the wrong-person rate (3% -> 6%) — it
+amplifies whichever face dominates the shots — and a wrong name is worse
+than "unknown". A veto on a disagreeing second shot cost correct names
+(91% -> 83%) without removing a single wrong one.
 """
 
 from __future__ import annotations
@@ -81,14 +101,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
 import numpy as np
 
-from . import platesnap
+from . import platesnap, trackpath
 from . import zones as zonelib
+from .burst import (
+    BURST_FPS, MAX_BURSTS, TAIL_DELAY_S, TIME_TOLERANCE_S, BurstState,
+)
 from .bestshot import (
     KEEP_SHOTS, MIN_GAP_S, BestShotBuffer, Shot, clamp_setting, encode_frame_box,
     score_face, shot_params,
@@ -157,6 +181,12 @@ HIRES_LOST_MARGIN = 0.25
 #: background — before its answer is written.
 HIRES_FINISH_WAIT_S = 3.0
 
+#: Margin around the person (fraction of their box) cropped from each
+#: recorded frame, and the part of the box a face must sit in to be theirs:
+#: the upper FACE_REGION of it, give or take a little.
+BURST_LOOK_MARGIN = 0.12
+FACE_REGION = 0.65
+
 #: A new candidate whose best gallery score is within this of an existing
 #: candidate's is treated as the same unknown person and skipped. Without it, one
 #: stranger walking past twelve times produces twelve rows to wade through.
@@ -181,6 +211,11 @@ class _TrackState:
     # Serializes identification: the detect-frame pass and a full-resolution
     # look can both reach it for one track at once.
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    #: Where the person was over time: (wall time, box as FRACTIONS of the
+    #: frame), every sighting — what a recorded burst crops by.
+    path: deque = field(default_factory=lambda: deque(maxlen=600))
+    #: Recorded bursts (native/burst.py) for this person.
+    burst: BurstState = field(default_factory=BurstState)
 
 
 class FacePass:
@@ -193,6 +228,7 @@ class FacePass:
         images_dir: Path,
         on_recognition: Optional[Any] = None,
         snapshots: Optional[Any] = None,
+        replay: Optional[Any] = None,
     ) -> None:
         # Called the moment a track is identified, NOT when the row is stored.
         # The stored row lands at track end, which for an alert is long after
@@ -203,6 +239,16 @@ class FacePass:
         # Full-resolution frames (platesnap.SnapshotSource, shared with the
         # plate pass). None disables full-resolution looks.
         self._snapshots = snapshots
+        # The recording, read back in bursts (platereplay.RecordingReplay,
+        # shared with the plate pass). None disables bursts.
+        self._replay = replay
+        # Recorded bursts, counted since boot, for the status screen.
+        self.bursts: dict[str, int] = {
+            "bursts": 0,        # bursts that came back with frames
+            "frames": 0,        # recorded frames read
+            "faces": 0,         # faces offered from them
+            "early_faces": 0,   # ... from frames BEFORE the person was first seen
+        }
         # The settings store, for the live `face_hires` switch. Set by run().
         self._settings: Any = None
         # Finishes deferred behind an in-flight look (see finish()).
@@ -363,6 +409,13 @@ class FacePass:
             self._tracks[key] = st
         if event_fid:
             st.event_fid = event_fid
+        # Every sighting, before the throttle: a burst crops by the path.
+        fh0, fw0 = frame_bgr.shape[:2]
+        if fw0 > 0 and fh0 > 0:
+            bx1, by1, bx2, by2 = (float(v) for v in obs.box[:4])
+            st.path.append((frame_time, (bx1 / fw0, by1 / fh0, bx2 / fw0, by2 / fh0)))
+            st.burst.note_seen(frame_time)
+            self._maybe_burst(camera, st, obs.tracker_id, frame_time)
         if frame_time - st.last_pass < self._pass_interval:
             return
         st.last_pass = frame_time
@@ -433,6 +486,143 @@ class FacePass:
             if already is not None and best.quality.total - already < REIDENTIFY_IMPROVEMENT:
                 return
             await self._identify(st, tracker_id, best)
+
+    # ---------- recorded bursts (native/burst.py) ----------
+
+    def _replay_on(self) -> bool:
+        """Whether recorded bursts are wanted. Read live."""
+        if self._replay is None or not getattr(self._replay, "available", False):
+            return False
+        if self._settings is None:
+            return True
+        try:
+            cfg = (self._settings.current or {}).get("recognition") or {}
+        except Exception:  # noqa: BLE001
+            return True
+        return bool(cfg.get("face_replay", True))
+
+    @staticmethod
+    def _settled(st: _TrackState) -> bool:
+        return st.identified_from is not None and st.identified_from >= HIRES_SETTLED_QUALITY
+
+    def _maybe_burst(self, camera: str, st: _TrackState, tracker_id: int, now: float) -> None:
+        """Start a live burst if one is due, and (re)arm the one for after the
+        person's last sighting. Never awaits."""
+        if not self._replay_on() or self._settled(st) or len(st.path) < 2:
+            return
+        window = st.burst.due(now)
+        if window is not None:
+            self._launch_burst(camera, st, tracker_id, window, live=True)
+        if st.burst.tail is not None:
+            st.burst.tail.cancel()
+        st.burst.tail = asyncio.get_running_loop().call_later(
+            TAIL_DELAY_S, self._tail_burst, camera, tracker_id
+        )
+
+    def _tail_burst(self, camera: str, tracker_id: int) -> None:
+        """The person has not been seen for TAIL_DELAY_S: read the seconds as
+        they left, without waiting for the track to be retired."""
+        st = self._tracks.get((camera, tracker_id))
+        if st is None:
+            return
+        st.burst.tail = None
+        if st.burst.busy:
+            st.burst.tail = asyncio.get_running_loop().call_later(
+                0.5, self._tail_burst, camera, tracker_id
+            )
+            return
+        if not self._replay_on() or self._settled(st) or st.burst.count >= MAX_BURSTS + 1:
+            return
+        window = st.burst.window(final=True)
+        if window is not None:
+            self._launch_burst(camera, st, tracker_id, window, live=False)
+
+    def _launch_burst(
+        self, camera: str, st: _TrackState, tracker_id: int,
+        window: tuple[float, float], *, live: bool,
+    ) -> None:
+        st.burst.started()
+        st.burst.task = asyncio.create_task(
+            self._run_burst(camera, st, tracker_id, window, live=live),
+            name=f"face-burst-{camera}-{tracker_id}",
+        )
+
+    async def _run_burst(
+        self, camera: str, st: _TrackState, tracker_id: int,
+        window: tuple[float, float], *, live: bool,
+    ) -> None:
+        """Decode [start, end] of the recording around this person, offer the
+        face in every frame, and identify from the best. Never raises."""
+        start, end = window
+        try:
+            path = list(st.path)
+            if not path:
+                return
+            region = trackpath.expand(
+                trackpath.union_over(path, start - TIME_TOLERANCE_S, end + TIME_TOLERANCE_S),
+                BURST_LOOK_MARGIN,
+            )
+            frames = await self._replay.frames(
+                camera, start, end, region, fps=BURST_FPS, pad=False, live=live,
+            )
+            st.burst.finished(start, end, frames[-1].time if frames else None, BURST_FPS)
+            if not frames:
+                return
+            self.bursts["bursts"] += 1
+            self.bursts["frames"] += len(frames)
+            found = await asyncio.to_thread(self._faces_in_frames_blocking, frames, path)
+            first_seen = path[0][0]
+            for fr_time, aligned, box, quality, frame_box in found:
+                if st.buffer.offer(
+                    tracker_id=tracker_id, kind="face", crop_bgr=aligned, box=box,
+                    frame_time=fr_time, quality=quality, frame_box=frame_box,
+                ):
+                    self.bursts["faces"] += 1
+                    if fr_time < first_seen:
+                        self.bursts["early_faces"] += 1
+            await self._maybe_identify(st, tracker_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("face burst failed on %s/%s", camera, tracker_id)
+
+    def _faces_in_frames_blocking(self, frames: Sequence[Any], path: list) -> list:
+        """For each recorded frame: crop around where the person was at that
+        moment, find THEIR face (centre in the upper part of their box), align
+        and score it. Runs in a thread."""
+        out = []
+        for fr in frames:
+            near = trackpath.box_near(path, fr.time, TIME_TOLERANCE_S)
+            ch, cw = fr.crop.shape[:2]
+            look = trackpath.to_pixels(trackpath.expand(near, BURST_LOOK_MARGIN),
+                                       fr.width, fr.height, fr.ox, fr.oy)
+            lx1, ly1 = max(0, int(look[0])), max(0, int(look[1]))
+            lx2, ly2 = min(cw, int(round(look[2]))), min(ch, int(round(look[3])))
+            if lx2 - lx1 < 16 or ly2 - ly1 < 16:
+                continue
+            sub = fr.crop[ly1:ly2, lx1:lx2]
+            faces = self._recognizer.detect_blocking(sub)
+            if not faces:
+                continue
+            px1, py1, px2, py2 = trackpath.to_pixels(near, fr.width, fr.height,
+                                                     fr.ox + lx1, fr.oy + ly1)
+            pw, ph = px2 - px1, py2 - py1
+            head = (px1 - 0.1 * pw, py1 - 0.1 * ph, px2 + 0.1 * pw, py1 + FACE_REGION * ph)
+            mine = [f for f in faces if trackpath.contains(
+                head, (f.box[0] + f.box[2]) / 2.0, (f.box[1] + f.box[3]) / 2.0)]
+            if not mine:
+                continue
+            face = max(mine, key=lambda f: f.width * f.height)
+            aligned = self._recognizer.align_blocking(sub, face)
+            if aligned is None:
+                continue
+            quality = score_face(aligned, landmarks=face.landmarks)
+            fx1, fy1 = fr.ox + lx1 + face.box[0], fr.oy + ly1 + face.box[1]
+            fx2, fy2 = fr.ox + lx1 + face.box[2], fr.oy + ly1 + face.box[3]
+            frame_box = (max(0.0, min(1.0, fx1 / fr.width)), max(0.0, min(1.0, fy1 / fr.height)),
+                         max(0.0, min(1.0, fx2 / fr.width)), max(0.0, min(1.0, fy2 / fr.height)))
+            out.append((fr.time, aligned, face.box, quality, frame_box))
+        return out
 
     # ---------- full-resolution looks ----------
 
@@ -605,8 +795,16 @@ class FacePass:
         st = self._tracks.pop((camera, tracker_id), None)
         if st is None:
             return
+        if st.burst.tail is not None:
+            st.burst.tail.cancel()
+            st.burst.tail = None
         task = st.hires_task
-        if task is not None and not task.done():
+        hires_busy = task is not None and not task.done()
+        final_burst = (
+            self._replay_on() and not self._settled(st) and len(st.path) >= 2
+            and st.burst.window(final=True) is not None
+        )
+        if hires_busy or st.burst.busy or final_burst:
             deferred = asyncio.create_task(
                 self._finish_after(task, st, camera, tracker_id),
                 name=f"face-finish-{camera}-{tracker_id}",
@@ -617,16 +815,25 @@ class FacePass:
         await self._conclude(st, camera, tracker_id)
 
     async def _finish_after(
-        self, task: "asyncio.Task[None]", st: _TrackState, camera: str, tracker_id: int,
+        self, task: Optional["asyncio.Task[None]"], st: _TrackState, camera: str, tracker_id: int,
     ) -> None:
-        try:
-            await asyncio.wait_for(asyncio.shield(task), HIRES_FINISH_WAIT_S)
-        except asyncio.TimeoutError:
-            task.cancel()
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 — the look logs its own failures
-            pass
+        for pending, wait in ((task, HIRES_FINISH_WAIT_S), (st.burst.task, HIRES_FINISH_WAIT_S * 4)):
+            if pending is None or pending.done():
+                continue
+            try:
+                await asyncio.wait_for(asyncio.shield(pending), wait)
+            except asyncio.TimeoutError:
+                pending.cancel()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — each logs its own failures
+                pass
+        if self._replay_on() and not self._settled(st):
+            # Whatever the live bursts did not cover, read now it is over.
+            window = st.burst.window(final=True)
+            if window is not None:
+                st.burst.started()
+                await self._run_burst(camera, st, tracker_id, window, live=False)
         await self._conclude(st, camera, tracker_id)
 
     async def wait_idle(self) -> None:
@@ -640,6 +847,7 @@ class FacePass:
                 continue
             if st.hires_task is not None and not st.hires_task.done():
                 st.hires_task.cancel()
+            st.burst.cancel()
 
     async def _conclude(self, st: _TrackState, camera: str, tracker_id: int) -> None:
         try:
@@ -917,6 +1125,9 @@ class FacePass:
             # Full-resolution looks (module docstring), and whether they are on.
             "hires_enabled": self._hires_on(),
             "hires": dict(self.hires),
+            # Recorded bursts (module docstring), and whether they are on.
+            "bursts_enabled": self._replay_on(),
+            "bursts": dict(self.bursts),
             "tuning": {
                 "shots_per_track": self._shots,
                 "shot_min_gap_seconds": self._shot_gap,

@@ -377,10 +377,14 @@ DEFAULT_SETTINGS: dict = {
         # because US standard plates leave them out for exactly that reason
         # (native/recognition.py). "any": reads are kept as the readers gave them.
         "plate_region": "us",
-        # Read the plate again from the RECORDING after a vehicle leaves, when
-        # the live looks did not settle it (native/platereplay.py). Dozens of
-        # looks instead of one or two; needs the camera to be recording.
+        # Read plates from the RECORDING too (native/burst.py): short bursts
+        # of full-resolution frames while the vehicle is in view, starting
+        # from two seconds BEFORE it was detected, and once more after it
+        # leaves if the plate is still unsure. Needs the camera to be recording.
         "plate_replay": True,
+        # The same for faces: bursts of the recording around a person while
+        # they are in view, from just before they were detected.
+        "face_replay": True,
     },
     "notifications": {
         "enabled": True,

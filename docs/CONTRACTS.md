@@ -1451,6 +1451,73 @@ how `face_on_vehicles` is verified rather than assumed — see below.
 pass would accept a car and no car was ever offered. The filter lives in ONE
 place — `FacePass.labels`, driven by the setting — and the engine asks.
 
+#### Recorded bursts: looking back from before detection (`recognition.plate_replay`, `recognition.face_replay`)
+
+Detection runs on the substream at a few frames a second and confirms a track
+over three frames; a snapshot is asked for after that and lands a few hundred
+ms later. A car crossing the view in 1.5 s, or someone walking briskly past,
+has often turned or gone by the first look — plates were read when a car
+backed slowly out of the driveway and missed when one drove in. The recorder
+has had the camera's full-resolution stream on disk the whole time, including
+the seconds BEFORE anything was detected.
+
+So (`native/burst.py`) both passes read the recording in bursts while the
+object is still in view: the first 1.0 s after a track is first seen, from
+**2.0 s before that first sighting** (`PRE_ROLL_S`) up to now minus
+`REC_LAG_S` (0.8 s — what is safely on disk); then again whenever 1.2 s more is
+available; then a final one 1.8 s after the last sighting, to 0.7 s past it.
+Each burst decodes at 10 fps (`BURST_FPS`), cropped to where the object was
+(`native/trackpath.py`: interpolated between detect frames, extrapolated up to
+1 s before the first sighting along its motion), and every frame is read:
+
+* plates — each frame cropped around the vehicle at THAT moment (±0.35 s for
+  clock slop), the plate detector run on the crop, a plate accepted only if
+  its centre is on that vehicle, both readers into the vote. Per-frame crops
+  rather than one crop of the whole path: the detector letterboxes to 384 px,
+  and a crossing car's path spans most of the frame;
+* faces — each frame cropped around the person, YuNet on the crop, a face
+  accepted only if its centre is in the upper 65% of THEIR box at that moment,
+  aligned and scored into the track's best-shot buffer; identification from the
+  best shot as before.
+
+At most 6 bursts per track (plus the final), none once settled (plates: ≥3
+reads at ≥0.9; faces: identified from a shot of quality ≥0.7), one decode at a
+time across cameras, and a burst that finds no recording at all stops further
+ones for that track. A plate's after-the-track read now covers only what the
+bursts did not. The point is TIMING: the answer is in hand while the object is
+still in view, so the alert can carry the name or plate instead of it landing
+a minute after the car has gone. Status: `plates.cameras.{name}.early_reads`
+(reads from frames before the first sighting) and `face.bursts`
+`{bursts, frames, faces, early_faces}`, `face.bursts_enabled`.
+`tests/burst_smoke.py`: a plate legible only before the car is detected (34
+early reads) and a face turned to the camera only before the person is
+detected are both read, during the track.
+
+**Faces are still decided from the single best shot.** Combining the best three
+was measured on degraded copies of real faces: averaging raised the match rate
+on single-person crops (97% → 98.5-100%) but doubled the wrong-person rate when
+a second face was nearby (3% → 6%), and a veto on a disagreeing second shot
+cost correct names (91% → 83%) without removing a wrong one.
+
+**Recorded frame times.** A segment's file name has whole seconds; the recorder
+cuts a segment when the next keyframe arrives, so the previous segment's last
+write (mtime) is the new one's start to the millisecond — measured on a
+real-time stream copy, the name was early by 0.37-0.87 s and the mtime exact
+(`platereplay.segment_starts`; the name is used across a recorder gap). And each
+segment's share of a window is decoded from that file with `-ss` before its
+input: seeking the concat demuxer — the previous approach — was measured to
+land on the NEXT keyframe, so frames came back up to a GOP later than labelled
+(0.8 s in the test) and the start of the window was lost. Measured after: every
+frame within one source frame of its label, across a segment boundary too. A
+segment still being written decodes cleanly except its last frame, which a live
+burst drops.
+
+**The OpenCV face objects are locked.** `cv2.FaceDetectorYN` / `FaceRecognizerSF`
+are not thread-safe (OpenCV 5's graph engine asserts when two threads run one
+net), and the live pass, a snapshot look and a burst can reach them together:
+4 threads x 15 detections failed 56 of 60 without the lock, 0 with it. The
+onnxruntime path needs no lock.
+
 #### Faces: full-resolution snapshots (`recognition.face_hires`)
 
 On the 704x480 detect stream a face at the door is a few dozen pixels; under
@@ -1526,6 +1593,8 @@ stored fell from 14 to 9. The vote floor (`MIN_VOTE_CONFIDENCE`) is 0.7, up
 from 0.6: 200 right / 5 wrong stored instead of 203 / 9, single frame.
 
 **Reading the recording back (`recognition.plate_replay`, default true).**
+(Now also the switch for plate bursts — see "Recorded bursts" above; this is
+the original after-the-track read, which now covers only what bursts did not.)
 Offline the readers are right ~90% of the time on a clean look; live, a plate
 was read about one pass in three. The gap is the number of looks: a passing
 car gets one or two late snapshots. When a vehicle's track ends without a

@@ -110,6 +110,7 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
     plate_detector: true,
     plate_region: 'us' as 'us' | 'any',
     plate_replay: true,
+    face_replay: true,
     ...(savedRecognition ?? {}),
     ...(pending.recognition ?? {}),
   });
@@ -145,6 +146,7 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
         plate_detector: v.plate_detector ?? true,
         plate_region: v.plate_region ?? 'us',
         plate_replay: v.plate_replay ?? true,
+        face_replay: v.face_replay ?? true,
       });
   });
 
@@ -714,14 +716,33 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
                       setRecognition({ ...recognition, plate_replay: e.target.checked })
                     }
                   />
-                  Re-read plates from the recording
+                  Read plates from the recording too
                 </label>
                 <span className="control-hint">
-                  A passing car usually gets one or two live looks, often late or blurred.
-                  With this on, once a car has gone and its plate is still unsure, the
-                  recorded full-resolution video of exactly those seconds is read frame by
-                  frame — dozens of looks instead of one or two. The plate reaches the event
-                  about a minute after the car leaves. Needs the camera to be recording.
+                  A fast car usually gets one or two live looks, and by the time detection
+                  has confirmed it the best moment has often passed. With this on, about a
+                  second after a vehicle is first seen, the camera&rsquo;s own recording is
+                  read at full resolution from two seconds <em>before</em> it was detected,
+                  ten frames a second &mdash; again every second or so while it is in view, and
+                  once more just after it leaves. Every frame is a read, and the plate is
+                  decided by a vote over all of them. Needs the camera to be recording.
+                </span>
+                <label className="row-label">
+                  <input
+                    type="checkbox"
+                    checked={recognition.face_replay ?? true}
+                    onChange={(e) =>
+                      setRecognition({ ...recognition, face_replay: e.target.checked })
+                    }
+                  />
+                  Read faces from the recording too
+                </label>
+                <span className="control-hint">
+                  The same for people: a face is often only turned to the camera for a
+                  moment, and often before detection has caught up. The recording around the
+                  person, from two seconds before they were detected, is read ten frames a
+                  second, and the best face of all of them is the one recognized. Needs the
+                  camera to be recording.
                 </span>
                 <label>
                   Crop quality needed to identify: {Math.round(recognition.identify_quality * 100)}%

@@ -86,6 +86,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
@@ -222,6 +223,12 @@ class FaceRecognizer:
         self._input_size: tuple[int, int] = (0, 0)
         self._failed = False
         self._lock = asyncio.Lock()
+        # The cv2 face objects are NOT thread-safe — the detector's input size
+        # is state, and OpenCV 5's graph engine asserts when two threads run
+        # one net at once ("buf.shape() == m.shape()"). The live pass, a
+        # snapshot look and a recorded burst can all reach them together, so
+        # every cv2 call holds this. (onnxruntime sessions need no lock.)
+        self._cv_lock = threading.Lock()
 
     # -- lifecycle ------------------------------------------------------
 
@@ -410,13 +417,14 @@ class FaceRecognizer:
 
     def _cv2_detect(self, frame_bgr: np.ndarray) -> Optional[np.ndarray]:
         h, w = frame_bgr.shape[:2]
-        # setInputSize is stateful on the cv2 object, so it must be set for
-        # every frame shape — a stale size silently rescales the boxes.
-        if (w, h) != self._input_size:
-            self._detector.setInputSize((w, h))
-            self._input_size = (w, h)
-        _, faces = self._detector.detect(frame_bgr)
-        return faces
+        with self._cv_lock:
+            # setInputSize is stateful on the cv2 object, so it must be set for
+            # every frame shape — a stale size silently rescales the boxes.
+            if (w, h) != self._input_size:
+                self._detector.setInputSize((w, h))
+                self._input_size = (w, h)
+            _, faces = self._detector.detect(frame_bgr)
+            return faces
 
     def _yunet_detect(self, frame_bgr: np.ndarray) -> np.ndarray:
         """YuNet on onnxruntime: rows in OpenCV's format, in frame pixels."""
@@ -447,7 +455,8 @@ class FaceRecognizer:
         if not self.ready:
             return None
         try:
-            return self._embedder.alignCrop(frame_bgr, face._raw)
+            with self._cv_lock:
+                return self._embedder.alignCrop(frame_bgr, face._raw)
         except Exception:
             log.exception("face alignment failed")
             return None
@@ -480,7 +489,8 @@ class FaceRecognizer:
                 )
                 feature = self._sface.run(None, {self._sface.get_inputs()[0].name: blob})[0]
             else:
-                feature = self._embedder.feature(aligned_bgr)
+                with self._cv_lock:
+                    feature = self._embedder.feature(aligned_bgr)
         except Exception:
             log.exception("face embedding failed")
             return None

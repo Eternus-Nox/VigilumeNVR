@@ -45,7 +45,7 @@ from .native.recorder import Recorder
 from .native.facepass import FacePass
 from .native.platepass import PlatePass
 from .native.plates import PlateReader
-from .native.platereplay import PlateReplay
+from .native.platereplay import RecordingReplay
 from .native.platesnap import SnapshotSource
 from .native.recognizer import FaceRecognizer
 from .native.spotlight import SpotlightController
@@ -445,8 +445,13 @@ async def lifespan(app: FastAPI):
     # or vehicle also triggers an occasional snapshot from the camera itself —
     # one request serving everything on that camera at that moment.
     plate_snapshots = SnapshotSource()
+    # And the RECORDING, read back in short bursts while a person or vehicle
+    # is in view — starting from just before it was detected — and, for
+    # plates, once more after it leaves (native/burst.py, platereplay.py).
+    # One reader, shared, decoding one window at a time.
+    plate_replay = RecordingReplay(recorder.camera_dir)
     face_pass = FacePass(face_recognizer, db, config.candidate_crops_dir,
-                         snapshots=plate_snapshots)
+                         snapshots=plate_snapshots, replay=plate_replay)
     engine.set_face_pass(face_pass)
     # Plates: a learned plate detector finds the plate and two OCR models read
     # it (see native/plates.py, including the licensing note); the classical
@@ -461,9 +466,6 @@ async def lifespan(app: FastAPI):
     # and following the resolved value is the only way not to claim a card that
     # is not there.
     plate_reader = PlateReader(config.models_dir, detector=detector)
-    # And the recording, read back after a vehicle leaves when the live looks
-    # did not settle its plate (native/platereplay.py).
-    plate_replay = PlateReplay(recorder.camera_dir)
     plate_pass = PlatePass(plate_reader, db, config.candidate_crops_dir,
                            heatmap=face_pass.heatmap, snapshots=plate_snapshots,
                            replay=plate_replay)

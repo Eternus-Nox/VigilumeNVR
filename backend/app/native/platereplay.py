@@ -1,4 +1,10 @@
-"""Read a car's plate again from the RECORDING, after it has gone.
+"""Read the RECORDING back: full-resolution frames of a moment that has passed.
+
+Used two ways. As LIVE BURSTS (native/burst.py): starting a second after a
+person or vehicle is first seen, the seconds from just BEFORE it was detected
+up to now are decoded at 10 fps and read frame by frame, while it is still in
+view. And, for plates, once more after the vehicle leaves, over whatever the
+bursts did not cover. The original design note, written for the second use:
 
 WHY
 ===
@@ -26,6 +32,21 @@ a decode that fails all mean "no frames", and the pass concludes on what it
 already had. One replay runs at a time across all cameras, so a busy road
 cannot turn this into a CPU storm.
 
+WHEN A RECORDED FRAME WAS TAKEN
+-------------------------------
+A frame's wall time is its segment's start plus its offset in the segment.
+Segment files are NAMED with whole seconds (``%M.%S.ts``), so a start read from
+the name is early by the dropped fraction — up to a second, measured 0.37-0.87
+s on a real-time stream-copy recording. A fast car moves its own length in
+that time, and the frame would be matched to where it was a second earlier.
+But the recorder cuts a segment the instant the next keyframe arrives: the
+PREVIOUS segment's last write (its mtime) is the new one's start, to the
+millisecond. `segment_starts` uses that when it is consistent with the name.
+
+A segment still being written decodes cleanly except its very last frame,
+which can be torn (measured: every earlier frame bit-exact, the last one not).
+A live read drops it.
+
 DECODED ON THE GPU WHEN THERE IS ONE
 ------------------------------------
 Every frame of the window has to be decoded to pick six a second from it —
@@ -49,7 +70,7 @@ from typing import Any, Callable, Optional, Sequence
 import cv2
 import numpy as np
 
-from .recorder import build_concat_list, select_segments
+from .recorder import SEGMENT_SECONDS, select_segments
 from .transcode import find_nvidia_device
 
 log = logging.getLogger(__name__)
@@ -73,6 +94,10 @@ WINDOW_PAD_S = 0.7
 #: for a region a tenth of its size.
 REGION_MARGIN = 0.15
 
+#: A previous segment's mtime is taken as the next one's start only within this
+#: of the named (truncated) start.
+_MTIME_TRUST_S = 1.5
+
 #: Consecutive failed GPU decodes after which replays decode on the CPU only.
 HW_GIVE_UP = 3
 
@@ -93,8 +118,9 @@ class ReplayFrame:
     height: int
 
 
-class PlateReplay:
-    """Decodes a vehicle's time window from the recording. One per process."""
+class RecordingReplay:
+    """Decodes a time window of a camera's recording. One per process,
+    shared by the face and plate passes."""
 
     def __init__(
         self,
@@ -128,22 +154,36 @@ class PlateReplay:
         start: float,
         end: float,
         region: Sequence[float],
+        *,
+        fps: Optional[float] = None,
+        pad: bool = True,
+        live: bool = False,
     ) -> list[ReplayFrame]:
         """Recorded frames for [start, end] (wall-clock epoch), cropped to
         `region` (x1, y1, x2, y2 as FRACTIONS of the frame). [] on anything
-        that prevents it. Never raises."""
+        that prevents it. Never raises.
+
+        `pad` widens the window by WINDOW_PAD_S each side (an after-the-fact
+        replay of a whole track); a burst asks for exactly its window. `live`
+        means the window may reach into the segment being written: its last
+        decoded frame can be torn, so it is dropped. `fps` overrides the rate.
+        """
         if not self._ffmpeg:
             return []
-        start = start - WINDOW_PAD_S
-        end = min(end + WINDOW_PAD_S, start + MAX_WINDOW_S)
+        if pad:
+            start = start - WINDOW_PAD_S
+            end = end + WINDOW_PAD_S
+        end = min(end, start + MAX_WINDOW_S)
         if end <= start:
             return []
+        rate = float(fps) if fps else self._fps
         async with self._lock:
             try:
-                return await asyncio.wait_for(
-                    asyncio.to_thread(self._frames_blocking, camera, start, end, region),
+                out = await asyncio.wait_for(
+                    asyncio.to_thread(self._frames_blocking, camera, start, end, region, rate),
                     DECODE_TIMEOUT_S,
                 )
+                return out[:-1] if live and out else out
             except asyncio.TimeoutError:
                 log.warning("plate replay on %s took over %.0f s — abandoned",
                             camera, DECODE_TIMEOUT_S)
@@ -155,11 +195,22 @@ class PlateReplay:
     # -- blocking work (threads) ------------------------------------------
 
     def _frames_blocking(
-        self, camera: str, start: float, end: float, region: Sequence[float]
+        self, camera: str, start: float, end: float, region: Sequence[float],
+        fps: Optional[float] = None,
     ) -> list[ReplayFrame]:
         import subprocess
 
-        segments = select_segments(self._camera_dir(camera), start, end)
+        fps = fps or self._fps
+        # One segment further back than the window needs, so the first
+        # useful segment's predecessor is there to time it (segment_starts).
+        segments = segment_starts(
+            select_segments(self._camera_dir(camera), start - SEGMENT_SECONDS, end)
+        )
+        first = 0
+        for i, (seg_start, _) in enumerate(segments):
+            if seg_start <= start:
+                first = i
+        segments = segments[first:]
         if not segments:
             return []
         dims = self._probe_dims(segments[0][1])
@@ -176,39 +227,41 @@ class PlateReplay:
         if cw < 16 or ch < 16:
             return []
 
-        seek = max(0.0, start - segments[0][0])
-        with tempfile.TemporaryDirectory(prefix="vigilume-plate-replay-") as tmp:
-            listing = Path(tmp) / "list.txt"
-            listing.write_text(build_concat_list([p for _, p in segments]))
-            attempts = replay_attempts(
-                self._ffmpeg, listing, Path(tmp) / "%04d.jpg", seek, end - start,
-                self._fps, (cw, ch, cx1, cy1), hwaccel=self._hwaccel,
-            )
-            files: list[Path] = []
-            for how, args in attempts:
-                for stale in Path(tmp).glob("*.jpg"):
-                    stale.unlink()
-                proc = subprocess.run(args, capture_output=True, timeout=DECODE_TIMEOUT_S)
-                files = sorted(Path(tmp).glob("*.jpg"))
-                if files:
-                    self.decodes[how] += 1
-                    if how == "cuda":
-                        self._hw_misses = 0
-                    elif self._hwaccel:
-                        self._note_hw_miss(camera, proc)
-                    break
-                log.debug("plate replay decode attempt failed on %s (rc %s): %s", camera,
-                          proc.returncode, proc.stderr.decode(errors="replace")[-300:])
-            if not files:
-                return []
-            out: list[ReplayFrame] = []
-            for i, path in enumerate(files):
-                img = cv2.imread(str(path))
-                if img is None:
-                    continue
-                out.append(ReplayFrame(time=start + i / self._fps, crop=img,
-                                       ox=cx1, oy=cy1, width=width, height=height))
-            return out
+        out: list[ReplayFrame] = []
+        with tempfile.TemporaryDirectory(prefix="vigilume-replay-") as tmp:
+            # Each segment's share of the window, decoded from THAT FILE with
+            # the seek before its input — see decode_portions for why not
+            # one decode over the joined segments.
+            for k, (seg_start, seg_path, p_start, p_end) in enumerate(
+                decode_portions(segments, start, end)
+            ):
+                pattern = Path(tmp) / f"p{k}_%04d.jpg"
+                files: list[Path] = []
+                for how, args in replay_attempts(
+                    self._ffmpeg, seg_path, pattern, p_start - seg_start, p_end - p_start,
+                    fps, (cw, ch, cx1, cy1), hwaccel=self._hwaccel,
+                ):
+                    for stale in Path(tmp).glob(f"p{k}_*.jpg"):
+                        stale.unlink()
+                    proc = subprocess.run(args, capture_output=True, timeout=DECODE_TIMEOUT_S)
+                    files = sorted(Path(tmp).glob(f"p{k}_*.jpg"))
+                    if files:
+                        self.decodes[how] += 1
+                        if how == "cuda":
+                            self._hw_misses = 0
+                        elif self._hwaccel:
+                            self._note_hw_miss(camera, proc)
+                        break
+                    log.debug("replay decode attempt failed on %s (rc %s): %s", camera,
+                              proc.returncode, proc.stderr.decode(errors="replace")[-300:])
+                for i, path in enumerate(files):
+                    img = cv2.imread(str(path))
+                    if img is None:
+                        continue
+                    # Frame i of this portion is i/fps after its start.
+                    out.append(ReplayFrame(time=p_start + i / fps, crop=img,
+                                           ox=cx1, oy=cy1, width=width, height=height))
+        return out
 
     def _note_hw_miss(self, camera: str, proc: Any) -> None:
         self._hw_misses += 1
@@ -245,7 +298,7 @@ class PlateReplay:
 
 def replay_attempts(
     ffmpeg: str,
-    listing: Path,
+    source: Path,
     out_pattern: Path,
     seek: float,
     duration: float,
@@ -254,10 +307,14 @@ def replay_attempts(
     *,
     hwaccel: bool = False,
 ) -> list[tuple[str, list[str]]]:
-    """The decode commands to try, in order, as ("cuda" | "cpu", argv).
+    """The commands to try, in order, to decode `duration` s of ONE segment
+    file from `seek` s into it, as ("cuda" | "cpu", argv).
 
-    GPU first when there is one; then the CPU. For each, the fast seek before
-    falling back to the slower, more widely working one.
+    GPU first when there is one, then the CPU. For each, the seek before the
+    input first — ffmpeg jumps to the keyframe before `seek` and decodes
+    forward from there, dropping frames until `seek` exactly — then the seek
+    after the input, which decodes the file from its start: slower, kept for
+    a build that cannot seek this file.
     """
     cw, ch, cx1, cy1 = crop
     common_out = [
@@ -266,18 +323,60 @@ def replay_attempts(
         "-q:v", "2", str(out_pattern),
     ]
     head = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin"]
-    concat_in = ["-f", "concat", "-safe", "0", "-i", str(listing)]
     attempts: list[tuple[str, list[str]]] = []
     for how, accel in ((("cuda", ["-hwaccel", "cuda"]),) if hwaccel else ()) + (("cpu", []),):
         attempts += [
-            # -ss BEFORE -i: jump to the keyframe before the window instead of
-            # decoding the segment from its start (up to 10 s of 4K HEVC for
-            # nothing); decoding to images keeps the cut exact.
-            (how, head + accel + ["-ss", f"{seek:.3f}"] + concat_in + common_out),
-            # -ss AFTER -i: decodes from the segment start, slower, but the
-            # form event-clip extraction already relies on. Used only if the
-            # fast form produced nothing (seen: a build that crashes seeking
-            # before a concat input).
-            (how, head + accel + concat_in + ["-ss", f"{seek:.3f}"] + common_out),
+            (how, head + accel + ["-ss", f"{seek:.3f}", "-i", str(source)] + common_out),
+            (how, head + accel + ["-i", str(source), "-ss", f"{seek:.3f}"] + common_out),
         ]
     return attempts
+
+
+def decode_portions(
+    segments: Sequence[tuple[float, Path]], start: float, end: float,
+) -> list[tuple[float, Path, float, float]]:
+    """Each segment's share of [start, end): (segment start, path, portion
+    start, portion end), in order.
+
+    One decode per SEGMENT FILE rather than one over the segments joined with
+    the concat demuxer, because seeking a concat input is not exact: measured,
+    `-ss` before a concat input landed on the NEXT keyframe — frames labelled
+    0.2 s into the window were 1.0 s in, and the window's first 0.8 s was
+    missing. For a fast car that is the difference between a plate matched to
+    where the car was and one matched to where it had been a second earlier.
+    Seeking within one file is exact.
+    """
+    out = []
+    for i, (seg_start, path) in enumerate(segments):
+        seg_end = segments[i + 1][0] if i + 1 < len(segments) else end
+        p_start, p_end = max(start, seg_start), min(end, seg_end)
+        if p_end - p_start > 1e-3:
+            out.append((seg_start, path, p_start, p_end))
+    return out
+
+
+#: The original name, kept for existing imports.
+PlateReplay = RecordingReplay
+
+
+def segment_starts(segments: Sequence[tuple[float, Path]]) -> list[tuple[float, Path]]:
+    """Segment start times, corrected from the whole-second file names to the
+    previous segment's last write where that is consistent (module docstring).
+
+    The recorder cuts a segment the moment the next keyframe arrives, so the
+    previous file's mtime IS the new one's start. Trusted only within
+    _MTIME_TRUST_S after the named start: across a gap (a recorder restart)
+    the previous file is older, and the name is all there is.
+    """
+    out: list[tuple[float, Path]] = []
+    prev_mtime: Optional[float] = None
+    for named, path in segments:
+        seg_start = named
+        if prev_mtime is not None and named <= prev_mtime < named + _MTIME_TRUST_S:
+            seg_start = prev_mtime
+        out.append((seg_start, path))
+        try:
+            prev_mtime = path.stat().st_mtime
+        except OSError:
+            prev_mtime = None
+    return out

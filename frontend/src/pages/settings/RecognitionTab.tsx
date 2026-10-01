@@ -542,7 +542,8 @@ export default function RecognitionTab() {
 
       {status?.face &&
         ((status.face.drops && Object.values(status.face.drops).some((n) => n > 0)) ||
-          (status.face.hires?.requested ?? 0) > 0) && (
+          (status.face.hires?.requested ?? 0) > 0 ||
+          (status.face.bursts?.bursts ?? 0) > 0) && (
         <section className="card">
           <h2>Why faces are or aren&rsquo;t showing up</h2>
           <p className="muted small">
@@ -588,6 +589,16 @@ export default function RecognitionTab() {
                 `, ${status.face.hires.no_face} found the person facing away`}
               {status.face.hires.frames < status.face.hires.requested &&
                 `, ${status.face.hires.requested - status.face.hires.frames} got no usable snapshot`}
+              .
+            </p>
+          )}
+          {status.face.bursts && status.face.bursts.bursts > 0 && (
+            <p className="control-hint">
+              From the recording: <strong>{status.face.bursts.frames}</strong> frames read in{' '}
+              {status.face.bursts.bursts} burst{status.face.bursts.bursts === 1 ? '' : 's'},{' '}
+              <strong>{status.face.bursts.faces}</strong> faces kept
+              {status.face.bursts.early_faces > 0 &&
+                `, ${status.face.bursts.early_faces} of them from before the person was detected`}
               .
             </p>
           )}

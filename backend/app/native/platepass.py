@@ -56,8 +56,11 @@ from typing import Any, Optional, Sequence
 
 import numpy as np
 
-from . import platesnap
+from . import platesnap, trackpath
 from . import zones as zonelib
+from .burst import (
+    BURST_FPS, MAX_BURSTS, TAIL_DELAY_S, TIME_TOLERANCE_S, BurstState,
+)
 from .bestshot import (
     KEEP_SHOTS, MIN_GAP_S, BestShotBuffer, Shot, encode_frame_box, score_plate,
     shot_params,
@@ -139,6 +142,15 @@ HIRES_FINISH_WAIT_S = 3.0
 #: path would have thrown away.
 MIN_REPLAY_QUALITY = 0.25
 
+#: Margin around the vehicle (fraction of its box) cropped from each recorded
+#: frame for the plate detector. Generous enough for a plate on a bumper the
+#: box clipped, and for the few hundred ms the two streams' clocks may differ.
+BURST_LOOK_MARGIN = 0.25
+
+#: The read after a vehicle has gone covers at most this much not-yet-read
+#: recording (the live bursts usually leave nothing).
+REPLAY_MAX_WINDOW_S = 15.0
+
 
 @dataclass
 class _CameraStats:
@@ -161,6 +173,8 @@ class _CameraStats:
     replays: int = 0
     replay_frames: int = 0
     replay_reads: int = 0
+    #: Reads from recorded frames taken BEFORE the vehicle was first detected.
+    early_reads: int = 0
     votes_stored: int = 0
     votes_discarded: int = 0
     last_plate: str = ""
@@ -183,6 +197,7 @@ class _CameraStats:
             "replays": self.replays,
             "replay_frames": self.replay_frames,
             "replay_reads": self.replay_reads,
+            "early_reads": self.early_reads,
             "votes_stored": self.votes_stored,
             "votes_discarded": self.votes_discarded,
             "last_plate": self.last_plate,
@@ -228,6 +243,8 @@ class _TrackState:
     #: frame). What the recording replay needs to know which seconds to decode
     #: and which plate in each frame is this vehicle's.
     path: deque = field(default_factory=lambda: deque(maxlen=600))
+    #: Recorded bursts (native/burst.py) for this vehicle.
+    burst: BurstState = field(default_factory=BurstState)
 
 
 def _expand(
@@ -414,6 +431,8 @@ class PlatePass:
         if fw0 > 0 and fh0 > 0:
             x1, y1, x2, y2 = (float(v) for v in obs.box[:4])
             st.path.append((frame_time, (x1 / fw0, y1 / fh0, x2 / fw0, y2 / fh0)))
+            st.burst.note_seen(frame_time)
+            self._maybe_burst(camera, st, obs.tracker_id, frame_time)
         if frame_time - st.last_pass < (ZONE_PASS_INTERVAL_S if fast else PASS_INTERVAL_S):
             return
         st.last_pass = frame_time
@@ -725,8 +744,11 @@ class PlatePass:
         st = self._tracks.pop((camera, tracker_id), None)
         if st is None:
             return
+        if st.burst.tail is not None:
+            st.burst.tail.cancel()
+            st.burst.tail = None
         task = st.hires_task
-        if self._wants_replay(st):
+        if self._wants_replay(st) or st.burst.busy:
             deferred = asyncio.create_task(
                 self._conclude_after_replay(st, camera, tracker_id, task),
                 name=f"plate-replay-{camera}-{tracker_id}",
@@ -782,69 +804,134 @@ class PlatePass:
         self, st: _TrackState, camera: str, tracker_id: int,
         task: Optional[asyncio.Task],
     ) -> None:
-        if task is not None and not task.done():
+        for pending in (task, st.burst.task):
+            if pending is None or pending.done():
+                continue
             try:
-                await asyncio.wait_for(asyncio.shield(task), HIRES_FINISH_WAIT_S)
+                await asyncio.wait_for(asyncio.shield(pending), HIRES_FINISH_WAIT_S * 4)
             except asyncio.TimeoutError:
-                task.cancel()
+                pending.cancel()
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
                 pass
         try:
-            await self._replay_reads(st, camera, tracker_id)
+            if self._wants_replay(st):
+                # Whatever the live bursts did not cover — all of it, if
+                # there were none — read once more now the vehicle is gone.
+                window = st.burst.window(final=True, cap=REPLAY_MAX_WINDOW_S)
+                if window is not None:
+                    st.burst.started()
+                    await self._run_burst(camera, st, tracker_id, window, live=False)
         except asyncio.CancelledError:
             raise
         except Exception:
             log.exception("plate replay failed on %s/%s", camera, tracker_id)
         await self._conclude(st, camera, tracker_id)
 
-    async def _replay_reads(self, st: _TrackState, camera: str, tracker_id: int) -> None:
-        """Decode the seconds this vehicle was in view and read every frame."""
+    # ---------- recorded bursts (native/burst.py) ----------
+
+    def _maybe_burst(self, camera: str, st: _TrackState, tracker_id: int, now: float) -> None:
+        """Start a live burst if one is due, and (re)arm the one for after the
+        vehicle's last sighting. Never awaits."""
+        if not self._replay_on() or st.concluded or len(st.path) < 2:
+            return
+        v = st.vote  # the last tally — re-voting on every frame is not needed
+        if v is not None and v.reads >= SETTLED_READS and v.confidence >= SETTLED_CONFIDENCE:
+            return
+        window = st.burst.due(now)
+        if window is not None:
+            self._launch_burst(camera, st, tracker_id, window, live=True)
+        if st.burst.tail is not None:
+            st.burst.tail.cancel()
+        st.burst.tail = asyncio.get_running_loop().call_later(
+            TAIL_DELAY_S, self._tail_burst, camera, tracker_id
+        )
+
+    def _tail_burst(self, camera: str, tracker_id: int) -> None:
+        """The vehicle has not been seen for TAIL_DELAY_S: read the seconds
+        as it left, without waiting for the track to be retired."""
+        st = self._tracks.get((camera, tracker_id))
+        if st is None or st.concluded:
+            return
+        st.burst.tail = None
+        if st.burst.busy:
+            st.burst.tail = asyncio.get_running_loop().call_later(
+                0.5, self._tail_burst, camera, tracker_id
+            )
+            return
+        if not self._replay_on() or not self._wants_replay(st):
+            return
+        if st.burst.count >= MAX_BURSTS + 1:
+            return
+        window = st.burst.window(final=True)
+        if window is not None:
+            self._launch_burst(camera, st, tracker_id, window, live=False)
+
+    def _launch_burst(
+        self, camera: str, st: _TrackState, tracker_id: int,
+        window: tuple[float, float], *, live: bool,
+    ) -> None:
+        st.burst.started()
+        st.burst.task = asyncio.create_task(
+            self._run_burst(camera, st, tracker_id, window, live=live),
+            name=f"plate-burst-{camera}-{tracker_id}",
+        )
+
+    async def _run_burst(
+        self, camera: str, st: _TrackState, tracker_id: int,
+        window: tuple[float, float], *, live: bool,
+    ) -> None:
+        """Decode [start, end] of the recording around this vehicle and read
+        every frame. Never raises."""
         assert self._replay is not None
+        start, end = window
+        try:
+            path = list(st.path)
+            if not path:
+                return
+            region = trackpath.expand(
+                trackpath.union_over(path, start - TIME_TOLERANCE_S, end + TIME_TOLERANCE_S),
+                BURST_LOOK_MARGIN,
+            )
+            frames = await self._replay.frames(
+                camera, start, end, region, fps=BURST_FPS, pad=False, live=live,
+            )
+            st.burst.finished(start, end, frames[-1].time if frames else None, BURST_FPS)
+            if not frames:
+                return
+            stats = self._stats_for(camera)
+            stats.replays += 1
+            stats.replay_frames += len(frames)
+            await self._read_recorded(st, camera, tracker_id, frames)
+            if not st.concluded and len(st.reads) >= 2:
+                self._tally(st)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("plate burst failed on %s/%s", camera, tracker_id)
+
+    async def _read_recorded(
+        self, st: _TrackState, camera: str, tracker_id: int, frames: Sequence[Any],
+    ) -> None:
+        """Read the plate in every recorded frame — only a plate on THIS
+        vehicle at that moment, so a parked neighbour's is never read."""
         stats = self._stats_for(camera)
         path = list(st.path)
-        start, end = path[0][0], path[-1][0]
-        region = (
-            min(b[0] for _, b in path), min(b[1] for _, b in path),
-            max(b[2] for _, b in path), max(b[3] for _, b in path),
-        )
-        frames = await self._replay.frames(camera, start, end, region)
-        if not frames:
-            return
-        stats.replays += 1
-        stats.replay_frames += len(frames)
-        times = [t for t, _ in path]
+        first_seen = path[0][0] if path else 0.0
+        found = await asyncio.to_thread(self._plates_in_frames_blocking, frames, path)
         region_name = self._plate_region()
-        for fr in frames:
-            # Where THIS vehicle was at that moment (nearest sighting), in the
-            # crop's pixels — so a parked neighbour's plate in the same crop is
-            # not read as this car's.
-            i = min(range(len(times)), key=lambda k: abs(times[k] - fr.time))
-            bx1, by1, bx2, by2 = path[i][1]
-            vb = (bx1 * fr.width - fr.ox, by1 * fr.height - fr.oy,
-                  bx2 * fr.width - fr.ox, by2 * fr.height - fr.oy)
-            ch, cw = fr.crop.shape[:2]
-            nx1, ny1, nx2, ny2 = _expand(vb, 0.3, cw, ch)
-            plates = await asyncio.to_thread(self._reader.detect_blocking, fr.crop) or []
-            mine = [p for p in plates
-                    if nx1 <= (p[0] + p[2]) / 2.0 <= nx2 and ny1 <= (p[1] + p[3]) / 2.0 <= ny2]
-            if not mine:
-                continue
-            x1, y1, x2, y2, _score = max(mine, key=lambda p: p[4])
-            strip = fr.crop[y1:y2, x1:x2]
-            quality = score_plate(strip)
-            if quality.total < MIN_REPLAY_QUALITY:
-                continue
+        for fr, strip, box, quality in found:
             # Offer it too, so the stored candidate crop is the best look of
             # the whole visit rather than whatever the live path managed.
+            x1, y1, x2, y2 = box
             st.buffer.offer(
                 tracker_id=tracker_id, kind="plate", crop_bgr=strip,
-                box=(x1, y1, x2, y2), frame_time=fr.time, quality=quality,
+                box=box, frame_time=fr.time, quality=quality,
                 frame_box=(max(0.0, (fr.ox + x1) / fr.width), max(0.0, (fr.oy + y1) / fr.height),
                            min(1.0, (fr.ox + x2) / fr.width), min(1.0, (fr.oy + y2) / fr.height)),
             )
-            st.read_shots.add((fr.time, (x1, y1, x2, y2)))
+            st.read_shots.add((fr.time, box))
             for raw, confidence, char_conf in await asyncio.to_thread(
                 self._reader.read_all_blocking, strip
             ):
@@ -854,10 +941,48 @@ class PlatePass:
                     continue
                 stats.reads += 1
                 stats.replay_reads += 1
+                if fr.time < first_seen:
+                    stats.early_reads += 1
                 st.reads.append(PlateRead(
                     text=text, confidence=confidence, quality=quality.total,
                     char_conf=char_conf if len(char_conf) == len(text) else (),
                 ))
+
+    def _plates_in_frames_blocking(
+        self, frames: Sequence[Any], path: list,
+    ) -> list[tuple[Any, np.ndarray, tuple[int, int, int, int], Any]]:
+        """For each recorded frame: crop around where the vehicle was at that
+        moment, find its plate, score it. Runs in a thread.
+
+        Cropped PER FRAME, not once for the whole window: a car crossing the
+        view spans most of the frame over a burst, and the plate detector
+        letterboxes its input to 384 px — run on the whole span, the plate
+        would come out a few pixels tall."""
+        out = []
+        for fr in frames:
+            near = trackpath.box_near(path, fr.time, TIME_TOLERANCE_S)
+            ch, cw = fr.crop.shape[:2]
+            look = trackpath.to_pixels(trackpath.expand(near, BURST_LOOK_MARGIN),
+                                       fr.width, fr.height, fr.ox, fr.oy)
+            lx1, ly1 = max(0, int(look[0])), max(0, int(look[1]))
+            lx2, ly2 = min(cw, int(round(look[2]))), min(ch, int(round(look[3])))
+            if lx2 - lx1 < 16 or ly2 - ly1 < 16:
+                continue
+            sub = fr.crop[ly1:ly2, lx1:lx2]
+            plates = self._reader.detect_blocking(sub) or []
+            vb = trackpath.to_pixels(trackpath.expand(near, 0.15), fr.width, fr.height,
+                                     fr.ox + lx1, fr.oy + ly1)
+            mine = [p for p in plates
+                    if trackpath.contains(vb, (p[0] + p[2]) / 2.0, (p[1] + p[3]) / 2.0)]
+            if not mine:
+                continue
+            x1, y1, x2, y2, _score = max(mine, key=lambda p: p[4])
+            strip = sub[y1:y2, x1:x2]
+            quality = score_plate(strip)
+            if quality.total < MIN_REPLAY_QUALITY:
+                continue
+            out.append((fr, strip, (lx1 + x1, ly1 + y1, lx1 + x2, ly1 + y2), quality))
+        return out
 
     async def wait_idle(self) -> None:
         """Wait for every deferred vote. For tests and orderly shutdown."""
@@ -1044,6 +1169,7 @@ class PlatePass:
                 continue
             if st.hires_task is not None and not st.hires_task.done():
                 st.hires_task.cancel()
+            st.burst.cancel()
 
     def forget_camera(self, camera: str) -> None:
         self._cancel_hires(camera)

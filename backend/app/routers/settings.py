@@ -498,9 +498,11 @@ class RecognitionSettings(BaseModel):
     # "us" reads letter O/I/Q as 0/1/0 (US standard plates omit them); "any"
     # keeps reads as the readers gave them. A Literal so a typo is a 422.
     plate_region: Literal["us", "any"] = "us"
-    # Re-read the plate from the recording after a vehicle leaves when the live
-    # looks did not settle it (native/platereplay.py).
+    # Read plates from the recording too: bursts while the vehicle is in view,
+    # from just before it was detected, and after it leaves (native/burst.py).
     plate_replay: bool = True
+    # The same for faces (native/facepass.py, native/burst.py).
+    face_replay: bool = True
 
 
 class AppSettings(BaseModel):

@@ -739,6 +739,13 @@ export interface RecognitionStatus {
      * was found but no face. Absent on an older backend.
      */
     hires?: { requested: number; frames: number; faces: number; lost: number; no_face: number };
+    /** Whether faces are also read from the recording, in bursts. */
+    bursts_enabled?: boolean;
+    /**
+     * Recorded bursts since boot: bursts read, frames decoded, faces offered,
+     * and how many of those faces were from BEFORE the person was detected.
+     */
+    bursts?: { bursts: number; frames: number; faces: number; early_faces: number };
     /** What runs the face models: "onnxruntime" (GPU) or "opencv" (CPU). */
     runtime?: string;
     device?: string;
@@ -777,6 +784,8 @@ export interface PlateCameraStats {
   replays?: number;
   replay_frames?: number;
   replay_reads?: number;
+  /** Plate reads from recorded frames taken BEFORE the vehicle was detected. */
+  early_reads?: number;
   votes_stored: number;
   votes_discarded: number;
   last_plate: string;
@@ -1016,10 +1025,13 @@ export interface AppSettings {
      */
     plate_region?: 'us' | 'any';
     /**
-     * Read the plate again from the recording after a vehicle leaves, when the
-     * live looks did not settle it. Optional: absent on an older backend.
+     * Read plates from the recording too: short bursts of full-resolution
+     * frames while the vehicle is in view (from two seconds before it was
+     * detected), and after it leaves. Optional: absent on an older backend.
      */
     plate_replay?: boolean;
+    /** The same for faces. Optional: absent on an older backend. */
+    face_replay?: boolean;
   };
   detection: {
     model: DetectionModel;
