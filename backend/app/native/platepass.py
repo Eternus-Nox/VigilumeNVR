@@ -1061,4 +1061,8 @@ class PlatePass:
             "reader": self._reader.status(),
             "cameras": {cam: s.report() for cam, s in sorted(self._stats.items())},
             "snapshots": self._snapshots.status() if self._snapshots is not None else {},
+            # Recording replays: whether they decode on the GPU first, and how
+            # the decodes have actually gone.
+            "replay": (self._replay.status()
+                       if self._replay is not None and hasattr(self._replay, "status") else {}),
         }

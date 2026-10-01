@@ -226,6 +226,35 @@ async def main() -> int:
           "its replay reads nothing: every frame's plate has to be on the "
           "vehicle's OWN position at that moment")
 
+    print("\nGPU decode first when there is a GPU, the CPU when it cannot start")
+    from app.native.platereplay import replay_attempts
+
+    att = replay_attempts("ffmpeg", Path("l.txt"), Path("%04d.jpg"), 1.0, 5.0, 6.0,
+                          (64, 64, 0, 0), hwaccel=True)
+    check([h for h, _ in att] == ["cuda", "cuda", "cpu", "cpu"]
+          and att[0][1][att[0][1].index("-hwaccel") + 1] == "cuda"
+          and att[0][1].index("-hwaccel") < att[0][1].index("-i"),
+          "with an NVIDIA GPU: NVDEC first (-hwaccel cuda, before the input), then the CPU")
+    cpu_only = replay_attempts("ffmpeg", Path("l.txt"), Path("%04d.jpg"), 1.0, 5.0, 6.0,
+                               (64, 64, 0, 0), hwaccel=False)
+    check(all("-hwaccel" not in a for _, a in cpu_only) and len(cpu_only) == 2,
+          "without one: CPU only, nothing tried that cannot work")
+    db = FakeDB(tmp / "g.db")
+    forced = PlateReplay(lambda cam: rec / cam, ffmpeg, hwaccel=True)
+    pp = PlatePass(reader, db, tmp / "crops-g", replay=forced)
+    await pp.reload_gallery()
+    await drive(pp, start, bg, car)
+    await pp.finish("drive", 1)
+    await pp.wait_idle()
+    rows = db.rows("SELECT plate FROM event_recognitions")
+    check([r["plate"] for r in rows] == [TRUTH],
+          f"GPU decode asked for on a box with no GPU still reads the plate ({forced.decodes})")
+    forced._hw_misses = 2
+    await asyncio.to_thread(forced._frames_blocking, "drive", start + 1.0, start + 3.0,
+                            (0.0, 0.3, 0.6, 0.9))
+    check(forced.status()["gpu_decode"] is False,
+          "after three GPU decodes in a row that produced nothing, it stops trying the GPU")
+
     print("\nno recording, no problem")
     db = FakeDB(tmp / "d.db")
     pp = PlatePass(reader, db, tmp / "crops-d",

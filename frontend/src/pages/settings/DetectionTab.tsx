@@ -106,6 +106,7 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
     face_on_vehicles: false,
     identify_quality: 0.45,
     plate_hires: true,
+    face_hires: true,
     plate_detector: true,
     plate_region: 'us' as 'us' | 'any',
     plate_replay: true,
@@ -140,6 +141,7 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
       setRecognition({
         ...v,
         plate_hires: v.plate_hires ?? true,
+        face_hires: v.face_hires ?? true,
         plate_detector: v.plate_detector ?? true,
         plate_region: v.plate_region ?? 'us',
         plate_replay: v.plate_replay ?? true,
@@ -627,6 +629,25 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
                   The driver through the windscreen. Off by default: on a road-facing
                   camera most windscreens are glare, and a plate identifies a car better
                   than a face does. It earns its keep on a driveway or at a gate.
+                </span>
+                <label className="row-label">
+                  <input
+                    type="checkbox"
+                    checked={recognition.face_hires ?? true}
+                    onChange={(e) =>
+                      setRecognition({ ...recognition, face_hires: e.target.checked })
+                    }
+                  />
+                  Read faces from full-resolution snapshots
+                </label>
+                <span className="control-hint">
+                  On the small copy detection watches, a face at the door is a few dozen
+                  pixels wide, which is too little to tell people apart reliably. With
+                  this on, a person being tracked also gets a full-resolution snapshot
+                  from the camera about once a second (shared with plate reading), and the
+                  face is read from that. Only cameras with face recognition on are asked,
+                  only while someone is there, and it stops once they are recognized.
+                  Needs an Amcrest or Dahua camera.
                 </span>
                 <label className="row-label">
                   <input

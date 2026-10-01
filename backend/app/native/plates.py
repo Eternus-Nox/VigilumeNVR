@@ -372,6 +372,8 @@ class PlateReader:
         # What the session actually BOUND, which is not always what was
         # asked for — reported by /api/recognition/status.
         self.device = "cpu"
+        #: What each OPTIONAL model's session actually bound, by model key.
+        self.devices: dict[str, str] = {}
         self._models_dir = Path(models_dir)
         self._session: Any = None
         self._input_name = ""
@@ -468,7 +470,8 @@ class PlateReader:
             if sha256_file(path) != PLATE_MODELS[key]["sha256"]:
                 log.warning("%s on disk does not match its pin — not using it", label)
                 return None
-            session, _device = accel.make_session(str(path), self._detector, label=label)
+            session, device = accel.make_session(str(path), self._detector, label=label)
+            self.devices[key] = device
             return session
         except Exception:  # noqa: BLE001
             log.exception("%s could not be loaded — reading without it", label)

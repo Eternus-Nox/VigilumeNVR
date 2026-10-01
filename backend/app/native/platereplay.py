@@ -25,6 +25,15 @@ camera does not record, or the footage has already been pruned), no ffmpeg, or
 a decode that fails all mean "no frames", and the pass concludes on what it
 already had. One replay runs at a time across all cameras, so a busy road
 cannot turn this into a CPU storm.
+
+DECODED ON THE GPU WHEN THERE IS ONE
+------------------------------------
+Every frame of the window has to be decoded to pick six a second from it —
+up to 15 s of the main stream, which on a 4K H.265 camera is hundreds of
+frames and the most CPU this pass ever spends. With an NVIDIA card in the
+container the decode runs on its NVDEC block (`-hwaccel cuda`; frames come
+back to system memory for the crop, so nothing else changes). If that cannot
+start, the same decode is retried on the CPU.
 """
 from __future__ import annotations
 
@@ -35,12 +44,13 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 import cv2
 import numpy as np
 
 from .recorder import build_concat_list, select_segments
+from .transcode import find_nvidia_device
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +72,9 @@ WINDOW_PAD_S = 0.7
 #: of the path box. The decode is cropped so a 4K frame is not held in memory
 #: for a region a tenth of its size.
 REGION_MARGIN = 0.15
+
+#: Consecutive failed GPU decodes after which replays decode on the CPU only.
+HW_GIVE_UP = 3
 
 #: Longest a single replay decode may take before it is abandoned.
 DECODE_TIMEOUT_S = 60.0
@@ -89,10 +102,19 @@ class PlateReplay:
         ffmpeg: Optional[str] = None,
         *,
         fps: float = REPLAY_FPS,
+        hwaccel: Optional[bool] = None,
     ) -> None:
+        """`hwaccel`: decode on NVDEC first. None = when an NVIDIA GPU is in
+        the container."""
         self._camera_dir = camera_dir
         self._ffmpeg = ffmpeg if ffmpeg is not None else shutil.which("ffmpeg")
         self._fps = fps
+        self._hwaccel = find_nvidia_device() if hwaccel is None else bool(hwaccel)
+        #: Decodes that produced frames, by how ("cuda" | "cpu"), since boot.
+        self.decodes: dict[str, int] = {"cuda": 0, "cpu": 0}
+        # Consecutive replays whose GPU decode produced nothing. A GPU that
+        # cannot decode this footage is not asked again after HW_GIVE_UP.
+        self._hw_misses = 0
         # One at a time, across every camera.
         self._lock = asyncio.Lock()
 
@@ -158,31 +180,22 @@ class PlateReplay:
         with tempfile.TemporaryDirectory(prefix="vigilume-plate-replay-") as tmp:
             listing = Path(tmp) / "list.txt"
             listing.write_text(build_concat_list([p for _, p in segments]))
-            common_out = [
-                "-t", f"{end - start:.3f}", "-an",
-                "-vf", f"fps={self._fps:g},crop={cw}:{ch}:{cx1}:{cy1}",
-                "-q:v", "2", str(Path(tmp) / "%04d.jpg"),
-            ]
-            head = [self._ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin"]
-            concat_in = ["-f", "concat", "-safe", "0", "-i", str(listing)]
-            attempts = (
-                # -ss BEFORE -i: jump to the keyframe before the window instead
-                # of decoding the segment from its start (up to 10 s of 4K HEVC
-                # for nothing); decoding to images keeps the cut exact.
-                head + ["-ss", f"{seek:.3f}"] + concat_in + common_out,
-                # -ss AFTER -i: decodes from the segment start, slower, but the
-                # form event-clip extraction already relies on. Used only if
-                # the fast form produced nothing (seen: a build that crashes
-                # seeking before a concat input).
-                head + concat_in + ["-ss", f"{seek:.3f}"] + common_out,
+            attempts = replay_attempts(
+                self._ffmpeg, listing, Path(tmp) / "%04d.jpg", seek, end - start,
+                self._fps, (cw, ch, cx1, cy1), hwaccel=self._hwaccel,
             )
             files: list[Path] = []
-            for args in attempts:
+            for how, args in attempts:
                 for stale in Path(tmp).glob("*.jpg"):
                     stale.unlink()
                 proc = subprocess.run(args, capture_output=True, timeout=DECODE_TIMEOUT_S)
                 files = sorted(Path(tmp).glob("*.jpg"))
                 if files:
+                    self.decodes[how] += 1
+                    if how == "cuda":
+                        self._hw_misses = 0
+                    elif self._hwaccel:
+                        self._note_hw_miss(camera, proc)
                     break
                 log.debug("plate replay decode attempt failed on %s (rc %s): %s", camera,
                           proc.returncode, proc.stderr.decode(errors="replace")[-300:])
@@ -196,6 +209,19 @@ class PlateReplay:
                 out.append(ReplayFrame(time=start + i / self._fps, crop=img,
                                        ox=cx1, oy=cy1, width=width, height=height))
             return out
+
+    def _note_hw_miss(self, camera: str, proc: Any) -> None:
+        self._hw_misses += 1
+        if self._hw_misses >= HW_GIVE_UP:
+            self._hwaccel = False
+            log.warning(
+                "plate replay: GPU decoding failed %d times in a row (last on %s) — "
+                "decoding replays on the CPU from now on", self._hw_misses, camera,
+            )
+
+    def status(self) -> dict[str, Any]:
+        return {"available": self.available, "gpu_decode": self._hwaccel,
+                "decodes": dict(self.decodes)}
 
     def _probe_dims(self, segment: Path) -> Optional[tuple[int, int]]:
         """(width, height) of a recorded segment, from ffmpeg's stream line."""
@@ -215,3 +241,43 @@ class PlateReplay:
             return None
         m = _DIMS.search(proc.stderr.decode(errors="replace"))
         return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def replay_attempts(
+    ffmpeg: str,
+    listing: Path,
+    out_pattern: Path,
+    seek: float,
+    duration: float,
+    fps: float,
+    crop: tuple[int, int, int, int],
+    *,
+    hwaccel: bool = False,
+) -> list[tuple[str, list[str]]]:
+    """The decode commands to try, in order, as ("cuda" | "cpu", argv).
+
+    GPU first when there is one; then the CPU. For each, the fast seek before
+    falling back to the slower, more widely working one.
+    """
+    cw, ch, cx1, cy1 = crop
+    common_out = [
+        "-t", f"{duration:.3f}", "-an",
+        "-vf", f"fps={fps:g},crop={cw}:{ch}:{cx1}:{cy1}",
+        "-q:v", "2", str(out_pattern),
+    ]
+    head = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin"]
+    concat_in = ["-f", "concat", "-safe", "0", "-i", str(listing)]
+    attempts: list[tuple[str, list[str]]] = []
+    for how, accel in ((("cuda", ["-hwaccel", "cuda"]),) if hwaccel else ()) + (("cpu", []),):
+        attempts += [
+            # -ss BEFORE -i: jump to the keyframe before the window instead of
+            # decoding the segment from its start (up to 10 s of 4K HEVC for
+            # nothing); decoding to images keeps the cut exact.
+            (how, head + accel + ["-ss", f"{seek:.3f}"] + concat_in + common_out),
+            # -ss AFTER -i: decodes from the segment start, slower, but the
+            # form event-clip extraction already relies on. Used only if the
+            # fast form produced nothing (seen: a build that crashes seeking
+            # before a concat input).
+            (how, head + accel + concat_in + ["-ss", f"{seek:.3f}"] + common_out),
+        ]
+    return attempts

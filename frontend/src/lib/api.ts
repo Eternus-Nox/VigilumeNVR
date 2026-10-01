@@ -731,6 +731,17 @@ export interface RecognitionStatus {
     kept_candidates?: number;
     drops?: Record<string, number>;
     tuning?: Record<string, number>;
+    /** Whether faces are also read from full-resolution snapshots. */
+    hires_enabled?: boolean;
+    /**
+     * Full-resolution looks since boot: started, a usable frame arrived, a
+     * face was read from it, the person could not be found in it, the person
+     * was found but no face. Absent on an older backend.
+     */
+    hires?: { requested: number; frames: number; faces: number; lost: number; no_face: number };
+    /** What runs the face models: "onnxruntime" (GPU) or "opencv" (CPU). */
+    runtime?: string;
+    device?: string;
   };
   /**
    * The plate pass's own accounting, per camera since boot. Each counter is a
@@ -987,6 +998,12 @@ export interface AppSettings {
      * snapshot a second. Optional: absent on a backend predating it.
      */
     plate_hires?: boolean;
+    /**
+     * Read faces from a full-resolution camera snapshot as well as the detect
+     * stream, about once a second while a person is tracked. Optional: absent
+     * on a backend predating it.
+     */
+    face_hires?: boolean;
     /**
      * Find plates with the learned plate detector rather than the classical
      * localizer. Far more reliable on real footage. Optional: absent on a

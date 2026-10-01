@@ -540,7 +540,9 @@ export default function RecognitionTab() {
         </section>
       )}
 
-      {status?.face?.drops && Object.values(status.face.drops).some((n) => n > 0) && (
+      {status?.face &&
+        ((status.face.drops && Object.values(status.face.drops).some((n) => n > 0)) ||
+          (status.face.hires?.requested ?? 0) > 0) && (
         <section className="card">
           <h2>Why faces are or aren&rsquo;t showing up</h2>
           <p className="muted small">
@@ -559,7 +561,7 @@ export default function RecognitionTab() {
                 </td>
                 <td className="mono">{status.face.kept_candidates ?? 0}</td>
               </tr>
-              {Object.entries(status.face.drops)
+              {Object.entries(status.face.drops ?? {})
                 .filter(([, n]) => n > 0)
                 .sort((a, b) => b[1] - a[1])
                 .map(([reason, n]) => (
@@ -575,6 +577,20 @@ export default function RecognitionTab() {
                 ))}
             </tbody>
           </table>
+          {status.face.hires && status.face.hires.requested > 0 && (
+            <p className="control-hint">
+              Full-resolution looks: <strong>{status.face.hires.requested}</strong> asked for,{' '}
+              <strong>{status.face.hires.faces}</strong> read a face from the camera&rsquo;s own
+              picture
+              {status.face.hires.lost > 0 &&
+                `, ${status.face.hires.lost} lost the person (they had moved)`}
+              {status.face.hires.no_face > 0 &&
+                `, ${status.face.hires.no_face} found the person facing away`}
+              {status.face.hires.frames < status.face.hires.requested &&
+                `, ${status.face.hires.requested - status.face.hires.frames} got no usable snapshot`}
+              .
+            </p>
+          )}
           {status.face.labels && (
             <p className="control-hint">
               Looking at: <strong>{status.face.labels.join(', ')}</strong>.

@@ -32,13 +32,13 @@ to infer it from a number that never changes.
 
 WHAT CAN ACTUALLY MOVE
 ----------------------
-Only the stages that go through onnxruntime, which today is the plate OCR.
-YuNet and SFace are driven by `cv2.FaceDetectorYN` / `cv2.FaceRecognizerSF`,
-and the pip OpenCV wheel is built WITHOUT CUDA — `cv2.cuda.getCudaEnabledDeviceCount()`
-is 0 — so they cannot reach the card without either a custom OpenCV build or
-re-implementing YuNet's per-stride decode against a raw ORT session. Both are
-real options; neither is free, and `report()` names CPU-bound stages with the
-reason so the decision stays visible instead of becoming folklore.
+Every model stage: the plate detector and both plate readers, and — when the
+detector is on CUDA — YuNet and SFace too. The pip OpenCV wheel is built
+WITHOUT CUDA, so on a GPU box the face models run on onnxruntime instead of
+`cv2.FaceDetectorYN` / `cv2.FaceRecognizerSF` (native/recognizer.py ports
+YuNet's decode and feeds SFace OpenCV's exact blob; measured identical). On a
+CPU box they stay on OpenCV, which is as fast or faster there. `report()`
+names each stage's silicon and why.
 
 NOTHING HERE RAISES
 -------------------
@@ -137,8 +137,19 @@ def resolve(detector: Any) -> Accel:
     )
 
 
-def make_session(path: str, detector: Any, *, label: str) -> tuple[Any, str]:
+def make_session(
+    path: Any, detector: Any, *, label: str, quiet: bool = False,
+    cuda_options: Optional[dict[str, Any]] = None,
+) -> tuple[Any, str]:
     """Create an InferenceSession on the resolved device. Returns (session, device).
+
+    `quiet` drops onnxruntime's load-time warnings to errors only. SFace, as
+    exported, lists its weights as graph inputs, and onnxruntime prints one
+    multi-line warning per weight — hundreds of lines in the backend log every
+    time recognition loads, about something that changes nothing.
+
+    `path` may also be the serialized model as bytes (a model patched on
+    load). `cuda_options` are CUDA execution-provider options for this session.
 
     FALLS BACK RATHER THAN RAISING. A CUDA provider can be registered and still
     fail to create a session — a missing cuDNN, a driver mismatch, or a card
@@ -148,9 +159,15 @@ def make_session(path: str, detector: Any, *, label: str) -> tuple[Any, str]:
     import onnxruntime as ort  # noqa: PLC0415
 
     accel = resolve(detector)
+    options = ort.SessionOptions()
+    if quiet:
+        options.log_severity_level = 3
     if accel.wants_cuda:
         try:
-            session = ort.InferenceSession(path, providers=accel.providers)
+            providers: list[Any] = list(accel.providers)
+            if cuda_options:
+                providers = [(CUDA, dict(cuda_options)) if p == CUDA else p for p in providers]
+            session = ort.InferenceSession(path, options, providers=providers)
             # Trust what ORT actually bound, not what was requested: asking for
             # CUDA and silently getting CPU is exactly the case that would
             # otherwise be reported to the operator as a GPU stage.
@@ -162,37 +179,53 @@ def make_session(path: str, detector: Any, *, label: str) -> tuple[Any, str]:
             log.warning(
                 "%s: CUDA session failed, falling back to CPU", label, exc_info=True
             )
-    session = ort.InferenceSession(path, providers=[CPU])
+    session = ort.InferenceSession(path, options, providers=[CPU])
     log.info("%s: onnxruntime session on cpu — %s", label, accel.reason)
     return session, "cpu"
 
 
-def report(detector: Any, *, plate_ocr_device: Optional[str] = None) -> dict[str, Any]:
+def report(
+    detector: Any,
+    *,
+    plate_ocr_device: Optional[str] = None,
+    face_device: Optional[str] = None,
+    plate_detector_device: Optional[str] = None,
+) -> dict[str, Any]:
     """Per-stage device report for /api/recognition/status.
 
     Names the CPU-BOUND stages and why, because "cpu" with no reason reads as an
-    oversight. `plate_ocr_device` is what the live session actually bound, which
-    can differ from what `resolve` wanted — that is the whole point of passing it
-    rather than recomputing.
+    oversight. The `*_device` arguments are what the live sessions actually
+    bound, which can differ from what `resolve` wanted — that is the whole
+    point of passing them rather than recomputing. `face_device` is the face
+    recognizer's ("cuda" when YuNet and SFace run on onnxruntime's CUDA
+    provider; "cpu" when they run on OpenCV); None when the face models are not
+    loaded. `plate_detector_device` is None when plates are found by the
+    classical localizer.
     """
     accel = resolve(detector)
     device, kind = detector_device(detector)
+    if face_device == "cuda":
+        face_why = "onnxruntime on the GPU, following the detector"
+        face_dev = "cuda"
+    else:
+        face_dev = "cpu"
+        face_why = (
+            "OpenCV's DNN backend — the pip OpenCV wheel is built without CUDA, "
+            "and the GPU path (onnxruntime) is only used when the detector is on "
+            "CUDA: " + accel.reason
+        )
+    if plate_detector_device:
+        localize = {"device": plate_detector_device,
+                    "why": "the learned plate detector, " + accel.reason}
+    else:
+        localize = {"device": "cpu",
+                    "why": "classical CV (Sobel + morphology), not a model — the "
+                           "plate detector is not loaded"}
     return {
         "follows_detector": {"device": device or "unknown", "kind": kind or "unknown"},
-        "face_detect": {
-            "device": "cpu",
-            "why": "cv2.FaceDetectorYN runs on OpenCV's DNN backend, and the pip "
-                   "OpenCV wheel is built without CUDA",
-        },
-        "face_embed": {
-            "device": "cpu",
-            "why": "cv2.FaceRecognizerSF, same OpenCV DNN backend. alignCrop is "
-                   "geometry rather than a network and gains nothing from a GPU",
-        },
-        "plate_localize": {
-            "device": "cpu",
-            "why": "classical CV (Sobel + morphology), not a model",
-        },
+        "face_detect": {"device": face_dev, "why": face_why},
+        "face_embed": {"device": face_dev, "why": face_why},
+        "plate_localize": localize,
         "plate_ocr": {
             "device": plate_ocr_device or accel.device,
             "why": accel.reason,

@@ -11,11 +11,12 @@ be tested against fixtures with no weights on disk. This module is the part
 that cannot be tested that way, so it is kept as thin as possible: load two
 pinned files, call into OpenCV, hand back plain data.
 
-WHY OPENCV'S OWN IMPLEMENTATIONS, NOT A HAND-ROLLED ONNX GRAPH
----------------------------------------------------------------
+OPENCV'S OWN IMPLEMENTATIONS ARE THE REFERENCE
+----------------------------------------------
 cv2 ships ``FaceDetectorYN`` and ``FaceRecognizerSF``, which consume exactly
-these two pinned files. Using them instead of driving the ONNX graphs directly
-buys two things that are easy to get wrong and silent when wrong:
+these two pinned files, and on a CPU box they do the work. They are also the
+reference the GPU path below is measured against, because two things here are
+easy to get wrong and silent when wrong:
 
   * YuNet's decode. Its raw outputs are per-stride cls/obj/bbox/kps heads that
     need priors and NMS. A subtly wrong decode does not crash — it returns
@@ -26,10 +27,45 @@ buys two things that are easy to get wrong and silent when wrong:
     it just quietly costs accuracy, and it would cost it asymmetrically across
     poses, which is the worst possible failure for a recognition gallery.
 
-The detector stays on onnxruntime (CUDA/Coral); this runs on OpenCV's CPU DNN
-backend. That is the right trade here: a face crop pass runs on a handful of
-small images per event, not on every frame of every camera, and keeping it off
-the GPU leaves the whole card for D-FINE.
+ON THE GPU WHEN THE DETECTOR IS
+-------------------------------
+OpenCV in the image is the pip wheel, built without CUDA, so the two cv2
+classes above can only ever run on the CPU. When the detector resolved to CUDA
+(native/accel.py — recognition follows the detector), both networks instead
+run on onnxruntime's CUDA provider:
+
+  * YuNet is decoded here, by a line-for-line port of OpenCV's own
+    ``FaceDetectorYN`` post-processing (priors per stride, sqrt(cls*obj),
+    exp() box sizes, NMS through cv2.dnn.NMSBoxes). Measured against cv2 on
+    the same 640x640 input: identical faces, identical scores, 0.000 px apart.
+    The graph DECLARES a fixed 640x640 input, but every reshape inside it is
+    size-independent — which is how OpenCV runs it at any size. So the input
+    (and output) dimensions are rewritten to symbolic ones as the file is
+    loaded (``dynamic_yunet``, a few lines of protobuf wire format, no extra
+    dependency), and each frame is fed exactly as OpenCV feeds it: padded
+    with zeros to a multiple of 32. Same input, same network, same decode —
+    the same faces, bit for bit. (Placing frames on a fixed 640 canvas was
+    tried first; the extra padding changes the network's output near the
+    frame's edge, and a face cut off by the crop edge then came out
+    differently.)
+  * SFace takes exactly the blob ``FaceRecognizerSF.feature`` builds (RGB,
+    unscaled, 112x112). Measured: cosine 1.000000 against cv2's embedding on
+    every face tried, so the embedding space — and every enrolled sample — is
+    unchanged. EMBEDDING_MODEL_KEY does not move.
+  * ``alignCrop`` stays OpenCV's: it is geometry, cheap on any CPU, and the one
+    step whose exact reimplementation would buy nothing but risk.
+
+On a CPU-only box the cv2 classes stay in use: on a CPU they are as fast or
+faster (SFace measured 13 ms in cv2 vs 24 ms in onnxruntime), so "GPU when
+there is one" is the whole rule.
+
+BIG FRAMES ARE SEARCHED SMALL AND ALIGNED BIG
+---------------------------------------------
+A full-resolution person crop can be 1500 px tall. YuNet finds faces down to
+~10 px, so searching it at 640 px loses nothing, while searching it at full
+size costs ~10x on a CPU. The landmarks are scaled back up, and alignment reads
+the FULL-resolution pixels — the 112x112 the embedding sees is cut from the
+real detail, not from the shrunk copy.
 
 THE MODELS, AND WHY THESE TWO
 -----------------------------
@@ -106,6 +142,13 @@ FACE_SCORE_THRESHOLD = 0.7
 FACE_NMS_THRESHOLD = 0.3
 FACE_TOP_K = 50
 
+#: YuNet's three detection heads.
+_YUNET_STRIDES = (8, 16, 32)
+
+#: Frames larger than this on their longest side are shrunk before face
+#: DETECTION; alignment still reads the full-resolution pixels.
+DETECT_MAX_SIDE = 640
+
 #: Faces smaller than this in the source frame are not worth embedding. It
 #: mirrors bestshot.FACE_MIN_PX; below it the aligned 112x112 crop is mostly
 #: interpolation.
@@ -149,10 +192,30 @@ class FaceRecognizer:
     loop.
     """
 
-    def __init__(self, models_dir: Path) -> None:
+    def __init__(
+        self,
+        models_dir: Path,
+        *,
+        detector: Any = None,
+        runtime: str = "auto",
+    ) -> None:
+        """`detector` is the object detector, followed onto its silicon
+        (native/accel.py). `runtime` is "auto" (onnxruntime on CUDA, OpenCV
+        otherwise), or "onnxruntime" / "opencv" to force one — tests use the
+        former to exercise the GPU code path on a CPU-only box."""
         self._models_dir = Path(models_dir)
+        self._object_detector = detector
+        self._runtime_pref = runtime
         self._detector: Any = None
         self._embedder: Any = None
+        # onnxruntime sessions; None while the cv2 objects do the work.
+        self._yunet: Any = None
+        self._sface: Any = None
+        self._yunet_outputs: list[str] = []
+        #: What actually runs each network: "opencv" | "onnxruntime", and the
+        #: silicon onnxruntime bound ("cuda" | "cpu").
+        self.runtime = "opencv"
+        self.device = "cpu"
         self._input_size: tuple[int, int] = (0, 0)
         self._failed = False
         self._lock = asyncio.Lock()
@@ -195,8 +258,8 @@ class FaceRecognizer:
                 await asyncio.to_thread(self._build_blocking)
                 self._failed = False
                 log.info(
-                    "face recognition ready (yunet + sface, embedding space %r)",
-                    EMBEDDING_MODEL_KEY,
+                    "face recognition ready (yunet + sface on %s/%s, embedding space %r)",
+                    self.runtime, self.device, EMBEDDING_MODEL_KEY,
                 )
                 return True
             except Exception:
@@ -205,7 +268,7 @@ class FaceRecognizer:
                     # no outbound network would otherwise fill its log.
                     log.exception("face recognition unavailable — models not loaded")
                 self._failed = True
-                self._detector = self._embedder = None
+                self.close()
                 return False
 
     def _build_blocking(self) -> None:
@@ -231,10 +294,56 @@ class FaceRecognizer:
             str(paths["yunet"]), "", self._input_size,
             FACE_SCORE_THRESHOLD, FACE_NMS_THRESHOLD, FACE_TOP_K,
         )
+        # Built in both modes: alignCrop is OpenCV's, whichever runtime embeds.
         self._embedder = cv2.FaceRecognizerSF.create(str(paths["sface"]), "")
+        self._yunet = self._sface = None
+        self.runtime, self.device = "opencv", "cpu"
+        if self._wants_onnxruntime():
+            self._build_onnxruntime(paths)
+
+    def _wants_onnxruntime(self) -> bool:
+        if self._runtime_pref == "opencv":
+            return False
+        if self._runtime_pref == "onnxruntime":
+            return True
+        from . import accel  # noqa: PLC0415
+
+        return accel.resolve(self._object_detector).wants_cuda
+
+    def _build_onnxruntime(self, paths: dict[str, Path]) -> None:  # noqa: C901
+        """YuNet + SFace on onnxruntime, following the detector. On "auto", a
+        session that could only bind the CPU is dropped again: there the cv2
+        objects are as fast or faster, so the GPU path is used only where it is
+        a GPU path."""
+        from . import accel  # noqa: PLC0415
+
+        try:
+            yunet, ydev = accel.make_session(
+                dynamic_yunet(paths["yunet"].read_bytes()), self._object_detector,
+                label="face detector (YuNet)", quiet=True,
+                # Every crop is its own size, so cuDNN must not benchmark
+                # every algorithm for each new shape (EXHAUSTIVE, the default,
+                # costs far more than the inference it is choosing for).
+                cuda_options={"cudnn_conv_algo_search": "HEURISTIC"},
+            )
+            sface, sdev = accel.make_session(
+                str(paths["sface"]), self._object_detector, label="face embedder (SFace)", quiet=True
+            )
+        except Exception:  # noqa: BLE001
+            log.warning("face models: onnxruntime unavailable — using OpenCV", exc_info=True)
+            return
+        if self._runtime_pref == "auto" and "cpu" in (ydev, sdev):
+            log.info("face models: CUDA did not bind — staying on OpenCV (faster on CPU)")
+            return
+        self._yunet, self._sface = yunet, sface
+        self._yunet_outputs = [o.name for o in yunet.get_outputs()]
+        self.runtime = "onnxruntime"
+        self.device = "cuda" if (ydev, sdev) == ("cuda", "cuda") else "cpu"
 
     def close(self) -> None:
         self._detector = self._embedder = None
+        self._yunet = self._sface = None
+        self.runtime, self.device = "opencv", "cpu"
 
     # -- inference ------------------------------------------------------
 
@@ -250,20 +359,50 @@ class FaceRecognizer:
         h, w = frame_bgr.shape[:2]
         if w <= 0 or h <= 0:
             return []
+        # Search big frames small; the rows are scaled back below, so every
+        # coordinate handed out — and alignCrop's input — is in FULL pixels.
+        scale = min(1.0, DETECT_MAX_SIDE / float(max(w, h)))
+        search = frame_bgr
+        if scale < 1.0:
+            import cv2  # noqa: PLC0415
+
+            search = cv2.resize(
+                frame_bgr, (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+                interpolation=cv2.INTER_AREA,
+            )
+        try:
+            if self._yunet is not None:
+                faces = self._yunet_detect(search)
+            else:
+                faces = self._cv2_detect(search)
+        except Exception:
+            log.exception("face detection failed on a %dx%d frame", w, h)
+            return []
+        if faces is None or len(faces) == 0:
+            return []
+        faces = np.asarray(faces, dtype=np.float32).copy()
+        if scale < 1.0:
+            faces[:, :14] /= scale
+        out = [FaceDetection(row) for row in faces]
+        return [f for f in out if min(f.width, f.height) >= MIN_FACE_PX]
+
+    def _cv2_detect(self, frame_bgr: np.ndarray) -> Optional[np.ndarray]:
+        h, w = frame_bgr.shape[:2]
         # setInputSize is stateful on the cv2 object, so it must be set for
         # every frame shape — a stale size silently rescales the boxes.
         if (w, h) != self._input_size:
             self._detector.setInputSize((w, h))
             self._input_size = (w, h)
-        try:
-            _, faces = self._detector.detect(frame_bgr)
-        except Exception:
-            log.exception("face detection failed on a %dx%d frame", w, h)
-            return []
-        if faces is None:
-            return []
-        out = [FaceDetection(row) for row in faces]
-        return [f for f in out if min(f.width, f.height) >= MIN_FACE_PX]
+        _, faces = self._detector.detect(frame_bgr)
+        return faces
+
+    def _yunet_detect(self, frame_bgr: np.ndarray) -> np.ndarray:
+        """YuNet on onnxruntime: rows in OpenCV's format, in frame pixels."""
+        blob, pw, ph = yunet_blob(frame_bgr)
+        return yunet_decode(
+            self._yunet.run(self._yunet_outputs, {"input": blob}),
+            self._yunet_outputs, pw, ph,
+        )
 
     def align_blocking(
         self, frame_bgr: np.ndarray, face: FaceDetection
@@ -308,7 +447,18 @@ class FaceRecognizer:
         if not self.ready or aligned_bgr is None or aligned_bgr.size == 0:
             return None
         try:
-            feature = self._embedder.feature(aligned_bgr)
+            if self._sface is not None:
+                import cv2  # noqa: PLC0415
+
+                # Exactly the blob FaceRecognizerSF.feature builds: RGB,
+                # unscaled, 112x112 — which is what keeps the embedding space
+                # (and every enrolled sample) identical across runtimes.
+                blob = cv2.dnn.blobFromImage(
+                    aligned_bgr, 1.0, (112, 112), (0, 0, 0), True, False
+                )
+                feature = self._sface.run(None, {self._sface.get_inputs()[0].name: blob})[0]
+            else:
+                feature = self._embedder.feature(aligned_bgr)
         except Exception:
             log.exception("face embedding failed")
             return None
@@ -348,6 +498,10 @@ class FaceRecognizer:
             "ready": self.ready,
             "failed": self._failed,
             "model_key": self.model_key,
+            # What runs the two networks: "onnxruntime" on the GPU when the
+            # detector is on CUDA, "opencv" on the CPU otherwise.
+            "runtime": self.runtime if self.ready else "",
+            "device": self.device if self.ready else "",
             "models": {
                 key: {
                     "present": model_path(self._models_dir, key).is_file(),
@@ -357,6 +511,178 @@ class FaceRecognizer:
                 for key, pin in FACE_MODELS.items()
             },
         }
+
+
+def yunet_blob(frame_bgr: np.ndarray) -> tuple[np.ndarray, int, int]:
+    """(NCHW float blob, padded width, padded height): the frame padded with
+    zeros on the right and bottom to a multiple of 32 — BGR, unscaled —
+    exactly the input OpenCV's FaceDetectorYN builds."""
+    h, w = frame_bgr.shape[:2]
+    pw, ph = ((w - 1) // 32 + 1) * 32, ((h - 1) // 32 + 1) * 32
+    canvas = np.zeros((ph, pw, 3), np.float32)
+    canvas[:h, :w] = frame_bgr
+    return np.ascontiguousarray(canvas.transpose(2, 0, 1)[None]), pw, ph
+
+
+def yunet_decode(
+    outputs: Sequence[np.ndarray],
+    names: Sequence[str],
+    pad_w: int,
+    pad_h: int,
+    *,
+    score_threshold: float = FACE_SCORE_THRESHOLD,
+    nms_threshold: float = FACE_NMS_THRESHOLD,
+    top_k: int = FACE_TOP_K,
+) -> np.ndarray:
+    """YuNet's raw heads (for a ``pad_w`` x ``pad_h`` input) -> OpenCV-format
+    rows ``[x, y, w, h, 10 landmark coords, score]`` in frame pixels.
+
+    A port of OpenCV's FaceDetectorYN::postProcess: for each stride, every
+    grid cell's score is sqrt(clamp(cls) * clamp(obj)); the box centre is
+    (cell + offset) * stride and its size exp(raw) * stride; landmarks are
+    (cell + offset) * stride. NMS runs on integer boxes, as OpenCV's does.
+    """
+    import cv2  # noqa: PLC0415
+
+    heads = dict(zip(names, outputs))
+    rows = []
+    for st in _YUNET_STRIDES:
+        cols, nrows = pad_w // st, pad_h // st
+        n = cols * nrows
+        cls = np.clip(np.asarray(heads[f"cls_{st}"]).reshape(n), 0.0, 1.0)
+        obj = np.clip(np.asarray(heads[f"obj_{st}"]).reshape(n), 0.0, 1.0)
+        score = np.sqrt(cls * obj)
+        idx = np.nonzero(score >= score_threshold)[0]
+        if idx.size == 0:
+            continue
+        r, c = (idx // cols).astype(np.float32), (idx % cols).astype(np.float32)
+        bb = np.asarray(heads[f"bbox_{st}"]).reshape(n, 4)[idx]
+        kp = np.asarray(heads[f"kps_{st}"]).reshape(n, 10)[idx]
+        cx, cy = (c + bb[:, 0]) * st, (r + bb[:, 1]) * st
+        bw, bh = np.exp(bb[:, 2]) * st, np.exp(bb[:, 3]) * st
+        lm = np.empty((idx.size, 10), np.float32)
+        lm[:, 0::2] = (kp[:, 0::2] + c[:, None]) * st
+        lm[:, 1::2] = (kp[:, 1::2] + r[:, None]) * st
+        rows.append(np.column_stack([cx - bw / 2.0, cy - bh / 2.0, bw, bh, lm, score[idx]]))
+    if not rows:
+        return np.zeros((0, 15), np.float32)
+    det = np.vstack(rows).astype(np.float32)
+    boxes = [[int(b[0]), int(b[1]), int(b[2]), int(b[3])] for b in det]
+    keep = np.asarray(
+        cv2.dnn.NMSBoxes(boxes, det[:, 14].tolist(), score_threshold, nms_threshold,
+                         top_k=top_k)
+    ).reshape(-1)
+    return det[keep]
+
+
+# ---------- YuNet with a dynamic input size ----------
+#
+# The pinned file declares input [1, 3, 640, 640] and outputs [1, 6400, 1] etc.
+# The graph itself reshapes with [1, -1, k] throughout, so any multiple-of-32
+# size runs; only the DECLARED shapes stop onnxruntime from accepting one.
+# These rewrite exactly those dimensions to symbolic names in the serialized
+# ModelProto — protobuf wire format, walked by hand so the image needs no
+# `onnx` package. Field numbers are from onnx.proto3:
+#   ModelProto.graph = 7; GraphProto.input = 11, output = 12, value_info = 13;
+#   ValueInfoProto.name = 1, type = 2; TypeProto.tensor_type = 1;
+#   TypeProto.Tensor.shape = 2; TensorShapeProto.dim = 1;
+#   Dimension.dim_value = 1, dim_param = 2.
+
+def _varint(n: int) -> bytes:
+    out = bytearray()
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        if n:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            return bytes(out)
+
+
+def _read_varint(buf: bytes, i: int) -> tuple[int, int]:
+    shift = value = 0
+    while True:
+        b = buf[i]
+        i += 1
+        value |= (b & 0x7F) << shift
+        if not b & 0x80:
+            return value, i
+        shift += 7
+
+
+def _map_len_fields(buf: bytes, field: int, fn: Any) -> bytes:
+    """`buf` with every length-delimited `field` replaced by fn(payload, k)
+    (k = its index among those fields; None drops the field); everything
+    else copied verbatim."""
+    out = bytearray()
+    i = k = 0
+    while i < len(buf):
+        key, j = _read_varint(buf, i)
+        num, wire = key >> 3, key & 7
+        if wire == 0:
+            _, end = _read_varint(buf, j)
+        elif wire == 1:
+            end = j + 8
+        elif wire == 5:
+            end = j + 4
+        elif wire == 2:
+            length, start = _read_varint(buf, j)
+            end = start + length
+            if num == field:
+                payload = fn(buf[start:end], k)
+                k += 1
+                if payload is not None:
+                    out += _varint(key) + _varint(len(payload)) + payload
+                i = end
+                continue
+        else:
+            raise ValueError(f"unsupported protobuf wire type {wire}")
+        out += buf[i:end]
+        i = end
+    return bytes(out)
+
+
+def _field_string(buf: bytes, field: int) -> str:
+    found: list[str] = []
+    _map_len_fields(buf, field, lambda p, k: found.append(p.decode()) or p)
+    return found[0] if found else ""
+
+
+def _symbolic_dims(value_info: bytes, dims: dict[int, str]) -> bytes:
+    def shape(p: bytes, _k: int) -> bytes:
+        return _map_len_fields(
+            p, 1, lambda d, k: (_varint(2 << 3 | 2) + _varint(len(dims[k].encode()))
+                                + dims[k].encode()) if k in dims else d,
+        )
+
+    def tensor(p: bytes, _k: int) -> bytes:
+        return _map_len_fields(p, 2, shape)
+
+    def type_(p: bytes, _k: int) -> bytes:
+        return _map_len_fields(p, 1, tensor)
+
+    return _map_len_fields(value_info, 2, type_)
+
+
+def dynamic_yunet(model: bytes) -> bytes:
+    """YuNet's serialized model with its input's H and W, and every output's
+    anchor count, made symbolic. See the block comment above.
+
+    The graph's value_info — shape hints for its 94 intermediate tensors, all
+    recorded at 640x640 — is dropped: it is optional, and stale hints would
+    only invite onnxruntime to plan for the wrong shapes."""
+    def graph(g: bytes, _k: int) -> bytes:
+        g = _map_len_fields(g, 13, lambda _vi, _i: None)
+        g = _map_len_fields(
+            g, 11, lambda vi, _i: _symbolic_dims(vi, {2: "height", 3: "width"})
+            if _field_string(vi, 1) == "input" else vi,
+        )
+        return _map_len_fields(
+            g, 12, lambda vi, _i: _symbolic_dims(vi, {1: "anchors_" + _field_string(vi, 1)}),
+        )
+
+    return _map_len_fields(model, 7, graph)
 
 
 def crop_with_origin(

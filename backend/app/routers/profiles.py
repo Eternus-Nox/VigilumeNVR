@@ -987,27 +987,23 @@ async def recognition_status(request: Request) -> dict[str, Any]:
         "model_key": active,
         "ready": bool(active),
         # WHERE recognition runs, so "is my GPU being used?" is answerable from
-        # the app instead of by reading source.
+        # the app instead of by reading source. Every model stage follows the
+        # detector (native/accel.py): on a CUDA box the face models, the plate
+        # detector and both plate readers run on the GPU; on a CPU box they run
+        # on the CPU, where the face models use OpenCV (as fast or faster there).
         #
-        # It is CPU by design, and measured rather than assumed: a YuNet pass on
-        # a person crop is ~4-9 ms and runs at most once per 0.6 s per tracked
-        # person, so eight cameras each holding a person continuously cost about
-        # an eighth of one core. Moving that to the GPU would take VRAM and
-        # scheduling slots from D-FINE — the model that genuinely needs the card
-        # — to save single-digit milliseconds. The plate OCR is a 128x64 input
-        # where transfer overhead would likely exceed the 2.9 ms it takes on CPU.
-        # MEASURED, not asserted. This used to be four hardcoded "cpu" strings
-        # and a note — which stopped being the whole truth the moment the plate
-        # OCR learned to follow the detector, and which could never answer "is
-        # this actually costing me anything on MY box with MY settings".
-        #
-        # `devices` names each stage's silicon AND why, so a CPU stage reads as
-        # a decision rather than an oversight. `timings` is the live rolling
-        # window; a stage absent from it has not run, which is a different
-        # finding from a stage that runs instantly and must not look the same.
+        # `devices` names each stage's silicon AND why, as the live sessions
+        # actually bound it — asking for CUDA and silently getting CPU must not
+        # read as a GPU stage. `timings` is the live rolling window; a stage
+        # absent from it has not run, which is a different finding from a stage
+        # that runs instantly and must not look the same.
         "devices": accel.report(
             getattr(request.app.state, "detector", None),
             plate_ocr_device=getattr(getattr(plates, "_reader", None), "device", None),
+            face_device=_face_device(face),
+            plate_detector_device=(
+                getattr(getattr(plates, "_reader", None), "devices", {}) or {}
+            ).get("plate_detector"),
         ),
         "timings": TIMINGS.report(),
         "face": face.status() if hasattr(face, "status") else None,
@@ -1026,6 +1022,14 @@ async def recognition_status(request: Request) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _face_device(face: Any) -> Optional[str]:
+    """What the face models actually run on, or None when not loaded."""
+    rec = getattr(face, "_recognizer", None)
+    if rec is None or not getattr(rec, "ready", False):
+        return None
+    return getattr(rec, "device", None)
 
 
 def _heatmap(request: Request) -> Optional[Any]:

@@ -435,8 +435,18 @@ async def lifespan(app: FastAPI):
     # models are ~37 MB and a box that never turns this on should never fetch
     # them. A failed load degrades to ready:false; detection and recording are
     # untouched either way.
-    face_recognizer = FaceRecognizer(config.models_dir)
-    face_pass = FacePass(face_recognizer, db, config.candidate_crops_dir)
+    # Like the plate models below, the face models FOLLOW THE DETECTOR: on
+    # onnxruntime's CUDA provider when it resolved to CUDA, on OpenCV's CPU
+    # path otherwise (native/recognizer.py — same faces, same embeddings).
+    face_recognizer = FaceRecognizer(config.models_dir, detector=detector)
+    # Full-resolution snapshots, SHARED by faces and plates: the detect stream
+    # is too small to read a plate at any distance or to tell faces apart
+    # reliably (native/platesnap.py, native/facepass.py), so a tracked person
+    # or vehicle also triggers an occasional snapshot from the camera itself —
+    # one request serving everything on that camera at that moment.
+    plate_snapshots = SnapshotSource()
+    face_pass = FacePass(face_recognizer, db, config.candidate_crops_dir,
+                         snapshots=plate_snapshots)
     engine.set_face_pass(face_pass)
     # Plates: a learned plate detector finds the plate and two OCR models read
     # it (see native/plates.py, including the licensing note); the classical
@@ -451,10 +461,6 @@ async def lifespan(app: FastAPI):
     # and following the resolved value is the only way not to claim a card that
     # is not there.
     plate_reader = PlateReader(config.models_dir, detector=detector)
-    # Full-resolution snapshots for plates: the detect stream is too small to
-    # read a plate at any distance (native/platesnap.py), so a tracked vehicle
-    # also triggers an occasional snapshot from the camera itself.
-    plate_snapshots = SnapshotSource()
     # And the recording, read back after a vehicle leaves when the live looks
     # did not settle its plate (native/platereplay.py).
     plate_replay = PlateReplay(recorder.camera_dir)

@@ -54,6 +54,26 @@ WHAT GETS STORED
 
 Candidates are deduplicated against the gallery's near-misses, and the store is
 capped — see `_prune`.
+
+FULL-RESOLUTION LOOKS
+---------------------
+The detect stream is ~704x480. A person at the door there has a face a few
+dozen pixels wide; below ~40 px it is not even tried, and between 24 and 56 px
+the embedding is measurably weaker (same face vs itself at full size: cosine
+0.65 at 24 px, 0.88 at 40, 0.93 at 112), which is the margin a real-world
+match — different day, light and angle — has to survive on. The camera's own
+picture is three to six times wider.
+
+So while a person is tracked, the pass also asks the camera for a
+full-resolution snapshot about once a second (`SnapshotSource`, SHARED with the
+plate reader: one request serves both, and every person and vehicle on the
+camera at that moment), finds the person in it (platesnap.locate — the same
+template match the plate reader uses, because the snapshot arrives a few
+hundred milliseconds after the detect frame), and detects, aligns and scores
+the face from those pixels. The shot joins the same best-shot buffer, where a
+sharp 150 px face simply outscores a 35 px one. It runs in the background —
+the engine's frame loop never waits on a camera — and stops once the person is
+identified from a good shot, or after HIRES_MAX_PER_TRACK looks.
 """
 
 from __future__ import annotations
@@ -67,6 +87,7 @@ from typing import Any, Optional, Sequence
 
 import numpy as np
 
+from . import platesnap
 from . import zones as zonelib
 from .bestshot import (
     KEEP_SHOTS, MIN_GAP_S, BestShotBuffer, Shot, clamp_setting, encode_frame_box,
@@ -119,6 +140,23 @@ RUN_INTERVAL_S = 300.0
 #: unparseable. Matches the documented default.
 DEFAULT_RETENTION_DAYS = 7.0
 
+#: Full-resolution looks (module docstring): at most one per track this often,
+#: and at most this many per track.
+HIRES_INTERVAL_S = 1.0
+HIRES_MAX_PER_TRACK = 6
+
+#: A track identified from a shot at least this good needs no more looks.
+HIRES_SETTLED_QUALITY = 0.7
+
+#: When the person cannot be found in the snapshot (they moved), the face is
+#: searched for this far around where they were, as a fraction of their box —
+#: and only a face in the upper part of that box is taken as theirs.
+HIRES_LOST_MARGIN = 0.25
+
+#: A track that ends with a look in flight waits this long for it — in the
+#: background — before its answer is written.
+HIRES_FINISH_WAIT_S = 3.0
+
 #: A new candidate whose best gallery score is within this of an existing
 #: candidate's is treated as the same unknown person and skipped. Without it, one
 #: stranger walking past twelve times produces twelve rows to wade through.
@@ -136,6 +174,13 @@ class _TrackState:
     match: Optional[Match] = None
     embedding: Optional[np.ndarray] = None
     event_fid: str = ""
+    # Full-resolution looks.
+    hires_task: Optional["asyncio.Task[None]"] = None
+    hires_last: float = 0.0
+    hires_requests: int = 0
+    # Serializes identification: the detect-frame pass and a full-resolution
+    # look can both reach it for one track at once.
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class FacePass:
@@ -147,6 +192,7 @@ class FacePass:
         db: Any,
         images_dir: Path,
         on_recognition: Optional[Any] = None,
+        snapshots: Optional[Any] = None,
     ) -> None:
         # Called the moment a track is identified, NOT when the row is stored.
         # The stored row lands at track end, which for an alert is long after
@@ -154,6 +200,21 @@ class FacePass:
         # "Adam is at the door" has to hear about it here.
         self.on_recognition = on_recognition
         self._recognizer = recognizer
+        # Full-resolution frames (platesnap.SnapshotSource, shared with the
+        # plate pass). None disables full-resolution looks.
+        self._snapshots = snapshots
+        # The settings store, for the live `face_hires` switch. Set by run().
+        self._settings: Any = None
+        # Finishes deferred behind an in-flight look (see finish()).
+        self._pending: set[asyncio.Task] = set()
+        # Full-resolution looks, counted since boot, for the status screen.
+        self.hires: dict[str, int] = {
+            "requested": 0,   # looks started
+            "frames": 0,      # a usable full-resolution frame arrived
+            "faces": 0,       # a face was found and offered from it
+            "lost": 0,        # the person could not be found in it
+            "no_face": 0,     # the person was found, their face was not
+        }
         self._db = db
         self._images_dir = Path(images_dir)
         self._tracks: dict[tuple[str, int], _TrackState] = {}
@@ -281,13 +342,15 @@ class FacePass:
                 people = [o for o, names in zip(people, hits) if names]
                 if not people:
                     return
+            cam_row = dict(getattr(cam, "row", None) or {})
+            cam_row.setdefault("name", camera)
             for obs in people:
-                await self._observe_one(camera, obs, frame_bgr, frame_time, event_fid)
+                await self._observe_one(camera, cam_row, obs, frame_bgr, frame_time, event_fid)
         except Exception:
             log.exception("face pass failed on %s", camera)
 
     async def _observe_one(
-        self, camera: str, obs: Any, frame_bgr: np.ndarray,
+        self, camera: str, cam_row: dict[str, Any], obs: Any, frame_bgr: np.ndarray,
         frame_time: float, event_fid: str,
     ) -> None:
         key = (camera, obs.tracker_id)
@@ -303,6 +366,9 @@ class FacePass:
         if frame_time - st.last_pass < self._pass_interval:
             return
         st.last_pass = frame_time
+        # Before the detect-frame look, and whatever it finds: the face that
+        # is too small to be found HERE is exactly the one worth a snapshot.
+        self._maybe_look_hires(cam_row, camera, st, obs, frame_bgr, frame_time)
 
         cropped = crop_with_origin(frame_bgr, obs.box, pad=PERSON_CROP_PAD)
         if cropped is None:
@@ -354,14 +420,139 @@ class FacePass:
             # drop — the second is the diversity rule working.
             if not quality:
                 self.drops["below_quality"] += 1
+        await self._maybe_identify(st, obs.tracker_id)
 
-        best = st.buffer.best(obs.tracker_id, "face")
-        if best is None or best.quality.total < self._identify_quality:
+    async def _maybe_identify(self, st: _TrackState, tracker_id: int) -> None:
+        """Identify from the best shot so far, if it is good enough and
+        meaningfully better than the one already identified from."""
+        async with st.lock:
+            best = st.buffer.best(tracker_id, "face")
+            if best is None or best.quality.total < self._identify_quality:
+                return
+            already = st.identified_from
+            if already is not None and best.quality.total - already < REIDENTIFY_IMPROVEMENT:
+                return
+            await self._identify(st, tracker_id, best)
+
+    # ---------- full-resolution looks ----------
+
+    def _hires_on(self) -> bool:
+        """Whether full-resolution looks are wanted. Read live, so the switch
+        takes effect at once."""
+        if self._snapshots is None:
+            return False
+        if self._settings is None:
+            return True
+        try:
+            cfg = (self._settings.current or {}).get("recognition") or {}
+        except Exception:  # noqa: BLE001
+            return True
+        return bool(cfg.get("face_hires", True))
+
+    def _maybe_look_hires(
+        self, cam_row: dict[str, Any], camera: str, st: _TrackState, obs: Any,
+        frame_bgr: np.ndarray, frame_time: float,
+    ) -> None:
+        """Start a full-resolution look at this person if one is due. Never awaits."""
+        if not self._hires_on():
             return
-        already = st.identified_from
-        if already is not None and best.quality.total - already < REIDENTIFY_IMPROVEMENT:
+        if st.hires_task is not None and not st.hires_task.done():
             return
-        await self._identify(st, obs.tracker_id, best)
+        if st.hires_requests >= HIRES_MAX_PER_TRACK:
+            return
+        if frame_time - st.hires_last < HIRES_INTERVAL_S:
+            return
+        if st.identified_from is not None and st.identified_from >= HIRES_SETTLED_QUALITY:
+            return
+        if not self._snapshots.available(camera):
+            return
+        fh, fw = frame_bgr.shape[:2]
+        x1, y1, x2, y2 = (float(v) for v in obs.box[:4])
+        xi1, yi1 = max(0, int(x1)), max(0, int(y1))
+        xi2, yi2 = min(fw, int(round(x2))), min(fh, int(round(y2)))
+        if xi2 - xi1 < platesnap.MIN_TEMPLATE_PX or yi2 - yi1 < platesnap.MIN_TEMPLATE_PX:
+            return
+        # The person only, copied: the engine reuses its frames.
+        template = frame_bgr[yi1:yi2, xi1:xi2].copy()
+        st.hires_last = frame_time
+        st.hires_requests += 1
+        self.hires["requested"] += 1
+        st.hires_task = asyncio.create_task(
+            self._look_hires(cam_row, camera, st, obs.tracker_id, template,
+                             (xi1, yi1, xi2, yi2), (fh, fw)),
+            name=f"face-hires-{camera}-{obs.tracker_id}",
+        )
+
+    async def _look_hires(
+        self, cam_row: dict[str, Any], camera: str, st: _TrackState, tracker_id: int,
+        template: np.ndarray, box: tuple[int, int, int, int],
+        detect_shape: tuple[int, int],
+    ) -> None:
+        """Fetch a full-resolution frame, find the person in it, and offer
+        their face from those pixels. Never raises."""
+        try:
+            got = await self._snapshots.fetch(cam_row)
+            if got is None:
+                return
+            hires, taken = got
+            if hires.shape[1] < detect_shape[1] * platesnap.MIN_GAIN:
+                self._snapshots.note_no_gain(camera, hires.shape, detect_shape)
+                return
+            self._snapshots.note_gain(camera)
+            self.hires["frames"] += 1
+            hh, hw = hires.shape[:2]
+            sx, sy = hw / float(detect_shape[1]), hh / float(detect_shape[0])
+            found = await asyncio.to_thread(platesnap.locate, template, box, detect_shape, hires)
+            if found is not None:
+                pbox, pad, lost = found[0], PERSON_CROP_PAD, False
+            else:
+                # Not found with confidence (they moved, or turned): search
+                # around where they were, and accept only a face where THEIR
+                # head would be.
+                pbox = (box[0] * sx, box[1] * sy, box[2] * sx, box[3] * sy)
+                pad, lost = HIRES_LOST_MARGIN, True
+            cropped = crop_with_origin(hires, pbox, pad=pad)
+            if cropped is None:
+                self.hires["lost"] += 1
+                return
+            person, ox, oy = cropped
+            faces = await self._recognizer.detect(person)
+            if lost:
+                px1, py1, px2, py2 = pbox
+                pw, ph = px2 - px1, py2 - py1
+                faces = [
+                    f for f in faces
+                    if px1 - 0.15 * pw <= ox + (f.box[0] + f.box[2]) / 2.0 <= px2 + 0.15 * pw
+                    and py1 - 0.15 * ph <= oy + (f.box[1] + f.box[3]) / 2.0 <= py1 + 0.6 * ph
+                ]
+            if not faces:
+                self.hires["lost" if lost else "no_face"] += 1
+                return
+            face = max(faces, key=lambda f: f.width * f.height)
+            aligned = await self._recognizer.align(person, face)
+            if aligned is None:
+                return
+            quality = score_face(aligned, landmarks=face.landmarks)
+            frame_box = (
+                max(0.0, min(1.0, (ox + face.box[0]) / hw)),
+                max(0.0, min(1.0, (oy + face.box[1]) / hh)),
+                max(0.0, min(1.0, (ox + face.box[2]) / hw)),
+                max(0.0, min(1.0, (oy + face.box[3]) / hh)),
+            )
+            self.heatmap.record(camera, "face", (frame_box[0] + frame_box[2]) / 2.0,
+                                (frame_box[1] + frame_box[3]) / 2.0, quality.total)
+            if st.buffer.offer(
+                tracker_id=tracker_id, kind="face", crop_bgr=aligned, box=face.box,
+                frame_time=taken, quality=quality, frame_box=frame_box,
+            ):
+                self.hires["faces"] += 1
+            elif not quality:
+                self.drops["below_quality"] += 1
+            await self._maybe_identify(st, tracker_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("full-resolution face look failed on %s", camera)
 
     async def _identify(self, st: _TrackState, tracker_id: int, shot: Shot) -> None:
         """Embed the best shot so far and match it. Cheap enough to redo once."""
@@ -405,10 +596,52 @@ class FacePass:
     # ---------- track end ----------
 
     async def finish(self, camera: str, tracker_id: int) -> None:
-        """A track ended: identify from its FINAL best shot and store the answer."""
+        """A track ended: identify from its FINAL best shot and store the answer.
+
+        If a full-resolution look is still in flight — often the look with the
+        best face of the visit — the answer waits for it IN THE BACKGROUND, up
+        to HIRES_FINISH_WAIT_S: the engine awaits this inside its frame loop.
+        """
         st = self._tracks.pop((camera, tracker_id), None)
         if st is None:
             return
+        task = st.hires_task
+        if task is not None and not task.done():
+            deferred = asyncio.create_task(
+                self._finish_after(task, st, camera, tracker_id),
+                name=f"face-finish-{camera}-{tracker_id}",
+            )
+            self._pending.add(deferred)
+            deferred.add_done_callback(self._pending.discard)
+            return
+        await self._conclude(st, camera, tracker_id)
+
+    async def _finish_after(
+        self, task: "asyncio.Task[None]", st: _TrackState, camera: str, tracker_id: int,
+    ) -> None:
+        try:
+            await asyncio.wait_for(asyncio.shield(task), HIRES_FINISH_WAIT_S)
+        except asyncio.TimeoutError:
+            task.cancel()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — the look logs its own failures
+            pass
+        await self._conclude(st, camera, tracker_id)
+
+    async def wait_idle(self) -> None:
+        """Wait for deferred finishes (tests, shutdown)."""
+        while self._pending:
+            await asyncio.gather(*list(self._pending), return_exceptions=True)
+
+    def _cancel_hires(self, camera: Optional[str] = None) -> None:
+        for (cam, _tid), st in self._tracks.items():
+            if camera is not None and cam != camera:
+                continue
+            if st.hires_task is not None and not st.hires_task.done():
+                st.hires_task.cancel()
+
+    async def _conclude(self, st: _TrackState, camera: str, tracker_id: int) -> None:
         try:
             shot = st.buffer.best(tracker_id, "face")
             if shot is None:
@@ -416,8 +649,9 @@ class FacePass:
                 return
             # Re-identify from the best shot of the WHOLE visit, which is only
             # knowable now. This is the answer that reaches the database.
-            if st.identified_from is None or shot.quality.total > st.identified_from:
-                await self._identify(st, tracker_id, shot)
+            async with st.lock:
+                if st.identified_from is None or shot.quality.total > st.identified_from:
+                    await self._identify(st, tracker_id, shot)
             if st.embedding is None:
                 self.drops["embed_failed"] += 1
                 return
@@ -578,6 +812,7 @@ class FacePass:
             await asyncio.sleep(RUN_INTERVAL_S)
 
     async def _tick(self, settings: Any) -> None:
+        self._settings = settings
         cfg = (settings.get() or {}).get("recognition") or {}
         enabled = bool(cfg.get("enabled"))
         self._shots, self._shot_gap = shot_params(cfg)
@@ -598,6 +833,7 @@ class FacePass:
         elif not enabled and self._recognizer.ready:
             log.info("recognition disabled — releasing the face models")
             self._recognizer.close()
+            self._cancel_hires()
             self._tracks.clear()
 
         await self.purge_expired(cfg.get("candidate_retention_days"))
@@ -656,6 +892,7 @@ class FacePass:
         return [tid for (cam, tid) in self._tracks if cam == camera and tid not in live]
 
     def forget_camera(self, camera: str) -> None:
+        self._cancel_hires(camera)
         for key in [k for k in self._tracks if k[0] == camera]:
             del self._tracks[key]
 
@@ -670,6 +907,9 @@ class FacePass:
             # differ per reason — see the comment on self.drops.
             "kept_candidates": self.kept,
             "drops": dict(self.drops),
+            # Full-resolution looks (module docstring), and whether they are on.
+            "hires_enabled": self._hires_on(),
+            "hires": dict(self.hires),
             "tuning": {
                 "shots_per_track": self._shots,
                 "shot_min_gap_seconds": self._shot_gap,

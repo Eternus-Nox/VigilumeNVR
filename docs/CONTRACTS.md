@@ -1325,9 +1325,24 @@ its `pin=` override. NB the URLs are `media.githubusercontent.com/media/...` —
 plain `raw.githubusercontent.com` serves a 131-byte **git-lfs pointer** for
 these paths, which downloads "successfully" and then fails every hash check.
 
-cv2's own `FaceDetectorYN` / `FaceRecognizerSF` drive them rather than the ONNX
-graphs directly, because both things that are easy to get wrong here are silent
-when wrong: YuNet's per-stride decode needs priors + NMS, and SFace embeddings
+On a CPU box cv2's own `FaceDetectorYN` / `FaceRecognizerSF` drive them. On a
+box whose detector resolved to CUDA they run on **onnxruntime's CUDA provider**
+instead (the pip OpenCV wheel has no CUDA): `recognizer.yunet_decode` is a port
+of OpenCV's YuNet post-processing (per-stride priors, sqrt(cls*obj), exp() box
+sizes, integer-box NMS), and SFace gets exactly the blob `FaceRecognizerSF.feature`
+builds (RGB, unscaled, 112x112). The pinned YuNet file declares a fixed 640x640
+input but reshapes with `[1,-1,k]` throughout, so `recognizer.dynamic_yunet`
+rewrites the declared input/output dims to symbolic ones on load (protobuf wire
+format by hand — no `onnx` dependency — and the stale 640x640 `value_info`
+hints dropped), and each frame is fed as OpenCV feeds it: zero-padded to a
+multiple of 32. `tests/face_runtime_smoke.py` pins the result on real photos:
+the same faces, boxes and landmarks within 0.0001 px, scores identical, and
+embeddings at cosine 1.000000 — so `EMBEDDING_MODEL_KEY` is unchanged and every
+enrolled sample still matches. (A fixed 640 canvas was tried first; its extra
+padding changes the network's output near the frame edge, and a face cut off
+by the crop edge then came out differently.) `alignCrop` stays OpenCV's in
+both modes. Frames larger than 640 px are searched at 640 (`DETECT_MAX_SIDE`)
+and aligned from the full-resolution pixels. SFace embeddings
 are only comparable after `alignCrop` warps the face to a canonical 112x112 by
 similarity transform from the landmarks. Alignment is applied **exactly once** —
 re-aligning an already-aligned crop measurably moves the embedding (cos 0.85 in
@@ -1358,7 +1373,7 @@ there is one hardware decision on the box rather than two that can disagree:
 
 | detector | recognition |
 |---|---|
-| CUDA | CUDA for the stages that can use it (today: plate OCR) |
+| CUDA | CUDA for every model: face detect + embed (onnxruntime), plate detector, both plate readers |
 | CPU | CPU |
 | Coral | **CPU** — an Edge TPU runs int8 graphs compiled for it, and YuNet / SFace / the plate OCR are float ONNX with no Edge TPU build |
 
@@ -1371,48 +1386,35 @@ maintenance tick, where the exception costs the whole feature.
 session cannot be created (missing cuDNN, driver mismatch, a card D-FINE has
 filled), and reports what ORT actually **bound** rather than what was requested.
 
-**What still cannot move.** YuNet and SFace go through `cv2.FaceDetectorYN` /
-`cv2.FaceRecognizerSF`, and the pip OpenCV wheel is built without CUDA
-(`cv2.cuda.getCudaEnabledDeviceCount() == 0`). Reaching the card needs either a
-custom OpenCV build or re-implementing YuNet's per-stride decode against a raw
-ORT session — the decode being the risky half, since getting a stride wrong
-yields plausible boxes in the wrong places rather than an error. Plate
-localization is classical CV, not a model. `alignCrop` is geometry and gains
-nothing from a GPU. `GET /api/recognition/status` names each CPU-bound stage
-**with its reason**, so the constraint stays visible instead of becoming
-folklore.
+**Every model stage moves.** On CUDA the face models run on onnxruntime
+(above); on a CPU box they stay on OpenCV, which is as fast or faster there
+(SFace measured 13 ms in OpenCV vs 24 ms in onnxruntime on CPU), so the rule
+is simply "GPU when there is one". An onnxruntime session that could only bind
+the CPU is dropped back to OpenCV. `alignCrop` is geometry and stays on the
+CPU. `GET /api/recognition/status` reports each stage's device as the live
+session bound it — `devices.face_detect` / `face_embed` from the recognizer
+(`face.runtime`, `face.device` in the face status too), `devices.plate_localize`
+from the plate detector's own session — with the reason, and `timings` per
+stage as a rolling mean/p95/max measured on that box (a stage that never ran is
+ABSENT, not zero).
 
-**Whether to move any of it is a measurement, not an argument.** The same
-endpoint serves `timings`: a rolling window per stage with mean, p95 and max,
-measured on that box under that operator's settings. A stage that has never run
-is ABSENT rather than zero — "did not run" and "ran instantly" are different
-findings. Note that at a 112x112 input the host/device transfer can rival the
-inference, and extra CUDA sessions compete with D-FINE for VRAM and scheduling
-slots; detection falling behind the stream is a worse failure than recognition
-taking a few more milliseconds.
+YuNet runs with `cudnn_conv_algo_search=HEURISTIC`: every person crop is its own
+size (padded to a multiple of 32), and the default EXHAUSTIVE search would
+benchmark every convolution algorithm for each new shape.
 
-Measured on this codebase rather than assumed:
+Measured on CPU (the GPU path is the same graphs):
 
-| stage | where | cost |
+| stage | CPU | cost |
 |---|---|---|
-| YuNet face detect | CPU (OpenCV DNN) | ~4 ms on a person crop, ~9 ms on 512x512 |
-| `alignCrop` | CPU (pure geometry) | <0.1 ms |
-| SFace embed 112x112 | CPU (OpenCV DNN) | ~9 ms, **once per track** |
-| plate localize | CPU (classical CV) | ~1.6 ms |
-| plate OCR 128x64 | CPU (onnxruntime) | ~2.9 ms |
+| YuNet face detect | OpenCV DNN | ~4 ms on a person crop, ~9 ms on 512x512 |
+| `alignCrop` | pure geometry | <0.1 ms |
+| SFace embed 112x112 | OpenCV DNN | ~9-13 ms, **once per track** |
+| plate detector 384 | onnxruntime | ~18-39 ms |
+| plate OCR 128x64 | onnxruntime | ~2.9 ms per reader |
 
-A face pass is throttled to once per 0.6 s per tracked person, so one person
-continuously in frame costs **~1.5% of one core**; eight cameras each holding a
-person costs **~12% of one core**. Moving that to the GPU would take VRAM and
-scheduling slots from D-FINE — the model that actually needs the card — to save
-single-digit milliseconds, and for a 128x64 OCR input the host/device transfer
-would likely exceed the inference itself.
-
-Two further constraints make this the only honest option today: the pip OpenCV
-wheel is **not built with CUDA** (`cv2.cuda.getCudaEnabledDeviceCount() == 0`),
-so YuNet and SFace cannot reach the card without a custom OpenCV build; and
-`alignCrop`, which the embeddings depend on, is geometry rather than a DNN and
-gains nothing from one.
+The 640-px plate detector from the same publisher was measured against the
+384 on the 222 US photos and is NOT used: 215 vs 218 found on vehicle crops,
+more false boxes, twice the CPU time.
 
 #### Why a face may not reach "unknown faces"
 
@@ -1437,6 +1439,34 @@ how `face_on_vehicles` is verified rather than assumed — see below.
 `by_label["person"]` alone, which made `face_on_vehicles` dead on arrival: the
 pass would accept a car and no car was ever offered. The filter lives in ONE
 place — `FacePass.labels`, driven by the setting — and the engine asks.
+
+#### Faces: full-resolution snapshots (`recognition.face_hires`)
+
+On the 704x480 detect stream a face at the door is a few dozen pixels; under
+40 px (`MIN_FACE_PX`) it is not tried at all, and below ~56 px the embedding is
+measurably weaker — the same face against itself at full size scores cosine
+0.65 at 24 px, 0.88 at 40 px and 0.93 at 112 px, and that margin is what a
+real match across days, light and angle has to survive on.
+
+With `recognition.face_hires` (bool, default **true**), a tracked person on a
+camera with face recognition on also gets a full-resolution look
+(`FacePass._look_hires`): a snapshot from the SAME `SnapshotSource` the plate
+pass uses (one request serves every person and vehicle on that camera within
+0.35 s), the person found in it by `platesnap.locate`, and the face detected,
+aligned and scored from the real pixels. The shot joins the track's best-shot
+buffer, where a sharp face simply outscores a tiny one, and identification
+runs as usual (serialized per track with the detect-frame pass). If the
+person cannot be located (they moved), the face is searched for around where
+they were, and only a face in the upper part of THEIR box is taken — never a
+face elsewhere in the snapshot. Bounded: at most one look per person per
+second, at most 6 per track, none once identified from a shot of quality
+≥ 0.7. Background task: the frame loop never waits on a camera, and a track
+that ends mid-look writes its answer up to 3 s later. `face.hires` on
+`/api/recognition/status` counts `requested / frames / faces / lost / no_face`,
+and `face.hires_enabled` reports the switch, read live.
+`tests/face_hires_smoke.py`: a face 86 px in the camera's picture and too small
+to find on the detect frame is read and stored at quality 0.90 only with the
+looks on.
 
 #### Plates: full-resolution snapshots (`recognition.plate_hires`)
 
@@ -1496,6 +1526,11 @@ is read by both readers into the vote. One replay at a time; never on the
 frame loop; no recording or no ffmpeg means no replay. The plate lands on the
 event when the track is concluded (about a minute after the car leaves).
 `plates.cameras.{name}` adds `replays`, `replay_frames`, `replay_reads`.
+With an NVIDIA GPU in the container the replay decodes on NVDEC first
+(`-hwaccel cuda`, frames back in system memory for the crop) — up to 15 s of
+4K H.265 is the most CPU this pass ever spends — and falls back to the CPU
+decode; after 3 GPU decodes in a row that produce nothing it stops trying the
+GPU. `plates.replay` reports `{available, gpu_decode, decodes: {cuda, cpu}}`.
 
 Two fixes from simulating the live path on the 222 US photos: `bestshot.Shot`
 is compared by identity (its generated `__eq__` compared crop arrays and

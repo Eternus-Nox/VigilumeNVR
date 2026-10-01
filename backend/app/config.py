@@ -362,6 +362,12 @@ DEFAULT_SETTINGS: dict = {
         # second (native/platesnap.py). Only cameras with plate reading on pay
         # it, and only while a vehicle is actually there.
         "plate_hires": True,
+        # Same for FACES: while a person is tracked on a camera with face
+        # recognition on, about one full-resolution snapshot a second (shared
+        # with the plate reader's), and the face is found and aligned from
+        # that. A face 35 px wide on the detect stream is ~130-200 px there
+        # (native/facepass.py). Stops once the person is identified.
+        "face_hires": True,
         # Find plates with the learned plate detector (native/plates.py) rather
         # than the classical localizer. Far more reliable on real footage; its
         # weights are MIT-published but were trained with the GPL-3.0 YOLOv9

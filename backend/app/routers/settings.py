@@ -488,6 +488,10 @@ class RecognitionSettings(BaseModel):
     # stream (native/platesnap.py). On by default: at the detect stream's size
     # a plate is usually too small to read unless the car is at the lens.
     plate_hires: bool = True
+    # Read faces from a full-resolution camera snapshot as well as the detect
+    # stream (native/facepass.py). On by default for the same reason: a face
+    # at the detect stream's size is a few dozen pixels and matches poorly.
+    face_hires: bool = True
     # Find plates with the learned plate detector instead of the classical
     # localizer (native/plates.py explains the trade, including licensing).
     plate_detector: bool = True
