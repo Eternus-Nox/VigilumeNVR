@@ -216,6 +216,9 @@ class FaceRecognizer:
         #: silicon onnxruntime bound ("cuda" | "cpu").
         self.runtime = "opencv"
         self.device = "cpu"
+        # The detector's (device, kind) when the models were built — see
+        # stale_device().
+        self._built_for: tuple[str, str] = ("", "")
         self._input_size: tuple[int, int] = (0, 0)
         self._failed = False
         self._lock = asyncio.Lock()
@@ -255,6 +258,12 @@ class FaceRecognizer:
                 return True
             try:
                 await self.ensure_models()
+                if self._runtime_pref == "auto":
+                    # Follow the detector's RESOLVED device, so wait for it to
+                    # have one (bounded) — see accel.settle.
+                    from . import accel  # noqa: PLC0415
+
+                    await accel.settle(self._object_detector)
                 await asyncio.to_thread(self._build_blocking)
                 self._failed = False
                 log.info(
@@ -298,8 +307,21 @@ class FaceRecognizer:
         self._embedder = cv2.FaceRecognizerSF.create(str(paths["sface"]), "")
         self._yunet = self._sface = None
         self.runtime, self.device = "opencv", "cpu"
+        from . import accel  # noqa: PLC0415
+
+        self._built_for = accel.detector_device(self._object_detector)
         if self._wants_onnxruntime():
             self._build_onnxruntime(paths)
+
+    def stale_device(self) -> bool:
+        """The detector has moved since these models were built (typically:
+        it was still warming up at boot and has since come up on CUDA), so a
+        rebuild would put them somewhere else. Only for runtime "auto"."""
+        if not self.ready or self._runtime_pref != "auto":
+            return False
+        from . import accel  # noqa: PLC0415
+
+        return accel.stale(self._object_detector, self._built_for)
 
     def _wants_onnxruntime(self) -> bool:
         if self._runtime_pref == "opencv":

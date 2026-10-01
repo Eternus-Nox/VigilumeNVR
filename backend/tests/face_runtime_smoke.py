@@ -194,6 +194,47 @@ async def main() -> int:
     check(rep["plate_localize"]["device"] == "cuda",
           "the plate detector's own device is reported, not 'classical CV'")
 
+    print("\n6. recognition waits for the detector, and follows it when it moves")
+    # At boot the detector warms up in the background; models loaded before it
+    # has a device used to follow "unknown" onto the CPU for the whole run.
+    late = FakeDetector("")
+
+    async def resolve_later():
+        await asyncio.sleep(0.4)
+        late.device = "cpu"
+
+    waiter = FaceRecognizer(models_dir, detector=late)
+    t0 = asyncio.get_running_loop().time()
+    asyncio.ensure_future(resolve_later())
+    await waiter.load()
+    waited = asyncio.get_running_loop().time() - t0
+    check(waited >= 0.35 and waiter._built_for == ("cpu", "onnx"),
+          f"face models wait for the detector's device before building ({waited:.2f} s)")
+    check(not waiter.stale_device(), "and are not stale once built for it")
+    late.device = "cuda"
+    check(waiter.stale_device(),
+          "the detector moving (e.g. coming up on CUDA after boot) marks them stale")
+    waiter.close()
+    await waiter.load()
+    check(waiter._built_for == ("cuda", "onnx") and not waiter.stale_device(),
+          "a rebuild follows it, once")
+
+    from app.native.plates import PlateReader
+
+    plate_late = FakeDetector("")
+    reader = PlateReader(models_dir, detector=plate_late)
+    accel.SETTLE_TIMEOUT_S, saved = 0.3, accel.SETTLE_TIMEOUT_S
+    try:
+        t0 = asyncio.get_running_loop().time()
+        ok = await reader.load()
+        waited = asyncio.get_running_loop().time() - t0
+    finally:
+        accel.SETTLE_TIMEOUT_S = saved
+    check(ok and 0.25 <= waited < 5.0,
+          f"a detector that never resolves does not hold plates back for long ({waited:.2f} s)")
+    plate_late.device = "cpu"
+    check(reader.stale_device(), "and when it does resolve, the plate models are marked to follow")
+
     print()
     if _failures:
         print(f"{len(_failures)} of {PASS} CHECKS FAILED")

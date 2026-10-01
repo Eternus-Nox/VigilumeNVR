@@ -1014,6 +1014,12 @@ class PlatePass:
                 cfg = (settings.get() or {}).get("recognition") or {}
                 enabled = bool(cfg.get("enabled"))
                 self._shots, self._shot_gap = shot_params(cfg)
+                if enabled and self._reader.ready and getattr(
+                        self._reader, "stale_device", lambda: False)():
+                    # Built while the detector was elsewhere (usually still
+                    # warming up at boot): rebuild once onto where it is now.
+                    log.info("plate models: the detector has moved — rebuilding to follow it")
+                    self._reader.close()
                 if enabled and not self._reader.ready:
                     if await self._reader.load():
                         await self.reload_gallery()

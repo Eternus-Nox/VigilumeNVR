@@ -108,6 +108,46 @@ def detector_device(detector: Any) -> tuple[str, str]:
     return str(device).lower(), str(kind).lower()
 
 
+#: How long a recognition model waits, at load, for the detector to report its
+#: device. The detector warms up in the background at boot; loading before it
+#: has resolved would follow "unknown" onto the CPU and stay there.
+SETTLE_TIMEOUT_S = 60.0
+
+
+async def settle(detector: Any, timeout: Optional[float] = None, poll: float = 0.2) -> None:
+    """Wait until the detector has reported a device, or `timeout`. Never raises.
+
+    Bounded because a detector can stay deviceless for good (a GPU-required
+    box with no CUDA reports device=None forever); recognition then loads on
+    the CPU, and `stale()` moves it if the detector resolves later.
+    """
+    import asyncio  # noqa: PLC0415
+
+    if detector is None:
+        return
+    if timeout is None:
+        timeout = SETTLE_TIMEOUT_S
+    deadline = asyncio.get_running_loop().time() + max(0.0, timeout)
+    while not detector_device(detector)[0]:
+        if asyncio.get_running_loop().time() >= deadline:
+            return
+        await asyncio.sleep(poll)
+
+
+def stale(detector: Any, built_for: tuple[str, str]) -> bool:
+    """Has the detector moved since a recognition model was built for it?
+
+    True when sessions were built while the detector was on `built_for` and it
+    has since resolved somewhere else — typically "" (still warming up at boot)
+    to "cuda". The caller rebuilds once; a rebuild records the new device, so
+    this does not repeat until the detector moves again.
+    """
+    if detector is None:
+        return False
+    now = detector_device(detector)
+    return bool(now[0]) and now != built_for
+
+
 def resolve(detector: Any) -> Accel:
     """Providers for an onnxruntime recognition stage, following the detector."""
     device, kind = detector_device(detector)

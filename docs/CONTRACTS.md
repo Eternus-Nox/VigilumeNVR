@@ -1386,6 +1386,17 @@ maintenance tick, where the exception costs the whole feature.
 session cannot be created (missing cuDNN, driver mismatch, a card D-FINE has
 filled), and reports what ORT actually **bound** rather than what was requested.
 
+**Boot order.** The detector warms up in the background, and the face and plate
+passes load on their first maintenance tick — usually before the detector has
+a device. They used to follow "unknown" onto the CPU and stay there for the
+whole run, so on a GPU box the plate models could sit on the CPU from boot.
+Now a load first waits (`accel.settle`, at most `SETTLE_TIMEOUT_S` = 60 s) for
+the detector to report a device, and each tick checks `stale_device()`: if the
+detector has resolved somewhere other than where the models were built (it
+came up after the timeout, or was reconfigured), they are rebuilt once to
+follow it. Face embeddings are identical on either runtime, so the gallery is
+untouched by a rebuild.
+
 **Every model stage moves.** On CUDA the face models run on onnxruntime
 (above); on a CPU box they stay on OpenCV, which is as fast or faster there
 (SFace measured 13 ms in OpenCV vs 24 ms in onnxruntime on CPU), so the rule

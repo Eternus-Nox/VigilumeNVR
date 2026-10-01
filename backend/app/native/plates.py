@@ -374,6 +374,9 @@ class PlateReader:
         self.device = "cpu"
         #: What each OPTIONAL model's session actually bound, by model key.
         self.devices: dict[str, str] = {}
+        # The detector's (device, kind) when the sessions were built — see
+        # stale_device().
+        self._built_for: tuple[str, str] = ("", "")
         self._models_dir = Path(models_dir)
         self._session: Any = None
         self._input_name = ""
@@ -390,6 +393,11 @@ class PlateReader:
     @property
     def ready(self) -> bool:
         return self._session is not None
+
+    def stale_device(self) -> bool:
+        """The detector has moved since the sessions were built (typically: it
+        was still warming up at boot and has since come up on CUDA)."""
+        return self.ready and accel.stale(self._detector, self._built_for)
 
     @property
     def has_detector(self) -> bool:
@@ -418,9 +426,13 @@ class PlateReader:
 
         try:
             await self.ensure_models()
+            # Follow the detector's RESOLVED device: wait (bounded) for it to
+            # have one, or the sessions follow "unknown" onto the CPU.
+            await accel.settle(self._detector)
+            self._built_for = accel.detector_device(self._detector)
             await asyncio.to_thread(self._build_blocking)
             self._failed = False
-            log.info("plate OCR ready (cct_xs_v2_global)")
+            log.info("plate OCR ready (cct_xs_v2_global, %s)", self.device)
             return True
         except Exception:
             if not self._failed:

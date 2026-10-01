@@ -825,6 +825,13 @@ class FacePass:
             if cfg.get('face_on_vehicles') else FACE_LABELS
         )
 
+        if enabled and self._recognizer.ready and getattr(
+                self._recognizer, "stale_device", lambda: False)():
+            # Built while the detector was elsewhere (usually: still warming
+            # up at boot). Rebuild once onto where it is now — the embeddings
+            # are identical on either runtime, so the gallery stays valid.
+            log.info("face models: the detector has moved — rebuilding to follow it")
+            self._recognizer.close()
         if enabled and not self._recognizer.ready:
             # load() downloads on first use and never raises; a box with no
             # outbound network degrades to ready:false and keeps detecting.
