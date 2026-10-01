@@ -1510,7 +1510,7 @@ export interface DetectorStatus {
 export interface TranscodeStatus {
   /** ffmpeg + ffprobe both present. False means nothing can transcode at all. */
   enabled: boolean;
-  /** `h264_nvenc` | `h264_vaapi` | `libx264`, or null when unavailable. */
+  /** `h264_nvenc` | `h264_nvenc_cpudec` (NVENC, CPU decode) | `h264_vaapi` | `libx264`, or null. */
   encoder: string | null;
   encoder_label: string;
   /** The headline: is a GPU encoding, or is this the CPU? */
@@ -1524,6 +1524,9 @@ export interface TranscodeStatus {
   nvidia: boolean;
   /** Encoders that failed at RUNTIME and were permanently demoted. */
   failed: string[];
+  /** Why each of `failed` failed, in words — a known cause and its fix when
+   *  the error was recognised, else ffmpeg's last line. */
+  failure_reasons?: Record<string, string>;
   /** Completed transcodes per encoder — the evidence behind `hardware`. */
   runs: Record<string, { ok: number; failed: number }>;
 }

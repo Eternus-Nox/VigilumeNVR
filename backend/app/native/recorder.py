@@ -614,6 +614,9 @@ class Recorder:
         # around the ffmpeg run, never across the post-event delay, so queued
         # clips keep their own timing.
         self._clip_sem = asyncio.Semaphore(CLIP_CONCURRENCY)
+        # Last ffmpeg stderr per OUTPUT path, for a failed clip transcode to
+        # explain itself (see _run_ffmpeg). Popped by the reader.
+        self._ffmpeg_errors: dict[str, str] = {}
         # Cached hour-dir sizes for the per-minute space pass (see HourDirSizes).
         self._hour_sizes = HourDirSizes()
         # Newest-content mtimes for the same dirs. Separate from _hour_sizes
@@ -1613,16 +1616,22 @@ class Recorder:
             "transcode: %s clip event=%s cam=%s (%s->h264)",
             encoder, frigate_id, camera, plan.video_codec or "?",
         )
+        self._ffmpeg_errors.pop(str(part_path), None)
         returncode = await self._run_ffmpeg(transcode_args(encoder))
-        if returncode != 0 and encoder in HW_ENCODERS:
+        while returncode != 0 and encoder in HW_ENCODERS:
             # Runtime hardware-encoder failure → exclude it globally and retry on
-            # whatever the transcoder re-selects (the next GPU encoder if there
-            # is one, otherwise libx264).
-            retry = self._transcode.mark_hw_failed(encoder)
+            # whatever the transcoder re-selects (NVENC with CPU decoding, the
+            # next GPU encoder, and finally libx264). Bounded: every pass
+            # excludes one more encoder.
+            retry = self._transcode.mark_hw_failed(
+                encoder, self._ffmpeg_errors.pop(str(part_path), "")
+            )
             log.info(
                 "transcode: %s clip event=%s cam=%s (%s retry)",
                 retry, frigate_id, camera, encoder,
             )
+            _unlink_quiet(part_path)
+            encoder = retry
             returncode = await self._run_ffmpeg(transcode_args(retry))
         if returncode != 0:
             # Both encoders failed → fall back to a stream-copy so a clip still
@@ -1664,7 +1673,13 @@ class Recorder:
             await self._terminate(proc)
             raise
         if proc.returncode != 0 and stderr:
-            log.warning("clip ffmpeg stderr: %s", stderr.decode("utf-8", "replace").strip()[-500:])
+            text = stderr.decode("utf-8", "replace")
+            log.warning("clip ffmpeg stderr: %s", text.strip()[-500:])
+            # Kept by output path (unique per clip), so the hardware-encoder
+            # fallback can say WHY the encoder failed.
+            if len(self._ffmpeg_errors) > 32:  # stream-copy failures are never read
+                self._ffmpeg_errors.clear()
+            self._ffmpeg_errors[str(args[-1])] = text
         return proc.returncode
 
     # ---------- stats ----------

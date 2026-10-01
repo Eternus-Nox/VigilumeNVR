@@ -53,15 +53,24 @@ log = logging.getLogger(__name__)
 # node passed into the container + the Mesa VA driver in the image); libx264 is
 # the universal CPU fallback.
 NVENC = "h264_nvenc"
+# NVENC encoding with the DECODE on the CPU. Not an ffmpeg encoder name — the
+# argv still says h264_nvenc, just without -hwaccel cuda. The step between the
+# full GPU path and libx264: when NVENC fails it is often the GPU's DECODER
+# that refused (an HEVC profile or size NVDEC does not take, no decoder
+# surfaces), and encoding — the expensive half — still works on the GPU.
+NVENC_CPU_DECODE = "h264_nvenc_cpudec"
 VAAPI = "h264_vaapi"
 LIBX264 = "libx264"
+
+# The ffmpeg -c:v value for each of our encoder ids.
+_FFMPEG_CODEC = {NVENC_CPU_DECODE: NVENC}
 
 # Encoders that run on fixed-function video silicon. These share one property
 # the fallback logic cares about: they can be present in the ffmpeg build and
 # still fail at RUNTIME (no driver, no permission on the node, a busy or
 # unsupported engine), so a failure re-selects (next GPU encoder, else libx264)
 # instead of erroring the transcode.
-HW_ENCODERS = frozenset({NVENC, VAAPI})
+HW_ENCODERS = frozenset({NVENC, NVENC_CPU_DECODE, VAAPI})
 
 # Where a VAAPI-capable GPU exposes itself. renderD128 is the first render node
 # on any Linux box; a second GPU lands on renderD129. Probed in order, and
@@ -89,6 +98,7 @@ _VAAPI_VIDEO_OPTS = ("-rc_mode", "CQP", "-qp", "23")
 _LIBX264_VIDEO_OPTS = ("-preset", "veryfast", "-crf", "23")
 _VIDEO_OPTS = {
     NVENC: _NVENC_VIDEO_OPTS,
+    NVENC_CPU_DECODE: _NVENC_VIDEO_OPTS,
     VAAPI: _VAAPI_VIDEO_OPTS,
     LIBX264: _LIBX264_VIDEO_OPTS,
 }
@@ -96,6 +106,7 @@ _VIDEO_OPTS = {
 # Human-readable encoder names for the one-line selection log.
 _ENCODER_LABEL = {
     NVENC: "GPU NVENC",
+    NVENC_CPU_DECODE: "GPU NVENC (CPU decode)",
     VAAPI: "GPU VAAPI",
     LIBX264: "CPU libx264",
 }
@@ -234,6 +245,54 @@ def find_nvidia_device(exists: Optional[Callable[[str], bool]] = None) -> bool:
     return any(check(node) for node in NVIDIA_DEVICE_CANDIDATES)
 
 
+#: Known hardware-encoder failures, matched against ffmpeg's stderr, and what
+#: to do about each. Order matters: the first match wins.
+_HW_FAILURE_HINTS = (
+    (("libnvidia-encode", "cannot load libcuda", "libnvcuvid", "cannot load nvcuda"),
+     "the NVIDIA video libraries are not in the container — "
+     "NVIDIA_DRIVER_CAPABILITIES must include 'video' (compute,utility,video)"),
+    (("required nvenc api version", "driver does not support the required"),
+     "the host NVIDIA driver is older than this ffmpeg needs — update the driver"),
+    (("no capable devices found", "no nvenc capable devices"),
+     "this GPU has no NVENC video encoder"),
+    (("10 bit encode not supported", "doesn't support required nvenc features"),
+     "the camera sends 10-bit video, which the GPU's H.264 encoder cannot take — "
+     "set the camera to 8-bit H.265 or to H.264"),
+    (("openencodesessionex failed", "incompatible client key"),
+     "the GPU refused a new encode session — it may be busy with others "
+     "(Plex, Jellyfin, another NVR) or at its session limit"),
+    (("hwaccel initialisation returned error", "failed setup for format cuda",
+      "no decoder surfaces", "cuvid", "nvdec"),
+     "the GPU could not DECODE this camera's video; encoding continues on the "
+     "GPU with CPU decoding"),
+    (("no such file or directory", "permission denied") ,
+     "the GPU device is not accessible inside the container"),
+)
+
+
+def hw_failure_reason(stderr: str) -> str:
+    """One line on why a hardware encode failed: a known cause and its fix
+    when the error is recognised, else the last line ffmpeg printed."""
+    text = (stderr or "").strip()
+    low = text.lower()
+    for needles, hint in _HW_FAILURE_HINTS:
+        if any(n in low for n in needles):
+            return hint
+    last = text.splitlines()[-1].strip() if text else ""
+    return last[:300] or "no error output (ffmpeg exited non-zero)"
+
+
+def _decode_side(stderr: str) -> bool:
+    """Could CPU decoding get around this failure? True when the error points
+    at the GPU's decoder, and when it is not recognised at all (worth one
+    try); False for causes that would fail NVENC either way."""
+    low = (stderr or "").lower()
+    for needles, hint in _HW_FAILURE_HINTS:
+        if any(n in low for n in needles):
+            return "DECODE" in hint
+    return True
+
+
 def select_encoder(
     encoders_listing: str,
     vaapi_device: Optional[str] = None,
@@ -242,7 +301,7 @@ def select_encoder(
 ) -> str:
     """Pick the best available H.264 encoder from an ``ffmpeg -encoders`` dump.
 
-    Order is NVENC → VAAPI → libx264. NVENC first because a box with a discrete
+    Order is NVENC → NVENC with CPU decode → VAAPI → libx264. NVENC first because a box with a discrete
     NVIDIA card is the one configuration where the dGPU beats an iGPU outright;
     VAAPI next because fixed-function AMD/Intel encoding still costs a fraction
     of libx264; libx264 last because it always works.
@@ -253,8 +312,11 @@ def select_encoder(
     was wrong still walks down to the next real option instead of giving up on
     hardware entirely.
     """
-    if NVENC not in exclude and nvidia_present and "h264_nvenc" in encoders_listing:
+    nvenc_ok = nvidia_present and "h264_nvenc" in encoders_listing
+    if NVENC not in exclude and nvenc_ok:
         return NVENC
+    if NVENC_CPU_DECODE not in exclude and nvenc_ok:
+        return NVENC_CPU_DECODE
     if VAAPI not in exclude and vaapi_device and "h264_vaapi" in encoders_listing:
         return VAAPI
     return LIBX264
@@ -321,7 +383,7 @@ def build_transcode_args(
         # they are not — so an HEVC main transcodes fully on-GPU while an exotic
         # source still encodes on the GPU instead of failing outright.
         args += ["-vf", "format=nv12|vaapi,hwupload"]
-    args += ["-c:v", encoder]
+    args += ["-c:v", _FFMPEG_CODEC.get(encoder, encoder)]
     args += list(_VIDEO_OPTS.get(encoder, _LIBX264_VIDEO_OPTS))
     if (audio_codec or "").lower() in _AAC_AUDIO:
         args += ["-c:a", "copy"]
@@ -390,6 +452,8 @@ class Transcoder:
         # The ``ffmpeg -encoders`` dump, kept so a runtime failure can re-select
         # the NEXT candidate without re-probing.
         self._encoders_listing: Optional[str] = None
+        # Why each failed hardware encoder failed (hw_failure_reason), for status.
+        self._failure_reasons: dict[str, str] = {}
         # Hardware encoders that failed at runtime; never retried this process.
         self._failed_encoders: set[str] = set()
         self._inflight: dict[str, asyncio.Future] = {}
@@ -524,7 +588,7 @@ class Transcoder:
             )
         return enc
 
-    def mark_hw_failed(self, encoder: str = NVENC) -> str:
+    def mark_hw_failed(self, encoder: str = NVENC, stderr: str = "") -> str:
         """Runtime hardware-encoder init/encode failure → never use ``encoder``
         again this process. Returns the encoder to use INSTEAD, so the caller
         can retry the same job without re-deriving it.
@@ -540,6 +604,14 @@ class Transcoder:
         """
         first_time = encoder not in self._failed_encoders
         self._failed_encoders.add(encoder)
+        reason = hw_failure_reason(stderr)
+        if encoder == NVENC and not _decode_side(stderr):
+            # A missing library, an old driver, no encoder on the card or no
+            # free session fails the CPU-decode variant exactly the same way;
+            # skip it rather than spend a second failed run finding out.
+            self._failed_encoders.add(NVENC_CPU_DECODE)
+        if first_time or stderr:
+            self._failure_reasons[encoder] = reason
         nxt = select_encoder(
             self._encoders_listing or "",
             self._vaapi_device,
@@ -549,8 +621,9 @@ class Transcoder:
         self._encoder = nxt
         if first_time:
             log.warning(
-                "transcode: %s failed at runtime — using %s for all further "
-                "transcodes (logged once per encoder)", encoder, nxt,
+                "transcode: %s failed at runtime (%s) — using %s for all further "
+                "transcodes (logged once per encoder; restart the backend after "
+                "fixing the cause to try it again)", encoder, reason, nxt,
             )
         return nxt
 
@@ -665,15 +738,15 @@ class Transcoder:
         self._note_run(encoder, rc == 0)
         if rc == 0:
             return True
-        if encoder in HW_ENCODERS:
-            # Retry on whatever selection survives the failure — the next
-            # hardware encoder on a two-GPU box, otherwise libx264. One retry
-            # per call keeps a failing segment bounded; a second bad encoder is
-            # excluded by the time the next segment is served.
-            retry = self.mark_hw_failed(encoder)
+        while encoder in HW_ENCODERS:
+            # Retry on whatever selection survives the failure — NVENC with CPU
+            # decoding, the next hardware encoder on a two-GPU box, and finally
+            # libx264. Bounded: every pass excludes one more encoder.
+            retry = self.mark_hw_failed(encoder, err.decode("utf-8", "replace"))
             log.info(
                 "transcode: %s %s camera=%s (%s retry)", retry, what, camera, encoder,
             )
+            encoder = retry
             rc, _, err = await self._run(args_for(retry), timeout=timeout)
             self._note_run(retry, rc == 0)
             if rc == 0:
@@ -717,6 +790,7 @@ class Transcoder:
                 "vaapi_device": self._vaapi_device,
                 "nvidia": self._nvidia_present,
                 "failed": [],
+                "failure_reasons": {},
                 "runs": {},
             }
         enc = await self.encoder()
@@ -731,6 +805,8 @@ class Transcoder:
             "vaapi_device": self._vaapi_device,
             "nvidia": self._nvidia_present,
             "failed": sorted(self._failed_encoders),
+            # Why each of those failed, in words (hw_failure_reason).
+            "failure_reasons": dict(self._failure_reasons),
             "runs": {k: {"ok": v[0], "failed": v[1]} for k, v in self._runs.items()},
         }
 

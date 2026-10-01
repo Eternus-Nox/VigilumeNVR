@@ -194,6 +194,9 @@ docker compose logs -f backend | grep 'transcode:'
 - `transcode: selected H.264 encoder h264_vaapi (GPU VAAPI on /dev/dri/renderD128)` — iGPU path active
 - `transcode: selected H.264 encoder libx264 (CPU libx264)` — CPU path (no GPU found, or none passed through)
 - `transcode: h264_vaapi failed at runtime — using libx264 …` — the GPU was found but could not encode (missing driver, or no permission on the node)
+- `transcode: h264_nvenc failed at runtime (<reason>) — using …` — NVIDIA was found but the encode failed; the reason in brackets names the cause and its fix (e.g. `NVIDIA_DRIVER_CAPABILITIES` missing `video`, a host driver too old for the image's ffmpeg, a busy or session-limited GPU). The same reason is shown under **Settings → System → Video encoding**. A failed encoder is not retried until the backend restarts.
+
+**NVIDIA fallback order.** NVENC normally decodes on the GPU too (`-hwaccel cuda`). When the failure is on the decode side — or unrecognised — the next step is `h264_nvenc_cpudec`: the same NVENC encoder fed by CPU decoding, so the expensive half stays on the GPU. Only if that fails as well does it drop to VAAPI (if present) and then `libx264`. Failures that would sink NVENC either way (missing library, old driver, no encoder, no free session) skip the CPU-decode step.
 
 To double-check the hardware is really doing the work while you scrub an HEVC
 camera's timeline: `nvidia-smi dmon` on NVIDIA (the **enc** column ticks up), or

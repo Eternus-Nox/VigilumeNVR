@@ -75,10 +75,12 @@ from app.native.transcode import (  # noqa: E402
     build_transcode_args,
     find_nvidia_device,
     find_vaapi_device,
+    hw_failure_reason,
     is_browser_playable,
     needs_transcode,
     parse_probe_output,
     select_encoder,
+    NVENC_CPU_DECODE,
 )
 
 PASS = 0
@@ -224,11 +226,35 @@ def arg_builder_checks() -> None:
 
     # -- exclude: a runtime failure walks to the next real candidate --
     check(select_encoder(both_listing, "/dev/dri/renderD128", True,
-                         frozenset({NVENC})) == VAAPI,
-          "select_encoder: excluding a failed NVENC falls through to VAAPI, not CPU")
+                         frozenset({NVENC})) == NVENC_CPU_DECODE,
+          "select_encoder: a failed NVENC first tries NVENC with CPU decoding")
     check(select_encoder(both_listing, "/dev/dri/renderD128", True,
-                         frozenset({NVENC, VAAPI})) == LIBX264,
-          "select_encoder: both hardware encoders excluded -> libx264")
+                         frozenset({NVENC, NVENC_CPU_DECODE})) == VAAPI,
+          "select_encoder: both NVENC paths excluded falls through to VAAPI, not CPU")
+    check(select_encoder(both_listing, "/dev/dri/renderD128", True,
+                         frozenset({NVENC, NVENC_CPU_DECODE, VAAPI})) == LIBX264,
+          "select_encoder: every hardware encoder excluded -> libx264")
+    check(select_encoder(both_listing, "/dev/dri/renderD128", False) == VAAPI,
+          "select_encoder: no NVIDIA node -> the CPU-decode NVENC step is skipped too")
+
+    # -- NVENC with CPU decode: same encoder, no GPU decode --
+    cpudec = build_transcode_args("ffmpeg", NVENC_CPU_DECODE, container="mp4",
+                                  output="/tmp/o.mp4", input_path="/tmp/i.ts")
+    check("-hwaccel" not in cpudec and cpudec[cpudec.index("-c:v") + 1] == "h264_nvenc",
+          "NVENC with CPU decode: argv encodes with h264_nvenc and has no -hwaccel")
+
+    # -- why it failed, in words --
+    check("NVIDIA_DRIVER_CAPABILITIES" in hw_failure_reason(
+              "[h264_nvenc @ 0x1] Cannot load libnvidia-encode.so.1"),
+          "a missing NVENC library names the capability setting to fix")
+    check("driver" in hw_failure_reason(
+              "Driver does not support the required nvenc API version. Required: 12.1 Found: 12.0"),
+          "an NVENC API mismatch says to update the driver")
+    check("DECODE" in hw_failure_reason(
+              "Device creation failed\nhwaccel initialisation returned error"),
+          "a CUDA decode failure is reported as a decode problem")
+    check(hw_failure_reason("line one\nSomething odd happened") == "Something odd happened",
+          "an unrecognised error reports ffmpeg's last line")
 
     # -- NVIDIA node discovery --
     check(find_nvidia_device(exists=lambda p: p == "/dev/nvidiactl") is True,
@@ -381,14 +407,28 @@ async def _encoder_cases() -> None:
     t2._run = run_x264
     check(await t2.encoder() == LIBX264, "encoder() -> libx264 when nvenc absent")
 
-    # runtime downgrade: NVENC selected, then mark_nvenc_failed sticks libx264.
+    # runtime downgrade: NVENC fails -> NVENC with CPU decode -> libx264.
     t3 = make_transcoder("enc-downgrade")
     t3._run = run_nvenc
     check(await t3.encoder() == NVENC, "encoder() starts on NVENC")
-    t3.mark_nvenc_failed()
-    check(await t3.encoder() == LIBX264, "mark_nvenc_failed() -> libx264 thereafter")
+    t3.mark_hw_failed(NVENC, "hwaccel initialisation returned error")
+    check(await t3.encoder() == NVENC_CPU_DECODE,
+          "a GPU-decode failure keeps NVENC, decoding on the CPU")
+    t3.mark_hw_failed(NVENC_CPU_DECODE, "something else")
+    check(await t3.encoder() == LIBX264, "...and if that fails too -> libx264 thereafter")
     t3.mark_nvenc_failed()  # idempotent, no crash
     check(await t3.encoder() == LIBX264, "mark_nvenc_failed() is idempotent")
+
+    # a failure that would fail NVENC either way skips the CPU-decode step
+    t8 = make_transcoder("enc-nolib")
+    t8._run = run_nvenc
+    await t8.encoder()
+    t8.mark_hw_failed(NVENC, "[h264_nvenc @ 0x1] Cannot load libnvidia-encode.so.1")
+    check(await t8.encoder() == LIBX264,
+          "a missing NVENC library goes straight to libx264 (CPU decode cannot help)")
+    st = await t8.status()
+    check("NVIDIA_DRIVER_CAPABILITIES" in st["failure_reasons"].get(NVENC, ""),
+          "status() says why NVENC failed, for the System tab")
 
     # -- VAAPI: selected only with a render node, and downgrades the same way --
     async def run_vaapi(args, timeout=None):
@@ -645,6 +685,52 @@ async def _clip_branch_cases() -> None:
           "nvenc clip failure -> automatic libx264 retry -> clip lands")
     check(NVENC in tc._failed_encoders,
           "runtime nvenc failure is recorded (excluded for the rest of the process)")
+
+    # -- on a real NVIDIA box the chain is NVENC -> NVENC with CPU decode ->
+    #    libx264, and a clip lands from whichever works first --
+    tcn = make_transcoder("clipbranch-chain")
+    tcn._encoders_listing = "V..... h264_nvenc NVIDIA NVENC\nV..... libx264 x264"
+    rec._transcode = tcn
+    tcn.probe = probe_hevc
+    tcn.encoder = enc_nvenc
+    chain: list[tuple[str, bool]] = []
+
+    def chain_run(fail_cpudec: bool):
+        async def run(args):
+            vcodec = args[args.index("-c:v") + 1]
+            gpu_decode = "-hwaccel" in args
+            chain.append((vcodec, gpu_decode))
+            if vcodec == NVENC and (gpu_decode or fail_cpudec):
+                rec._ffmpeg_errors[str(args[-1])] = (
+                    "hwaccel initialisation returned error" if gpu_decode else "boom")
+                return 1
+            out = Path(args[-1])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"MP4" * 8)
+            return 0
+        return run
+
+    rec._run_ffmpeg = chain_run(fail_cpudec=False)
+    eid_c = await db.insert_event("native.cpudec", "front", "car", 1, 0.7, start_time, end_time=end_time)
+    out_c = await rec.extract_clip("front", "native.cpudec", start_time, end_time)
+    check(out_c == rec.clip_path(eid_c) and chain == [(NVENC, True), (NVENC, False)],
+          "a GPU-decode failure retries NVENC with CPU decoding, and the clip lands "
+          "still encoded on the GPU")
+    check("DECODE" in tcn._failure_reasons.get(NVENC, ""),
+          "the reason NVENC failed is recorded from the clip's own ffmpeg error")
+
+    tcn2 = make_transcoder("clipbranch-chain2")
+    tcn2._encoders_listing = tcn._encoders_listing
+    rec._transcode = tcn2
+    tcn2.probe = probe_hevc
+    tcn2.encoder = enc_nvenc
+    chain.clear()
+    rec._run_ffmpeg = chain_run(fail_cpudec=True)
+    eid_c2 = await db.insert_event("native.chain", "front", "car", 1, 0.7, start_time, end_time=end_time)
+    out_c2 = await rec.extract_clip("front", "native.chain", start_time, end_time)
+    check(out_c2 == rec.clip_path(eid_c2)
+          and chain == [(NVENC, True), (NVENC, False), (LIBX264, False)],
+          "if that fails too it carries on to libx264, not straight to a stream copy")
 
     # -- the same retry path for VAAPI (AMD/Intel iGPU), and the render node
     #    must reach the clip argv or ffmpeg would use the wrong/no GPU --

@@ -319,6 +319,14 @@ export default function SystemTab({ settings, onDraftChange, pending }: TabProps
                     </span>
                   ))}
                 </div>
+                {detector.transcode.failed.map((f) =>
+                  detector.transcode?.failure_reasons?.[f] ? (
+                    <p key={f} className="muted small">
+                      <code>{f}</code>: {detector.transcode.failure_reasons[f]}. Restart the
+                      backend after fixing it to try the GPU again.
+                    </p>
+                  ) : null,
+                )}
                 {!detector.transcode.hardware &&
                   detector.transcode.enabled &&
                   !detector.transcode.vaapi_device &&
