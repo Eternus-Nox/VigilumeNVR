@@ -187,6 +187,22 @@ the one the back-off was written to prevent: a main that never comes up and
 never reports `.failed` would be re-dialled every few seconds for as long as
 the view stayed open.
 
+**A frozen picture is recovered, not left up.** Once a WHEP view was playing,
+nothing noticed frames stopping: go2rtc repacks the camera's stream and cannot
+answer a keyframe request, so a lost packet, a camera RTSP drop or a restarted
+source left the peer connection *connected* with no media, showing its last
+frame indefinitely. And the "unmuted pins high" rule (the substream has no
+audio) meant the fullscreen view — unmuted from the moment it opens — could
+never leave a frozen main. Now every stats sample (2 s) checks
+`framesDecoded`: no new frame for `stallWindow` (5 s) while playing triggers a
+make-before-break recovery — the high rung drops to the substream even while
+unmuted, any other view reconnects its own rung, and a recovery candidate that
+never paints ends in a fresh attach (which falls back to HLS like any other).
+A main that freezes within `stallRetireWithin` (30 s) of being climbed to is
+not climbed again on that attach (the "SD (compat)" badge shows; its HD button
+retries). Cameras send frames at a fixed rate whatever the scene, so a still
+scene never trips this.
+
 When a climb does prove hopeless the badge appears, and its **HD** button
 re-dials main directly, falling through to HLS if WebRTC still cannot carry it
 — which is what rescues an HEVC main, since AVPlayer decodes it and a WebRTC

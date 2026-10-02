@@ -55,7 +55,7 @@ final class LiveController: ObservableObject {
             // Pinning here also makes the whole switcher safe: it only ever runs
             // while muted, so two live players can never both be fighting over
             // the reference-counted audio session.
-            if !isMuted, adaptEnabled, rung == .low, mode == .whep {
+            if !isMuted, adaptEnabled, rung == .low, mode == .whep, !highRungRetired {
                 switchTo(.high, force: true)
             }
         }
@@ -172,6 +172,28 @@ final class LiveController: ObservableObject {
     /// off, just half a minute later than a refusal does.
     private static let freeClimbTimeouts = 2
     private static let promoteWindowMax: TimeInterval = 120
+
+    // MARK: Frozen-picture watchdog
+
+    /// No newly decoded frame for this long while "playing" means the picture
+    /// on screen is frozen. Nothing else catches that: go2rtc repacks the
+    /// camera's stream and cannot answer a keyframe request, so a lost packet,
+    /// a camera RTSP drop or a source go2rtc restarted leaves the peer
+    /// connection CONNECTED with no media — the view showed the last frame for
+    /// as long as it stayed open. Cameras send frames at a fixed rate whatever
+    /// the scene does, so a still scene never trips this.
+    private static let stallWindow: TimeInterval = 5
+    /// A full-res rung that freezes this soon after being switched to is
+    /// treated as unable to carry live view on this attach (an HEVC main whose
+    /// first keyframe decodes and nothing after it, say), rather than being
+    /// re-climbed into the same freeze every few minutes.
+    private static let stallRetireWithin: TimeInterval = 30
+    /// Frames decoded as of `progressAt` — the last time the count moved.
+    private var progressFrames = 0
+    private var progressAt: TimeInterval?
+    /// The full-res rung froze right after a climb: no further climbs until a
+    /// fresh attach or the HD retry button.
+    private var highRungRetired = false
 
     /// Dedupe key so repeated `play(...)` calls (SwiftUI onChange storms) don't
     /// restart a live session.
@@ -329,6 +351,8 @@ final class LiveController: ObservableObject {
         hasDemoted = false
         climbTimeouts = 0
         highRungUnavailable = false
+        highRungRetired = false
+        progressAt = nil
         lastSwitchAt = ProcessInfo.processInfo.systemUptime
     }
 
@@ -347,7 +371,11 @@ final class LiveController: ObservableObject {
     /// demote, a marginal link settles on the low rung instead of oscillating.
     private func evaluateQuality(_ sample: LiveQualitySample) {
         defer { lastSample = sample }
-        guard adaptEnabled, mode == .whep, state == .playing, standby == nil else { return }
+        guard mode == .whep, state == .playing, standby == nil else { return }
+        // Before anything about quality, and for EVERY live view (grid tiles
+        // have no second rung and skip the rest): is the picture moving at all?
+        if detectStall(sample) { return }
+        guard adaptEnabled else { return }
         guard let previous = lastSample, sample.at > previous.at else { return }
 
         let now = sample.at
@@ -400,7 +428,7 @@ final class LiveController: ObservableObject {
             // view, which is unmuted from the moment it opens — so one unlucky
             // promotion left that view on the 640x480 substream, full-screen,
             // for as long as it stayed open.
-            guard rung == .low, whepHighURL != nil else { return }
+            guard rung == .low, whepHighURL != nil, !highRungRetired else { return }
             // The rate limiter exists to stop FLAPPING, which can only happen
             // once something has flapped. Before the first demote there is
             // nothing to damp, so the opening climb isn't throttled by it.
@@ -418,8 +446,13 @@ final class LiveController: ObservableObject {
     ///
     /// - Parameter force: skip the rate limit (used by unmute, which is a direct
     ///   user action rather than an inference about the network).
-    private func switchTo(_ target: Rung, force: Bool = false) {
-        guard mode == .whep, target != rung, standby == nil, let url = url(for: target) else { return }
+    /// - Parameter recovering: the view on screen is FROZEN (`detectStall`).
+    ///   The target may then be the current rung (a reconnect), and a candidate
+    ///   that never paints ends in a full re-attach instead of leaving the
+    ///   frozen picture up.
+    private func switchTo(_ target: Rung, force: Bool = false, recovering: Bool = false) {
+        guard mode == .whep, target != rung || recovering, standby == nil,
+              let url = url(for: target) else { return }
         if !force, ProcessInfo.processInfo.systemUptime - lastSwitchAt < Self.minSwitchInterval { return }
 
         let candidate = WHEPPlayer(allowsAudio: allowsAudio)
@@ -450,11 +483,13 @@ final class LiveController: ObservableObject {
                 // the same evidence, and charging them alike is what pinned a
                 // healthy link to the substream.
                 if candidate.state == .failed {
-                    self.abandonSwitch(candidate, target: target, refused: true)
+                    self.abandonSwitch(candidate, target: target, refused: true, charge: !recovering)
+                    if recovering { self.reattachAfterStall(on: target) }
                     return
                 }
                 if ProcessInfo.processInfo.systemUptime > deadline {
-                    self.abandonSwitch(candidate, target: target, refused: false)
+                    self.abandonSwitch(candidate, target: target, refused: false, charge: !recovering)
+                    if recovering { self.reattachAfterStall(on: target) }
                     return
                 }
             }
@@ -484,6 +519,7 @@ final class LiveController: ObservableObject {
         degradedSince = nil
         cleanSince = nil
         lastSample = nil
+        progressAt = nil
         retired.stop()
     }
 
@@ -492,7 +528,9 @@ final class LiveController: ObservableObject {
     /// - Parameter refused: the candidate reported `.failed` — the rung is
     ///   genuinely broken. `false` means it simply ran out of window, which is
     ///   much weaker evidence and is charged much less.
-    private func abandonSwitch(_ candidate: WHEPPlayer, target: Rung, refused: Bool) {
+    /// - Parameter charge: false for a stall recovery, which is not a climb and
+    ///   says nothing about whether the high rung can come up.
+    private func abandonSwitch(_ candidate: WHEPPlayer, target: Rung, refused: Bool, charge: Bool = true) {
         guard standby === candidate else { return }
         standby = nil
         switchTask = nil
@@ -511,7 +549,7 @@ final class LiveController: ObservableObject {
         // hopeless rung back off on its own while a merely unlucky one still
         // recovers. A failed DEMOTE is not evidence about climbing, so it is
         // charged nothing beyond the rate limit above.
-        guard target == .high else { return }
+        guard target == .high, charge else { return }
         highRungUnavailable = true
         // A TIMEOUT is not a refusal, but it is not free either.
         //
@@ -538,6 +576,55 @@ final class LiveController: ObservableObject {
             ? min(promoteWindow * 2, Self.promoteWindowMax)
             : Self.cautiousPromoteWindow
         hasDemoted = true
+    }
+
+    /// Fold one sample into the frozen-picture check. Returns true when the
+    /// picture was frozen and a recovery has been started.
+    private func detectStall(_ sample: LiveQualitySample) -> Bool {
+        guard let since = progressAt, sample.framesDecoded == progressFrames else {
+            progressFrames = sample.framesDecoded
+            progressAt = sample.at
+            return false
+        }
+        guard sample.at - since >= Self.stallWindow else { return false }
+        progressAt = nil  // re-armed by the next sample
+        recoverFromStall()
+        return true
+    }
+
+    /// The picture is frozen. Make-before-break as always — the frozen frame
+    /// stays up until something that actually moves replaces it.
+    ///
+    /// On the full-res rung, drop to the substream EVEN WHILE UNMUTED. The
+    /// "unmuted pins high" rule exists to keep sound on, and a frozen stream
+    /// is not delivering sound either; the fullscreen view is unmuted from the
+    /// moment it opens, so that rule left a frozen main on screen for good.
+    /// Anywhere else, reconnect the same rung.
+    private func recoverFromStall() {
+        let now = ProcessInfo.processInfo.systemUptime
+        if adaptEnabled, rung == .high, whepLowURL != nil {
+            if now - lastSwitchAt < Self.stallRetireWithin {
+                highRungRetired = true
+                highRungUnavailable = true
+            }
+            promoteWindow = hasDemoted
+                ? min(promoteWindow * 2, Self.promoteWindowMax)
+                : Self.cautiousPromoteWindow
+            hasDemoted = true
+            switchTo(.low, force: true, recovering: true)
+        } else {
+            switchTo(rung, force: true, recovering: true)
+        }
+    }
+
+    /// A stall recovery's candidate never painted either: tear down and attach
+    /// afresh on that rung — which, if WebRTC cannot produce a frame there at
+    /// all, falls back to HLS like any other attach.
+    private func reattachAfterStall(on target: Rung) {
+        guard mode == .whep, let url = url(for: target) else { return }
+        rung = target
+        whepURL = url
+        startWHEPAttempt()
     }
 
     private func cancelSwitch() {
@@ -628,6 +715,8 @@ final class LiveController: ObservableObject {
         mode = .whep
         state = .connecting
         whepTrack = nil
+        progressAt = nil
+        lastSample = nil
         whep.isMuted = isMuted
         whep.start(url: whepURL)
 
@@ -661,7 +750,7 @@ final class LiveController: ObservableObject {
             // frame, so a link that can't carry it simply never swaps (and the
             // stats path then demotes + turns cautious). Skipped once this link
             // has already failed at high — that's when evidence beats optimism.
-            if adaptEnabled, rung == .low, !hasDemoted, standby == nil {
+            if adaptEnabled, rung == .low, !hasDemoted, !highRungRetired, standby == nil {
                 switchTo(.high, force: true)
             }
         case .failed:
