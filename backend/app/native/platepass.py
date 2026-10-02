@@ -127,6 +127,12 @@ ZONE_HIRES_INTERVAL_S = 0.5
 #: tracked must not cost a snapshot a second for as long as it sits there.
 HIRES_MAX_PER_TRACK = 8
 
+#: ...and this many while recorded bursts are reading the vehicle: the first
+#: looks are the fastest answer there is, after which the bursts read the same
+#: moments ten times a second, and each snapshot is a camera request and a
+#: full-resolution JPEG decode.
+HIRES_WITH_BURSTS = 2
+
 #: A vote this confident from this many reads is settled — further looks would
 #: only confirm it, so they are not taken.
 SETTLED_CONFIDENCE = 0.9
@@ -436,6 +442,9 @@ class PlatePass:
         if frame_time - st.last_pass < (ZONE_PASS_INTERVAL_S if fast else PASS_INTERVAL_S):
             return
         st.last_pass = frame_time
+        if self._settled(st):
+            # The plate is read and agreed on: nothing more to look for.
+            return
         self._stats_for(camera).passes += 1
 
         # Before the detect-frame work, so the snapshot request is on the wire
@@ -548,7 +557,8 @@ class PlatePass:
         assert self._snapshots is not None
         if st.hires_task is not None and not st.hires_task.done():
             return
-        if st.hires_requests >= HIRES_MAX_PER_TRACK:
+        if st.hires_requests >= (
+                HIRES_WITH_BURSTS if self._bursts_cover(st) else HIRES_MAX_PER_TRACK):
             return
         if frame_time - st.hires_last < (ZONE_HIRES_INTERVAL_S if fast else HIRES_INTERVAL_S):
             return
@@ -836,8 +846,7 @@ class PlatePass:
         vehicle's last sighting. Never awaits."""
         if not self._replay_on() or st.concluded or len(st.path) < 2:
             return
-        v = st.vote  # the last tally — re-voting on every frame is not needed
-        if v is not None and v.reads >= SETTLED_READS and v.confidence >= SETTLED_CONFIDENCE:
+        if self._settled(st):
             return
         window = st.burst.due(now)
         if window is not None:
@@ -847,6 +856,16 @@ class PlatePass:
         st.burst.tail = asyncio.get_running_loop().call_later(
             TAIL_DELAY_S, self._tail_burst, camera, tracker_id
         )
+
+    @staticmethod
+    def _settled(st: _TrackState) -> bool:
+        """The last tally (re-voting on every frame is not needed) is settled."""
+        v = st.vote
+        return v is not None and v.reads >= SETTLED_READS and v.confidence >= SETTLED_CONFIDENCE
+
+    def _bursts_cover(self, st: _TrackState) -> bool:
+        """Recorded bursts are reading this vehicle (on, and a recording to read)."""
+        return self._replay_on() and not st.burst.unavailable
 
     def _tail_burst(self, camera: str, tracker_id: int) -> None:
         """The vehicle has not been seen for TAIL_DELAY_S: read the seconds
@@ -914,17 +933,20 @@ class PlatePass:
     async def _read_recorded(
         self, st: _TrackState, camera: str, tracker_id: int, frames: Sequence[Any],
     ) -> None:
-        """Read the plate in every recorded frame — only a plate on THIS
-        vehicle at that moment, so a parked neighbour's is never read."""
+        """Read the plate in the recorded frames — only a plate on THIS
+        vehicle at that moment, so a parked neighbour's is never read — until
+        the vote is settled."""
         stats = self._stats_for(camera)
         path = list(st.path)
         first_seen = path[0][0] if path else 0.0
-        found = await asyncio.to_thread(self._plates_in_frames_blocking, frames, path)
         region_name = self._plate_region()
-        for fr, strip, box, quality in found:
+        found = await asyncio.to_thread(
+            self._read_frames_blocking, frames, path, list(st.reads), region_name,
+        )
+        for fr, strip, box, quality, reads, rejected in found:
+            x1, y1, x2, y2 = box
             # Offer it too, so the stored candidate crop is the best look of
             # the whole visit rather than whatever the live path managed.
-            x1, y1, x2, y2 = box
             st.buffer.offer(
                 tracker_id=tracker_id, kind="plate", crop_bgr=strip,
                 box=box, frame_time=fr.time, quality=quality,
@@ -932,34 +954,38 @@ class PlatePass:
                            min(1.0, (fr.ox + x2) / fr.width), min(1.0, (fr.oy + y2) / fr.height)),
             )
             st.read_shots.add((fr.time, box))
-            for raw, confidence, char_conf in await asyncio.to_thread(
-                self._reader.read_all_blocking, strip
-            ):
-                text = regional_plate(raw, region_name)
-                if not text or len(text) < MIN_PLATE_LENGTH or confidence < OCR_MIN_CONFIDENCE:
-                    stats.rejected_reads += 1
-                    continue
+            stats.rejected_reads += rejected
+            for read in reads:
                 stats.reads += 1
                 stats.replay_reads += 1
                 if fr.time < first_seen:
                     stats.early_reads += 1
-                st.reads.append(PlateRead(
-                    text=text, confidence=confidence, quality=quality.total,
-                    char_conf=char_conf if len(char_conf) == len(text) else (),
-                ))
+                st.reads.append(read)
 
-    def _plates_in_frames_blocking(
-        self, frames: Sequence[Any], path: list,
-    ) -> list[tuple[Any, np.ndarray, tuple[int, int, int, int], Any]]:
-        """For each recorded frame: crop around where the vehicle was at that
-        moment, find its plate, score it. Runs in a thread.
+    def _read_frames_blocking(
+        self, frames: Sequence[Any], path: list, prior: list, region_name: str,
+    ) -> list:
+        """For recorded frames: crop around where the vehicle was at that
+        moment, find its plate, read it. Runs in a thread.
 
         Cropped PER FRAME, not once for the whole window: a car crossing the
         view spans most of the frame over a burst, and the plate detector
         letterboxes its input to 384 px — run on the whole span, the plate
-        would come out a few pixels tall."""
+        would come out a few pixels tall.
+
+        COARSE TO FINE, AND ONLY UNTIL IT IS SETTLED: every other frame first
+        (a tenth of a second apart, neighbouring frames are near-duplicates),
+        then the ones between — and it stops as soon as the reads so far,
+        with the ones before this burst, make a settled vote. Most of a burst
+        is usually not needed; detection and two OCR models per frame are
+        where its time goes once the decode is done."""
+        order = list(frames[::2]) + list(frames[1::2])
+        reads_so_far = list(prior)
         out = []
-        for fr in frames:
+        for fr in order:
+            v = vote_plate(reads_so_far) if len(reads_so_far) >= SETTLED_READS else None
+            if v is not None and v.reads >= SETTLED_READS and v.confidence >= SETTLED_CONFIDENCE:
+                break
             near = trackpath.box_near(path, fr.time, TIME_TOLERANCE_S)
             ch, cw = fr.crop.shape[:2]
             look = trackpath.to_pixels(trackpath.expand(near, BURST_LOOK_MARGIN),
@@ -981,7 +1007,18 @@ class PlatePass:
             quality = score_plate(strip)
             if quality.total < MIN_REPLAY_QUALITY:
                 continue
-            out.append((fr, strip, (lx1 + x1, ly1 + y1, lx1 + x2, ly1 + y2), quality))
+            reads, rejected = [], 0
+            for raw, confidence, char_conf in self._reader.read_all_blocking(strip):
+                text = regional_plate(raw, region_name)
+                if not text or len(text) < MIN_PLATE_LENGTH or confidence < OCR_MIN_CONFIDENCE:
+                    rejected += 1
+                    continue
+                reads.append(PlateRead(
+                    text=text, confidence=confidence, quality=quality.total,
+                    char_conf=char_conf if len(char_conf) == len(text) else (),
+                ))
+            reads_so_far += reads
+            out.append((fr, strip, (lx1 + x1, ly1 + y1, lx1 + x2, ly1 + y2), quality, reads, rejected))
         return out
 
     async def wait_idle(self) -> None:

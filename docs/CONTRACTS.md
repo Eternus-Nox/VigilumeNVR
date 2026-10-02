@@ -215,6 +215,22 @@ un-ready, or a `detect()` call hangs:
   respawns logs `ingest {cam}: no frames for {n}s despite {k} respawns — check the
   camera/go2rtc sub-stream`, so the real cause is visible (and surfaced in status, below).
 
+**Motion gate (`settings.detection.motion_gate`, ON by default).** Most of the
+day nothing on a home camera moves, and the detector used to run on every
+frame anyway. Each frame is reduced to a 160 px-wide blurred grey thumbnail
+(`motion_thumb`); if it differs from the one inference last ran on in fewer
+than 0.07% of pixels by more than 14 grey levels (`motion_between`), the
+detector is not run and the last observations are passed to the engine again
+at this frame's time — "nothing moved" is exactly what that means, so a parked
+car or someone standing still is still reported and nothing ends early. A real
+inference is forced at least every `MOTION_FORCE_S` (1 s) whatever the pixels
+say, a frame with movement runs at once, and nothing is skipped while the
+tracker still has an unconfirmed detection (it needs consecutive detect frames
+to make a track). With no settings store (tests) the gate is off.
+`/api/system/detector` `per_camera` rows carry `inferred` and `skipped_still`
+(Settings → System, "Skipped (still)").
+`tests/motion_gate_smoke.py`.
+
 **go2rtc RTSP transport (researched, not changed):** go2rtc's native RTSP client already
 uses **TCP** (interleaved RTP over the control connection — verified in `pkg/rtsp/conn.go`;
 there is no UDP client and no `#transport=tcp` keyword, `transport` selects WebSocket) and
@@ -1464,8 +1480,9 @@ the seconds BEFORE anything was detected.
 So (`native/burst.py`) both passes read the recording in bursts while the
 object is still in view: the first 1.0 s after a track is first seen, from
 **2.0 s before that first sighting** (`PRE_ROLL_S`) up to now minus
-`REC_LAG_S` (0.8 s — what is safely on disk); then again whenever 1.2 s more is
-available; then a final one 1.8 s after the last sighting, to 0.7 s past it.
+`REC_LAG_S` (0.8 s — what is safely on disk); then again whenever 2.0 s more is
+available (`BURST_EVERY_S`; every burst also decodes from the keyframe before
+its window, up to a GOP thrown away, so fewer longer bursts cost less); then a final one 1.8 s after the last sighting, to 0.7 s past it.
 Each burst decodes at 10 fps (`BURST_FPS`), cropped to where the object was
 (`native/trackpath.py`: interpolated between detect frames, extrapolated up to
 1 s before the first sighting along its motion), and every frame is read:
@@ -1480,17 +1497,17 @@ Each burst decodes at 10 fps (`BURST_FPS`), cropped to where the object was
   aligned and scored into the track's best-shot buffer; identification from the
   best shot as before.
 
-At most 6 bursts per track (plus the final), none once settled (plates: ≥3
-reads at ≥0.9; faces: identified from a shot of quality ≥0.7), one decode at a
-time across cameras, and a burst that finds no recording at all stops further
-ones for that track. A plate's after-the-track read now covers only what the
+At most 4 bursts per track (`MAX_BURSTS`, the final included), none once
+settled (plates: ≥3 reads at ≥0.9; faces: identified from a shot of quality
+≥0.7), one decode at a time across cameras, and a burst that finds no recording
+at all stops further ones for that track. A plate's after-the-track read now covers only what the
 bursts did not. The point is TIMING: the answer is in hand while the object is
 still in view, so the alert can carry the name or plate instead of it landing
 a minute after the car has gone. Status: `plates.cameras.{name}.early_reads`
 (reads from frames before the first sighting) and `face.bursts`
 `{bursts, frames, faces, early_faces}`, `face.bursts_enabled`.
-`tests/burst_smoke.py`: a plate legible only before the car is detected (34
-early reads) and a face turned to the camera only before the person is
+`tests/burst_smoke.py`: a plate legible only before the car is detected (read
+from frames before the first sighting) and a face turned to the camera only before the person is
 detected are both read, during the track.
 
 **Faces are still decided from the single best shot.** Combining the best three
@@ -1511,6 +1528,33 @@ land on the NEXT keyframe, so frames came back up to a GOP later than labelled
 frame within one source frame of its label, across a segment boundary too. A
 segment still being written decodes cleanly except its last frame, which a live
 burst drops.
+
+**Doing less of it** (measured by a 30 s bench of one camera with a car and a
+person in view, both passes bursting; CPU seconds of ffmpeg + of the process):
+
+| main stream | before | after |
+|---|---|---|
+| 4K H.265 | 6.05 decode + 7.62 in-process | 2.51 + 3.32 |
+| 1080p | 1.13 + 5.35 | 0.65 + 2.26 |
+
+* **Raw frames on a pipe.** A burst's frames come back as raw BGR on ffmpeg's
+  stdout instead of JPEG files written and re-read; crops are capped at
+  `MAX_CROP_SIDE` (1920 px) on the long side, which is still more than either
+  reader's input. A camera's frame size is probed once and cached
+  (`DIMS_TTL_S`, 600 s; re-probed when a decode comes back empty).
+* **One decode, many readers.** Requests go through one queue
+  (`RecordingReplay._work`). The worker waits `COALESCE_WAIT_S` (60 ms) and
+  folds every request for the same camera and fps whose window is within
+  `COALESCE_GAP_S` (1 s) of it — a plate burst and a face burst of the same
+  moment, say — into ONE decode of the union window, each with its own crop
+  (`crops_graph`: split → crop → scale → pad → vstack; the rows are split back
+  apart). `status()` reports `requests` and `shared`.
+* **Early exits.** A plate burst reads its frames coarse-to-fine (every other
+  frame, then the rest) and stops once the vote is settled (`SETTLED_READS` 3
+  at `SETTLED_CONFIDENCE` 0.9); a face burst stops at the first shot of quality
+  `BURST_ENOUGH_QUALITY` (0.85). A settled track skips the per-detect-frame
+  pass entirely, and while bursts cover a track, the full-resolution snapshot
+  looks are capped at `HIRES_WITH_BURSTS` (2) instead of 8 (plates) / 6 (faces).
 
 **The OpenCV face objects are locked.** `cv2.FaceDetectorYN` / `FaceRecognizerSF`
 are not thread-safe (OpenCV 5's graph engine asserts when two threads run one

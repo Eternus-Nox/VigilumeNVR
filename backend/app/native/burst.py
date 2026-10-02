@@ -46,7 +46,10 @@ REC_LAG_S = 0.8
 FIRST_BURST_AFTER_S = 1.0
 
 #: A further live burst once at least this much new recording is available.
-BURST_EVERY_S = 1.2
+#: Every burst also decodes from the keyframe before its window — up to a
+#: GOP (often 2 s on the main stream) of frames read and thrown away — so
+#: fewer, longer bursts cost less for the same coverage.
+BURST_EVERY_S = 2.0
 
 #: The final burst reads this far past the last sighting.
 POST_ROLL_S = 0.7
@@ -60,7 +63,7 @@ BURST_FPS = 10.0
 
 #: Bursts per track, the final one included. A parked car or someone standing
 #: at the door does not get decoded for as long as they stay.
-MAX_BURSTS = 6
+MAX_BURSTS = 4
 
 #: The longest window one burst decodes; anything beyond is left to the next.
 MAX_BURST_WINDOW_S = 4.0

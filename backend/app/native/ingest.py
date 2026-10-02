@@ -26,6 +26,7 @@ import shutil
 import time
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
+import cv2
 import numpy as np
 
 from ..config import effective_detect_mode
@@ -283,6 +284,53 @@ def _make_tracker(detect_fps: int) -> Any:
     )
 
 
+#: MOTION GATE (settings.detection.motion_gate). The detector used to run on
+#: every frame of every camera, all day — and most of the day nothing on a
+#: home camera moves. A frame that looks like the last one inference ran on
+#: (compared as a small grey thumbnail) is not run again: its observations are
+#: the last ones, re-used, which is what "nothing moved" means — a parked car
+#: or someone standing still is still reported, so nothing ends early. A real
+#: inference is forced at least every MOTION_FORCE_S whatever the pixels say,
+#: so a change too small or too slow for the comparison is late by at most that.
+#: Movement is never delayed: a frame that differs is run the moment it arrives,
+#: and nothing is skipped while the tracker is still confirming a new object.
+MOTION_THUMB_W = 160
+#: A thumbnail pixel counts as changed when its grey level moves this much...
+MOTION_PIXEL_DELTA = 14
+#: ...and the frame counts as changed when this fraction of them did (about a
+#: dozen pixels of a 160x109 thumbnail — a person far down the street walking
+#: one step).
+MOTION_MIN_FRACTION = 0.0007
+MOTION_FORCE_S = 1.0
+
+
+def motion_thumb(frame: np.ndarray) -> np.ndarray:
+    """The small, slightly blurred grey copy frames are compared by (the blur
+    takes sensor noise and compression shimmer out of the comparison)."""
+    h, w = frame.shape[:2]
+    th = max(1, int(round(h * MOTION_THUMB_W / float(w))))
+    small = cv2.resize(frame, (MOTION_THUMB_W, th), interpolation=cv2.INTER_AREA)
+    grey = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY) if small.ndim == 3 else small
+    return cv2.GaussianBlur(grey, (3, 3), 0)
+
+
+def motion_between(a: np.ndarray, b: np.ndarray) -> bool:
+    """Has anything moved between two thumbnails?"""
+    if a.shape != b.shape:
+        return True
+    changed = cv2.absdiff(a, b) > MOTION_PIXEL_DELTA
+    return float(np.count_nonzero(changed)) / changed.size >= MOTION_MIN_FRACTION
+
+
+def _has_unconfirmed(detections: Any) -> bool:
+    """Detections the tracker has not given an id yet (ByteTrack marks them
+    -1; with no tracker at all nothing is ever confirmed)."""
+    if detections is None or len(detections) == 0:
+        return False
+    ids = detections.tracker_id
+    return ids is None or bool(np.any(np.asarray(ids) < 0))
+
+
 class IngestManager:
     """Per-camera FrameSources + the single inference worker.
 
@@ -345,6 +393,11 @@ class IngestManager:
         # name -> monotonic time the watcher-down failsafe last logged, so the
         # per-frame gate logs the failsafe engaging at most once/minute/camera.
         self._failsafe_logged: dict[str, float] = {}
+        # Motion gate state per camera: (thumbnail inference last ran on, when,
+        # the observations it produced), and frames run / skipped since boot.
+        self._motion: dict[str, tuple[np.ndarray, float, list]] = {}
+        self._inferred: dict[str, int] = {}
+        self._skipped: dict[str, int] = {}
 
     def set_ai_events(self, ai_events: Optional[Any]) -> None:
         """Wire the camera-AI event listener used to gate ``camera_ai`` cameras.
@@ -507,6 +560,7 @@ class IngestManager:
         self._sources.pop(name, None)
         self._keys.pop(name, None)
         self._trackers.pop(name, None)
+        self._motion.pop(name, None)
         self._smoothers.pop(name, None)
         self._last_frame_mono.pop(name, None)
         if task is not None:
@@ -647,6 +701,18 @@ class IngestManager:
         # (camera_ai + AI idle). The frame is still fed to the engine below so the
         # live-snapshot cache / fps stats / absence-based event ending keep working
         # exactly as an empty-observation heartbeat would.
+        gate_on = self._settings is not None and bool(
+            (self._settings.detection or {}).get("motion_gate", True)
+        )
+        thumb = motion_thumb(frame) if gate_on and frame is not None and frame.size else None
+        last = self._motion.get(name)
+        if (detector.ready and self._should_infer(name, cam) and thumb is not None
+                and last is not None and time.monotonic() - last[1] < MOTION_FORCE_S
+                and not motion_between(last[0], thumb)):
+            # Nothing has moved since the last inference: its answer stands.
+            self._skipped[name] = self._skipped.get(name, 0) + 1
+            await self._engine.process(name, frame_time, list(last[2]), frame_bgr=frame)
+            return
         if detector.ready and self._should_infer(name, cam):
             # Optional night contrast boost, on a COPY handed only to inference.
             # `frame` itself is passed to the engine untouched below, so the
@@ -685,6 +751,14 @@ class IngestManager:
                     )
                 observations = observations_from_supervision(detections)
                 detector.note_detect_ok()
+                self._inferred[name] = self._inferred.get(name, 0) + 1
+                if thumb is not None and not _has_unconfirmed(detections):
+                    self._motion[name] = (thumb, time.monotonic(), list(observations))
+                else:
+                    # Something the tracker has not confirmed yet: it needs
+                    # consecutive detect frames to become a track, so the next
+                    # frame runs whatever the pixels say.
+                    self._motion.pop(name, None)
             except asyncio.CancelledError:
                 raise
             except asyncio.TimeoutError:
@@ -740,5 +814,9 @@ class IngestManager:
                 "stalled": source.stalled(),
                 "respawns": max(source.spawn_count - 1, 0),
                 "last_frame_age_s": round(age, 2) if age is not None else None,
+                # The motion gate's work: frames the detector ran on, and frames
+                # it did not need to because nothing had moved.
+                "inferred": self._inferred.get(name, 0),
+                "skipped_still": self._skipped.get(name, 0),
             }
         return out

@@ -62,7 +62,6 @@ import asyncio
 import logging
 import re
 import shutil
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
@@ -101,6 +100,18 @@ _MTIME_TRUST_S = 1.5
 #: Consecutive failed GPU decodes after which replays decode on the CPU only.
 HW_GIVE_UP = 3
 
+#: How long a camera's recorded frame size is trusted before it is probed again.
+DIMS_TTL_S = 600.0
+
+#: A decoded crop is scaled down so its longer side is at most this.
+MAX_CROP_SIDE = 1920
+
+#: Requests for one camera are served by one decode when their windows overlap
+#: or are at most this far apart; the worker waits this long for such a request
+#: to arrive before decoding.
+COALESCE_GAP_S = 1.0
+COALESCE_WAIT_S = 0.06
+
 #: Longest a single replay decode may take before it is abandoned.
 DECODE_TIMEOUT_S = 60.0
 
@@ -118,9 +129,27 @@ class ReplayFrame:
     height: int
 
 
+@dataclass
+class _Request:
+    camera: str
+    start: float
+    end: float
+    region: tuple[float, float, float, float]
+    fps: float
+    live: bool
+    future: "asyncio.Future[list[ReplayFrame]]"
+
+
 class RecordingReplay:
     """Decodes a time window of a camera's recording. One per process,
-    shared by the face and plate passes."""
+    shared by the face and plate passes.
+
+    One decode at a time, across every camera, by a single worker. Requests
+    for the same camera and overlapping seconds that are waiting together —
+    a face burst and a plate burst for the person getting out of a car — are
+    served by ONE decode of their union, each handed its own crop (see
+    `_compatible`). Decoding is most of what a burst costs.
+    """
 
     def __init__(
         self,
@@ -138,11 +167,18 @@ class RecordingReplay:
         self._hwaccel = find_nvidia_device() if hwaccel is None else bool(hwaccel)
         #: Decodes that produced frames, by how ("cuda" | "cpu"), since boot.
         self.decodes: dict[str, int] = {"cuda": 0, "cpu": 0}
+        #: Requests served, and how many of them shared another's decode.
+        self.requests = 0
+        self.shared = 0
         # Consecutive replays whose GPU decode produced nothing. A GPU that
         # cannot decode this footage is not asked again after HW_GIVE_UP.
         self._hw_misses = 0
-        # One at a time, across every camera.
-        self._lock = asyncio.Lock()
+        # Each camera's recorded frame size, and when it was learned — probing
+        # it costs an ffmpeg run and a keyframe decode, which used to be paid
+        # on every burst (0.58 s of CPU at 4K, a third of the burst itself).
+        self._dims: dict[str, tuple[tuple[int, int], float]] = {}
+        self._queue: list[_Request] = []
+        self._worker: Optional["asyncio.Task[None]"] = None
 
     @property
     def available(self) -> bool:
@@ -176,31 +212,90 @@ class RecordingReplay:
         end = min(end, start + MAX_WINDOW_S)
         if end <= start:
             return []
-        rate = float(fps) if fps else self._fps
-        async with self._lock:
+        loop = asyncio.get_running_loop()
+        req = _Request(camera, start, end, tuple(float(v) for v in region[:4]),  # type: ignore[arg-type]
+                       float(fps) if fps else self._fps, live, loop.create_future())
+        self._queue.append(req)
+        if self._worker is None or self._worker.done():
+            self._worker = asyncio.create_task(self._work(), name="recording-replay")
+        try:
+            return await req.future
+        except asyncio.CancelledError:
+            if req in self._queue:
+                self._queue.remove(req)
+            raise
+
+    async def _work(self) -> None:
+        while self._queue:
+            # A moment for a request made in the same breath — the face pass
+            # and the plate pass handle the same frame one after the other —
+            # to join this decode rather than queue for its own.
+            await asyncio.sleep(COALESCE_WAIT_S)
+            if not self._queue:
+                break
+            req = self._queue.pop(0)
+            if req.future.done():
+                continue
+            batch = [req] + [r for r in self._queue if _compatible(req, r)]
+            for r in batch[1:]:
+                self._queue.remove(r)
             try:
-                out = await asyncio.wait_for(
-                    asyncio.to_thread(self._frames_blocking, camera, start, end, region, rate),
-                    DECODE_TIMEOUT_S,
+                results = await asyncio.wait_for(
+                    asyncio.to_thread(self._decode_batch, batch), DECODE_TIMEOUT_S
                 )
-                return out[:-1] if live and out else out
             except asyncio.TimeoutError:
-                log.warning("plate replay on %s took over %.0f s — abandoned",
-                            camera, DECODE_TIMEOUT_S)
-                return []
+                log.warning("recording read on %s took over %.0f s — abandoned",
+                            req.camera, DECODE_TIMEOUT_S)
+                results = [[] for _ in batch]
             except Exception:  # noqa: BLE001
-                log.exception("plate replay on %s failed", camera)
-                return []
+                log.exception("recording read on %s failed", req.camera)
+                results = [[] for _ in batch]
+            self.requests += len(batch)
+            self.shared += len(batch) - 1
+            for r, res in zip(batch, results):
+                if not r.future.done():
+                    r.future.set_result(res)
 
     # -- blocking work (threads) ------------------------------------------
 
+    def _decode_batch(self, batch: list[_Request]) -> list[list[ReplayFrame]]:
+        """ONE decode of the batch's union window, each request cut its own
+        crop from every frame (see `crops_graph`); each gets its own seconds."""
+        start = min(r.start for r in batch)
+        end = max(r.end for r in batch)
+        per = self._frames_blocking(batch[0].camera, start, end, [r.region for r in batch],
+                                    batch[0].fps)
+        half = 0.5 / batch[0].fps
+        out: list[list[ReplayFrame]] = []
+        for r, frames in zip(batch, per):
+            if frames and any(q.live for q in batch):
+                frames = frames[:-1]  # the last frame of a segment being written can be torn
+            out.append([f for f in frames if r.start - half <= f.time <= r.end + half])
+        return out
+
+    def _dims_for(self, camera: str, segment: Path, *, fresh: bool = False) -> Optional[tuple[int, int]]:
+        import time as _time
+
+        cached = self._dims.get(camera)
+        if cached is not None and not fresh and _time.monotonic() - cached[1] < DIMS_TTL_S:
+            return cached[0]
+        dims = self._probe_dims(segment)
+        if dims is not None:
+            self._dims[camera] = (dims, _time.monotonic())
+        return dims
+
     def _frames_blocking(
-        self, camera: str, start: float, end: float, region: Sequence[float],
-        fps: Optional[float] = None,
-    ) -> list[ReplayFrame]:
+        self, camera: str, start: float, end: float, regions: Sequence[Sequence[float]],
+        fps: Optional[float] = None, *, _retry: bool = True,
+    ) -> list[list[ReplayFrame]]:
+        """Frames of [start, end] for each region, from ONE decode: a list per
+        region. A single region may also be passed bare (old callers)."""
         import subprocess
 
+        if regions and not isinstance(regions[0], (list, tuple)):
+            return self._frames_blocking(camera, start, end, [regions], fps, _retry=_retry)[0]  # type: ignore[list-item]
         fps = fps or self._fps
+        empty: list[list[ReplayFrame]] = [[] for _ in regions]
         # One segment further back than the window needs, so the first
         # useful segment's predecessor is there to time it (segment_starts).
         segments = segment_starts(
@@ -212,55 +307,65 @@ class RecordingReplay:
                 first = i
         segments = segments[first:]
         if not segments:
-            return []
-        dims = self._probe_dims(segments[0][1])
+            return empty
+        cached = camera in self._dims
+        dims = self._dims_for(camera, segments[0][1])
         if dims is None:
-            return []
+            return empty
         width, height = dims
-        x1, y1, x2, y2 = (float(v) for v in region[:4])
-        mx, my = (x2 - x1) * REGION_MARGIN, (y2 - y1) * REGION_MARGIN
-        cx1 = max(0, int((x1 - mx) * width)) & ~1
-        cy1 = max(0, int((y1 - my) * height)) & ~1
-        cx2 = min(width, int(round((x2 + mx) * width)))
-        cy2 = min(height, int(round((y2 + my) * height)))
-        cw, ch = (cx2 - cx1) & ~1, (cy2 - cy1) & ~1
-        if cw < 16 or ch < 16:
-            return []
+        crops = [plan_crop(r, width, height) for r in regions]
+        usable = [c for c in crops if c is not None]
+        if not usable:
+            return empty
+        stack_w = max(c.ow for c in usable)
+        stack_h = sum(c.oh for c in usable)
+        frame_bytes = stack_w * stack_h * 3
 
-        out: list[ReplayFrame] = []
-        with tempfile.TemporaryDirectory(prefix="vigilume-replay-") as tmp:
-            # Each segment's share of the window, decoded from THAT FILE with
-            # the seek before its input — see decode_portions for why not
-            # one decode over the joined segments.
-            for k, (seg_start, seg_path, p_start, p_end) in enumerate(
-                decode_portions(segments, start, end)
+        out: list[list[ReplayFrame]] = [[] for _ in regions]
+        # Each segment's share of the window, decoded from THAT FILE with the
+        # seek before its input — see decode_portions for why not one decode
+        # over the joined segments. Frames come back as raw BGR on a pipe:
+        # writing them out as JPEG files and reading them back cost a fifth of
+        # the decode again, for nothing.
+        for seg_start, seg_path, p_start, p_end in decode_portions(segments, start, end):
+            data = b""
+            for how, args in replay_attempts(
+                self._ffmpeg, seg_path, p_start - seg_start, p_end - p_start,
+                fps, usable, hwaccel=self._hwaccel,
             ):
-                pattern = Path(tmp) / f"p{k}_%04d.jpg"
-                files: list[Path] = []
-                for how, args in replay_attempts(
-                    self._ffmpeg, seg_path, pattern, p_start - seg_start, p_end - p_start,
-                    fps, (cw, ch, cx1, cy1), hwaccel=self._hwaccel,
-                ):
-                    for stale in Path(tmp).glob(f"p{k}_*.jpg"):
-                        stale.unlink()
-                    proc = subprocess.run(args, capture_output=True, timeout=DECODE_TIMEOUT_S)
-                    files = sorted(Path(tmp).glob(f"p{k}_*.jpg"))
-                    if files:
-                        self.decodes[how] += 1
-                        if how == "cuda":
-                            self._hw_misses = 0
-                        elif self._hwaccel:
-                            self._note_hw_miss(camera, proc)
-                        break
-                    log.debug("replay decode attempt failed on %s (rc %s): %s", camera,
-                              proc.returncode, proc.stderr.decode(errors="replace")[-300:])
-                for i, path in enumerate(files):
-                    img = cv2.imread(str(path))
-                    if img is None:
-                        continue
-                    # Frame i of this portion is i/fps after its start.
-                    out.append(ReplayFrame(time=p_start + i / fps, crop=img,
-                                           ox=cx1, oy=cy1, width=width, height=height))
+                proc = subprocess.run(args, capture_output=True, timeout=DECODE_TIMEOUT_S)
+                data = proc.stdout or b""
+                if len(data) >= frame_bytes:
+                    self.decodes[how] += 1
+                    if how == "cuda":
+                        self._hw_misses = 0
+                    elif self._hwaccel:
+                        self._note_hw_miss(camera, proc)
+                    break
+                log.debug("replay decode attempt failed on %s (rc %s): %s", camera,
+                          proc.returncode, proc.stderr.decode(errors="replace")[-300:])
+            n = len(data) // frame_bytes
+            if n == 0:
+                continue
+            stack = np.frombuffer(data[: n * frame_bytes], np.uint8).reshape(n, stack_h, stack_w, 3)
+            row = 0
+            for idx, c in enumerate(crops):
+                if c is None:
+                    continue
+                for i in range(n):
+                    # Frame i of this portion is i/fps after its start, in the
+                    # (possibly scaled) crop's own geometry.
+                    out[idx].append(ReplayFrame(
+                        time=p_start + i / fps, crop=stack[i, row:row + c.oh, :c.ow],
+                        ox=int(round(c.x * c.sx)), oy=int(round(c.y * c.sy)),
+                        width=int(round(width * c.sx)), height=int(round(height * c.sy)),
+                    ))
+                row += c.oh
+        if not any(out) and cached and _retry:
+            # The camera's frame size may have changed (a camera set from 4K to
+            # 1080p): learn it again and try once more.
+            self._dims_for(camera, segments[0][1], fresh=True)
+            return self._frames_blocking(camera, start, end, regions, fps, _retry=False)
         return out
 
     def _note_hw_miss(self, camera: str, proc: Any) -> None:
@@ -274,7 +379,9 @@ class RecordingReplay:
 
     def status(self) -> dict[str, Any]:
         return {"available": self.available, "gpu_decode": self._hwaccel,
-                "decodes": dict(self.decodes)}
+                "decodes": dict(self.decodes),
+                # Reads asked for, and how many rode along on another's decode.
+                "requests": self.requests, "shared": self.shared}
 
     def _probe_dims(self, segment: Path) -> Optional[tuple[int, int]]:
         """(width, height) of a recorded segment, from ffmpeg's stream line."""
@@ -296,19 +403,74 @@ class RecordingReplay:
         return (int(m.group(1)), int(m.group(2))) if m else None
 
 
+@dataclass(frozen=True)
+class CropPlan:
+    """Where one region is cut from the decoded frame, and what size it comes
+    out at (scaled down if its longer side exceeds MAX_CROP_SIDE)."""
+    x: int
+    y: int
+    w: int
+    h: int
+    ow: int
+    oh: int
+
+    @property
+    def sx(self) -> float:
+        return self.ow / float(self.w)
+
+    @property
+    def sy(self) -> float:
+        return self.oh / float(self.h)
+
+
+def plan_crop(region: Sequence[float], width: int, height: int) -> Optional[CropPlan]:
+    x1, y1, x2, y2 = _crop_box(region, width, height)
+    w, h = (x2 - x1) & ~1, (y2 - y1) & ~1
+    if w < 16 or h < 16:
+        return None
+    # A crop bigger than MAX_CROP_SIDE is scaled down as it is decoded: a car
+    # that fills a 4K frame has a plate hundreds of pixels wide, and holding
+    # 40 full-size 4K crops would be a gigabyte.
+    scale = min(1.0, MAX_CROP_SIDE / float(max(w, h)))
+    if scale < 1.0:
+        return CropPlan(x1, y1, w, h, max(16, int(w * scale)) & ~1, max(16, int(h * scale)) & ~1)
+    return CropPlan(x1, y1, w, h, w, h)
+
+
+def crops_graph(fps: float, crops: Sequence[CropPlan]) -> str:
+    """The filtergraph that cuts every crop from each decoded frame and stacks
+    them, top to bottom, into ONE output frame (each padded to the widest) —
+    one decode, one pipe, each crop at its own resolution. Split apart again
+    by row in `_frames_blocking`."""
+    def chain(c: CropPlan) -> str:
+        f = f"crop={c.w}:{c.h}:{c.x}:{c.y}"
+        return f + (f",scale={c.ow}:{c.oh}" if (c.ow, c.oh) != (c.w, c.h) else "")
+
+    if len(crops) == 1:
+        return f"[0:v]fps={fps:g},{chain(crops[0])},format=bgr24[out]"
+    width = max(c.ow for c in crops)
+    labels = "".join(f"[s{i}]" for i in range(len(crops)))
+    parts = [f"[0:v]fps={fps:g},split={len(crops)}{labels}"]
+    for i, c in enumerate(crops):
+        parts.append(f"[s{i}]{chain(c)},pad={width}:{c.oh}:0:0,format=bgr24[c{i}]")
+    parts.append("".join(f"[c{i}]" for i in range(len(crops))) + f"vstack=inputs={len(crops)}[out]")
+    return ";".join(parts)
+
+
 def replay_attempts(
     ffmpeg: str,
     source: Path,
-    out_pattern: Path,
     seek: float,
     duration: float,
     fps: float,
-    crop: tuple[int, int, int, int],
+    crops: Any,
     *,
     hwaccel: bool = False,
 ) -> list[tuple[str, list[str]]]:
     """The commands to try, in order, to decode `duration` s of ONE segment
-    file from `seek` s into it, as ("cuda" | "cpu", argv).
+    file from `seek` s into it, as ("cuda" | "cpu", argv). Every frame's
+    crops come out stacked in one raw BGR frame on stdout (`crops_graph`).
+    `crops` is a list of CropPlan, or one (w, h, x, y) tuple.
 
     GPU first when there is one, then the CPU. For each, the seek before the
     input first — ffmpeg jumps to the keyframe before `seek` and decodes
@@ -316,11 +478,12 @@ def replay_attempts(
     after the input, which decodes the file from its start: slower, kept for
     a build that cannot seek this file.
     """
-    cw, ch, cx1, cy1 = crop
+    if isinstance(crops, tuple):
+        cw, ch, cx1, cy1 = crops
+        crops = [CropPlan(cx1, cy1, cw, ch, cw, ch)]
     common_out = [
-        "-t", f"{duration:.3f}", "-an",
-        "-vf", f"fps={fps:g},crop={cw}:{ch}:{cx1}:{cy1}",
-        "-q:v", "2", str(out_pattern),
+        "-t", f"{duration:.3f}", "-an", "-filter_complex", crops_graph(fps, crops),
+        "-map", "[out]", "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1",
     ]
     head = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin"]
     attempts: list[tuple[str, list[str]]] = []
@@ -330,6 +493,27 @@ def replay_attempts(
             (how, head + accel + ["-i", str(source), "-ss", f"{seek:.3f}"] + common_out),
         ]
     return attempts
+
+
+def _crop_box(region: Sequence[float], width: int, height: int) -> tuple[int, int, int, int]:
+    """A fractional region, plus REGION_MARGIN, in a `width` x `height`
+    frame's pixels: (x1, y1, x2, y2), x1/y1 even."""
+    x1, y1, x2, y2 = (float(v) for v in region[:4])
+    mx, my = (x2 - x1) * REGION_MARGIN, (y2 - y1) * REGION_MARGIN
+    return (max(0, int((x1 - mx) * width)) & ~1, max(0, int((y1 - my) * height)) & ~1,
+            min(width, int(round((x2 + mx) * width))), min(height, int(round((y2 + my) * height))))
+
+
+def _compatible(a: _Request, b: _Request) -> bool:
+    """Can `b` share `a`'s decode? Same camera and rate, seconds that overlap
+    or nearly meet, and a union window no longer than one read may be. Where
+    in the frame each one is does not matter: the decoder decodes the whole
+    frame either way, and each gets its own crop of it."""
+    if a.camera != b.camera or a.fps != b.fps:
+        return False
+    if b.start > a.end + COALESCE_GAP_S or a.start > b.end + COALESCE_GAP_S:
+        return False
+    return max(a.end, b.end) - min(a.start, b.start) <= MAX_WINDOW_S
 
 
 def decode_portions(

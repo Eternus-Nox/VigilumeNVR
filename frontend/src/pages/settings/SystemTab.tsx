@@ -35,6 +35,14 @@ const withWebrtcPort = (host: string) => (/:\d{1,5}$/.test(host) ? host : `${hos
 
 const DEFAULT_AUTO_RESTART = { enabled: false, time: '04:00' };
 
+/** Share of frames the motion gate skipped, e.g. "78% (4,120)". */
+const stillShare = (inferred?: number, skipped?: number) => {
+  if (inferred === undefined || skipped === undefined) return '—';
+  const total = inferred + skipped;
+  if (total === 0) return '—';
+  return `${Math.round((100 * skipped) / total)}% (${skipped.toLocaleString()})`;
+};
+
 export default function SystemTab({ settings, onDraftChange, pending }: TabProps) {
   // Seed from the shell's pending draft so tab switches keep unsaved edits.
   const [publicUrl, setPublicUrl] = useState(
@@ -357,6 +365,9 @@ export default function SystemTab({ settings, onDraftChange, pending }: TabProps
                     <th>Ingest</th>
                     <th>FPS</th>
                     <th>Last frame</th>
+                    <th title="Frames the detector skipped because nothing had moved (motion gate)">
+                      Skipped (still)
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -371,6 +382,7 @@ export default function SystemTab({ settings, onDraftChange, pending }: TabProps
                       <td>
                         {c.last_frame_age_s === null ? '—' : `${c.last_frame_age_s.toFixed(1)} s ago`}
                       </td>
+                      <td>{stillShare(c.inferred, c.skipped_still)}</td>
                     </tr>
                   ))}
                 </tbody>

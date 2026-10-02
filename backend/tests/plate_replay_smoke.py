@@ -208,7 +208,11 @@ async def main() -> int:
     check(1 <= stats["replays"] <= 7 and stats["replay_frames"] >= 20,
           f"from {stats['replays']} read(s) of the recording, {stats['replay_frames']} frames "
           "— dozens of looks, not the one or two the live path gets")
-    check(stats["replay_reads"] >= 10, f"{stats['replay_reads']} reads went into the vote")
+    from app.native.platepass import SETTLED_READS
+
+    check(stats["replay_reads"] >= SETTLED_READS,
+          f"{stats['replay_reads']} reads went into the vote — reading stops once the vote "
+          f"is settled ({SETTLED_READS}+ agreeing reads), not after every frame")
     cands = db.rows("SELECT * FROM recognition_candidates")
     crop = cv2.imread(str(tmp / "crops-b" / cands[0]["image_path"])) if cands else None
     check(crop is not None and crop.shape[1] >= 100,
@@ -229,14 +233,13 @@ async def main() -> int:
     print("\nGPU decode first when there is a GPU, the CPU when it cannot start")
     from app.native.platereplay import replay_attempts
 
-    att = replay_attempts("ffmpeg", Path("l.txt"), Path("%04d.jpg"), 1.0, 5.0, 6.0,
-                          (64, 64, 0, 0), hwaccel=True)
+    att = replay_attempts("ffmpeg", Path("seg.ts"), 1.0, 5.0, 6.0, (64, 64, 0, 0), hwaccel=True)
     check([h for h, _ in att] == ["cuda", "cuda", "cpu", "cpu"]
           and att[0][1][att[0][1].index("-hwaccel") + 1] == "cuda"
           and att[0][1].index("-hwaccel") < att[0][1].index("-i"),
           "with an NVIDIA GPU: NVDEC first (-hwaccel cuda, before the input), then the CPU")
-    cpu_only = replay_attempts("ffmpeg", Path("l.txt"), Path("%04d.jpg"), 1.0, 5.0, 6.0,
-                               (64, 64, 0, 0), hwaccel=False)
+    cpu_only = replay_attempts("ffmpeg", Path("seg.ts"), 1.0, 5.0, 6.0, (64, 64, 0, 0),
+                               hwaccel=False)
     check(all("-hwaccel" not in a for _, a in cpu_only) and len(cpu_only) == 2,
           "without one: CPU only, nothing tried that cannot work")
     db = FakeDB(tmp / "g.db")

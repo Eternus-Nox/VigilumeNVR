@@ -82,7 +82,7 @@ the camera, or turns at the door — and that moment is frequently BEFORE
 detection has confirmed them, or between two snapshots. So the pass also
 reads the camera's own recording: starting a second after the person is first
 seen, from two seconds before that up to now, ten frames a second, cropped
-around where they were in each frame; again every ~1.2 s while they are in
+around where they were in each frame; again every ~2 s while they are in
 view; and once more just after they leave. Every frame's face (only one in the
 upper part of THIS person's box at that moment) is scored into the same
 best-shot buffer, so the shot identified from is the best of all of them.
@@ -168,6 +168,14 @@ DEFAULT_RETENTION_DAYS = 7.0
 #: and at most this many per track.
 HIRES_INTERVAL_S = 1.0
 HIRES_MAX_PER_TRACK = 6
+
+#: ...and this many while recorded bursts are reading the person: the first
+#: looks are the fastest answer, then the bursts read the same moments ten
+#: times a second, and each snapshot is a camera request and a JPEG decode.
+HIRES_WITH_BURSTS = 2
+
+#: A recorded burst stops looking once it has a face this good.
+BURST_ENOUGH_QUALITY = 0.85
 
 #: A track identified from a shot at least this good needs no more looks.
 HIRES_SETTLED_QUALITY = 0.7
@@ -419,6 +427,9 @@ class FacePass:
         if frame_time - st.last_pass < self._pass_interval:
             return
         st.last_pass = frame_time
+        if self._settled(st):
+            # Identified from a good shot: nothing more to look for.
+            return
         # Before the detect-frame look, and whatever it finds: the face that
         # is too small to be found HERE is exactly the one worth a snapshot.
         self._maybe_look_hires(cam_row, camera, st, obs, frame_bgr, frame_time)
@@ -587,11 +598,18 @@ class FacePass:
             log.exception("face burst failed on %s/%s", camera, tracker_id)
 
     def _faces_in_frames_blocking(self, frames: Sequence[Any], path: list) -> list:
-        """For each recorded frame: crop around where the person was at that
+        """For recorded frames: crop around where the person was at that
         moment, find THEIR face (centre in the upper part of their box), align
-        and score it. Runs in a thread."""
+        and score it. Runs in a thread.
+
+        Coarse to fine — every other frame first, then the ones between — and
+        it stops at the first face of BURST_ENOUGH_QUALITY: the buffer keeps
+        the best shot, and one that good is not going to be beaten by the
+        neighbouring tenth of a second."""
         out = []
-        for fr in frames:
+        for fr in list(frames[::2]) + list(frames[1::2]):
+            if out and max(o[3].total for o in out) >= BURST_ENOUGH_QUALITY:
+                break
             near = trackpath.box_near(path, fr.time, TIME_TOLERANCE_S)
             ch, cw = fr.crop.shape[:2]
             look = trackpath.to_pixels(trackpath.expand(near, BURST_LOOK_MARGIN),
@@ -622,6 +640,7 @@ class FacePass:
             frame_box = (max(0.0, min(1.0, fx1 / fr.width)), max(0.0, min(1.0, fy1 / fr.height)),
                          max(0.0, min(1.0, fx2 / fr.width)), max(0.0, min(1.0, fy2 / fr.height)))
             out.append((fr.time, aligned, face.box, quality, frame_box))
+        out.sort(key=lambda o: o[0])
         return out
 
     # ---------- full-resolution looks ----------
@@ -648,7 +667,9 @@ class FacePass:
             return
         if st.hires_task is not None and not st.hires_task.done():
             return
-        if st.hires_requests >= HIRES_MAX_PER_TRACK:
+        if st.hires_requests >= (
+                HIRES_WITH_BURSTS
+                if self._replay_on() and not st.burst.unavailable else HIRES_MAX_PER_TRACK):
             return
         if frame_time - st.hires_last < HIRES_INTERVAL_S:
             return

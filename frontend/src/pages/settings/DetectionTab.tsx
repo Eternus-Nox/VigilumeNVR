@@ -88,6 +88,11 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
   const [smoothingFrames, setSmoothingFrames] = useState<number>(
     pending.detection?.smoothing_frames ?? settings.detection.smoothing_frames ?? 3,
   );
+  // Skip the detector on frames where nothing moved. On by default; a backend
+  // predating it omits the key, which reads as on (its behaviour is unchanged).
+  const [motionGate, setMotionGate] = useState<boolean>(
+    pending.detection?.motion_gate ?? settings.detection.motion_gate ?? true,
+  );
   // Face / plate recognition. A backend predating the feature omits the block
   // entirely, and `hasRecognition` is what keeps that case honest: the card is
   // hidden AND the slice is left out of the draft. Reporting a default-filled
@@ -135,6 +140,7 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
   useAdoptSaved(settings.detection.night_boost_threshold ?? 60, setNightBoostThreshold);
   useAdoptSaved(settings.detection.smoothing ?? false, setSmoothing);
   useAdoptSaved(settings.detection.smoothing_frames ?? 3, setSmoothingFrames);
+  useAdoptSaved(settings.detection.motion_gate ?? true, setMotionGate);
   // Guarded: on a backend without the block the saved value is `undefined`, and
   // adopting that would blank the draft this form is bound to.
   useAdoptSaved(savedRecognition, (v) => {
@@ -248,13 +254,14 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
         dwell_alert_seconds: dwellSeconds, package_alerts: packageAlerts,
         night_boost: nightBoost, night_boost_threshold: nightBoostThreshold,
         smoothing, smoothing_frames: smoothingFrames,
+        motion_gate: motionGate,
       },
       ...(hasRecognition ? { recognition } : {}),
     });
   }, [
     confidence, defaultMode, backend, coralModel, absenceTimeout,
     ignoreStationary, stationaryAfter, dwellSeconds, packageAlerts,
-    nightBoost, nightBoostThreshold, smoothing, smoothingFrames,
+    nightBoost, nightBoostThreshold, smoothing, smoothingFrames, motionGate,
     hasRecognition, recognition, onDraftChange,
   ]);
 
@@ -1120,6 +1127,20 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
               </span>
             </label>
           )}
+          <label className="row-label">
+            <input
+              type="checkbox"
+              checked={motionGate}
+              onChange={(e) => setMotionGate(e.target.checked)}
+            />
+            Skip detection on still frames
+          </label>
+          <span className="control-hint">
+            When nothing in a camera&rsquo;s picture has changed since the detector last ran,
+            its previous results are reused instead of running the model again. A quiet
+            scene then costs a fraction of the GPU/CPU; the detector still runs at least
+            once a second, and on the first frame with any movement.
+          </span>
         </div>
       </section>
 

@@ -309,6 +309,9 @@ class DetectionSettings(BaseModel):
     # not trained on boosted images).
     night_boost: Literal["off", "auto", "always"] = "off"
     night_boost_threshold: int = Field(default=60, ge=0, le=255)
+    # Skip the detector on frames where nothing has moved since its last run
+    # (native/ingest.py); a real run at least once a second regardless.
+    motion_gate: bool = True
     # sv.DetectionsSmoother over the tracker's output. Off by default: it trades
     # box lag and a few frames of ghost track for steadier boxes (see config.py).
     smoothing: bool = False

@@ -561,6 +561,12 @@ DEFAULT_SETTINGS: dict = {
         "night_boost": "off",
         # Mean luma (0-255) below which `auto` treats a frame as night.
         "night_boost_threshold": 60,
+        # MOTION GATE (native/ingest.py): skip the detector on a frame that
+        # looks like the last one it ran on, re-using that answer, with a real
+        # run at least once a second. Most of the day nothing on a home camera
+        # moves; this is most of the detector's work saved, with movement
+        # still caught the frame it happens.
+        "motion_gate": True,
         # BOX SMOOTHING (sv.DetectionsSmoother), applied after the tracker and
         # before the engine. Averages each track's box over the last N frames,
         # which steadies jittery boxes and can help a flickering track reach

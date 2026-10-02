@@ -1098,6 +1098,11 @@ export interface AppSettings {
      */
     smoothing?: boolean;
     smoothing_frames?: number;
+    /**
+     * Reuse the last detections on frames where nothing moved instead of
+     * running the model again (still forced once a second). Absent = on.
+     */
+    motion_gate?: boolean;
   };
   system: {
     public_url: string;
@@ -1512,6 +1517,10 @@ export interface DetectorCameraStatus {
   ingest_ok: boolean;
   fps: number;
   last_frame_age_s: number | null;
+  /** Motion gate: frames the detector ran on, and frames it skipped because
+   *  nothing had moved. Absent on an older backend. */
+  inferred?: number;
+  skipped_still?: number;
 }
 
 /** Full detector self-test (GET /api/system/detector). */

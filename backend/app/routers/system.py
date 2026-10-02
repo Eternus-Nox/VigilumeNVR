@@ -310,6 +310,9 @@ def _per_camera_health(state) -> list:
         if src is not None:
             cam["stalled"] = bool(src["stalled"])
             cam["respawns"] = int(src["respawns"])
+            # Motion gate: frames the detector ran on / skipped as unchanged.
+            cam["inferred"] = int(src.get("inferred", 0))
+            cam["skipped_still"] = int(src.get("skipped_still", 0))
         else:
             # No running ffmpeg source (e.g. ffmpeg missing on this host, or a
             # camera_ai_only camera which runs no server inference).

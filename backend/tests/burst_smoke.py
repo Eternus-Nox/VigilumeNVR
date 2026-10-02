@@ -106,11 +106,13 @@ def timing_checks() -> None:
     check(abs(b.covered_to - 100.2) < 1e-9,
           "coverage is where the frames that came back ended, not what was asked for")
     b.note_seen(101.0)
-    check(b.due(101.5) is None, "no new burst until there is enough new recording")
-    w2 = b.due(102.3)
+    # The next one needs BURST_EVERY_S of new recording past 100.2.
+    ready = 100.2 + burst.BURST_EVERY_S + burst.REC_LAG_S
+    check(b.due(ready - 0.3) is None, "no new burst until there is enough new recording")
+    w2 = b.due(ready + 0.1)
     check(w2 is not None and abs(w2[0] - 100.2) < 1e-9, "the next one carries on from there")
     b.started()
-    b.finished(*w2, last_frame=101.4, fps=burst.BURST_FPS)
+    b.finished(*w2, last_frame=w2[1] - 0.15, fps=burst.BURST_FPS)
     b.note_seen(102.0)
     fin = b.window(final=True)
     check(fin is not None and abs(fin[1] - (102.0 + burst.POST_ROLL_S)) < 1e-9,
@@ -160,7 +162,7 @@ async def torn_frame_checks() -> None:
     rr = RecordingReplay(lambda cam: Path("/nowhere"), "/fake/ffmpeg", hwaccel=False)
     fr = [ReplayFrame(time=float(i), crop=np.zeros((4, 4, 3), np.uint8), ox=0, oy=0,
                       width=4, height=4) for i in range(5)]
-    rr._frames_blocking = lambda *a, **k: list(fr)
+    rr._frames_blocking = lambda cam, s0, e0, regions, *a, **k: [list(fr) for _ in regions]
     live = await rr.frames("c", 0.0, 4.0, (0, 0, 1, 1), pad=False, live=True)
     after = await rr.frames("c", 0.0, 4.0, (0, 0, 1, 1), pad=False, live=False)
     check(len(live) == 4 and len(after) == 5, "live: 4 of 5 frames; after the fact: all 5")
@@ -353,6 +355,27 @@ async def face_checks(tmp: Path, ffmpeg: str, models_dir: Path) -> None:
     check(len(fr) >= 24 and errs and max(errs) <= 0.1,
           f"a window across two segment files: {len(fr)} frames, each within "
           f"{max(errs or [9]):.3f} s of its label")
+
+    print("\n   one decode serves a face read and a plate read on the same camera")
+    shared = RecordingReplay(lambda cam: rec / cam, ffmpeg, hwaccel=False)
+    left, right = (0.05, 0.1, 0.35, 0.9), (0.6, 0.05, 0.95, 0.95)
+    a_task = asyncio.ensure_future(shared.frames("front", start + 1.0, start + 2.5, left, fps=10, pad=False))
+    b_task = asyncio.ensure_future(shared.frames("front", start + 1.5, start + 3.0, right, fps=10, pad=False))
+    fa, fb = await a_task, await b_task
+    check(sum(shared.decodes.values()) == 1 and shared.shared == 1,
+          f"two reads waiting together, one decode ({shared.decodes}, {shared.shared} shared)")
+    check(len(fa) >= 14 and len(fb) >= 14 and abs(fa[0].time - (start + 1.0)) < 0.06
+          and abs(fb[0].time - (start + 1.5)) < 0.06,
+          f"each gets its own seconds ({len(fa)} and {len(fb)} frames)")
+    from app.native.platereplay import REGION_MARGIN
+
+    want_ox = int((right[0] - (right[2] - right[0]) * REGION_MARGIN) * W) & ~1
+    check(bool(fb) and abs(fb[0].ox - want_ox) <= 2 and fb[0].crop.shape[1] <= W - want_ox,
+          f"and its own crop, placed where it is in the frame (right crop at x={fb[0].ox if fb else '?'}, "
+          f"expected {want_ox})")
+    errs = [abs((f.time - start) - tt) for f in fa if (tt := true_time(f.crop, f.ox)) is not None]
+    check(bool(errs) and max(errs) <= 0.1,
+          f"the shared decode keeps exact times (left crop: each frame within {max(errs or [9]):.3f} s)")
 
     print("\n   the OpenCV face models are safe to call from several threads at once")
     import concurrent.futures as cf
