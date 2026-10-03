@@ -75,6 +75,7 @@
 		B4C826C6A697A7592D2450E2 /* RecognitionProfileDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAE1654E7A2DEBDDBF514492 /* RecognitionProfileDetailView.swift */; };
 		16A88067C89913344004FEA6 /* RecognitionProfilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9967B1CFACA4549E59117D1E /* RecognitionProfilesView.swift */; };
 		B3C81191449D66BE3A6BFB31 /* RecognitionZoneEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CE54CEF93057CB42757CD80 /* RecognitionZoneEditor.swift */; };
+		B9FE111A58627A14234854B5 /* MainStreamSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F307D505E8ADD29C3472E6 /* MainStreamSettingsView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -169,6 +170,7 @@
 		FAE1654E7A2DEBDDBF514492 /* RecognitionProfileDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecognitionProfileDetailView.swift; sourceTree = "<group>"; };
 		9967B1CFACA4549E59117D1E /* RecognitionProfilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecognitionProfilesView.swift; sourceTree = "<group>"; };
 		6CE54CEF93057CB42757CD80 /* RecognitionZoneEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecognitionZoneEditor.swift; sourceTree = "<group>"; };
+		A1F307D505E8ADD29C3472E6 /* MainStreamSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainStreamSettingsView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -350,6 +352,7 @@
 				0E8188F701F17D428BFE70C7 /* DetectorStatusView.swift */,
 				32350D4C8935435F307DF658 /* GroupsView.swift */,
 				D5D9A424ADD973BA8A006FA3 /* IntegrationsView.swift */,
+				A1F307D505E8ADD29C3472E6 /* MainStreamSettingsView.swift */,
 				5700B8693D196B3820E3F22E /* PhonePushSettingsView.swift */,
 				61F64A9C6F5A596FEA1936F1 /* PrivacyModeView.swift */,
 				F57D205AD66D121CD9CEB397 /* PushManager.swift */,
@@ -496,6 +499,7 @@
 				06B0402AECF122ABA2130DE3 /* PTZControlsView.swift in Sources */,
 				4B17EC52253947926AE9A400 /* PhonePushSettingsView.swift in Sources */,
 				BE1AE8B86C5D8EED22230919 /* PlayerLayerView.swift in Sources */,
+				B9FE111A58627A14234854B5 /* MainStreamSettingsView.swift in Sources */,
 				74B32DA5EE5E312825D7C508 /* PrivacyModeView.swift in Sources */,
 				189E6FD20F912685B828CF51 /* PushCrypto.swift in Sources */,
 				B7D48C6D32DCB6874E0F50D8 /* PushManager.swift in Sources */,

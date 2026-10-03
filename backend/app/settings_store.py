@@ -181,3 +181,7 @@ class SettingsStore:
     @property
     def time_sync(self) -> dict[str, Any]:
         return self._cached["time_sync"]
+
+    @property
+    def streams(self) -> dict[str, Any]:
+        return self._cached.get("streams") or {}

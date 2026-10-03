@@ -58,6 +58,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 import numpy as np
 
+from . import encode as encode_profile
+
 # The talk stream deliberately under-runs its pinned dummy Content-Length
 # (see _post_audio). h11 flags that at end-of-message, and httpcore does NOT
 # map it to httpx.LocalProtocolError on the body-send path — the raw h11
@@ -635,6 +637,92 @@ class AmcrestClient:
         if params:
             await self.set_config(**params)
         return {"changed": changed, "streams": found}
+
+    # ---------- main-stream encode profile (amcrest/encode.py) ----------
+
+    async def get_encode_caps(self) -> dict[str, Any]:
+        """The main stream's offered resolutions / codecs / fps / bitrate range
+        (encode.parse_caps). Empty lists when the firmware will not say —
+        some answer getConfigCaps, older ones only getCaps."""
+        for action in ("getConfigCaps", "getCaps"):
+            try:
+                text = await self._get("/cgi-bin/encode.cgi", {"action": action, "channel": 1})
+            except AmcrestUnsupportedError:
+                continue
+            if text.lstrip().startswith("Error"):
+                continue
+            caps = encode_profile.parse_caps(_parse_kv(text))
+            if caps["resolutions"] or caps["codecs"]:
+                return caps
+        return encode_profile.parse_caps({})
+
+    async def read_main_stream(self) -> dict[str, Any]:
+        """{current, caps}: the main stream as it is, and what it can be."""
+        cfg = await self.get_config("Encode")
+        return {"current": encode_profile.current_main(cfg), "caps": await self.get_encode_caps()}
+
+    async def apply_main_stream(self, profile: dict[str, Any]) -> dict[str, Any]:
+        """Move the main stream (every MainFormat) to `profile`, then READ IT
+        BACK: a Dahua setConfig can answer OK and keep the old value, so what
+        is reported as changed is what the camera reports afterwards.
+
+        One setConfig with everything first; if the camera rejects that, each
+        group (resolution, codec, keyframes, bitrate — encode.GROUP_ORDER) is
+        tried alone so one unsupported value does not block the rest. Raises
+        AmcrestError only when the camera cannot be read at all.
+
+        Returns {changed, rejected, not_applied, notes, before, after}."""
+        profile = encode_profile.normalize_profile(profile)
+        result: dict[str, Any] = {"changed": [], "rejected": [], "not_applied": [],
+                                  "notes": [], "before": None, "after": None}
+        cfg = await self.get_config("Encode")
+        result["before"] = encode_profile.current_main(cfg)
+        if encode_profile.is_noop(profile):
+            result["after"] = result["before"]
+            return result
+        caps = await self.get_encode_caps()
+        plan = encode_profile.plan_main_stream(cfg, caps, profile)
+        result["notes"] = plan["notes"]
+        groups = plan["groups"]
+        if not groups:
+            result["after"] = result["before"]
+            return result
+        everything = {k: v for g in groups.values() for k, v in g.items()}
+        try:
+            await self.set_config(**everything)
+        except AmcrestUnsupportedError:
+            raise
+        except AmcrestError as exc:
+            log.info("camera %s [%s]: main-stream profile rejected as a whole (%s); "
+                     "trying each setting alone", self.ip, self.model or "?", exc)
+            for name in encode_profile.GROUP_ORDER:
+                if name not in groups:
+                    continue
+                try:
+                    await self.set_config(**groups[name])
+                except AmcrestError as exc2:
+                    result["rejected"].append(f"{name}: {exc2}")
+        # The camera restarts its encoder on a resolution or codec change and
+        # can take a moment before it answers getConfig again.
+        after_cfg: Optional[dict[str, str]] = None
+        for delay in (0.0, 1.0, 2.0):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                after_cfg = await self.get_config("Encode")
+                break
+            except AmcrestError:
+                continue
+        if after_cfg is None:
+            result["notes"].append("the camera did not answer after the change; not verified")
+            result["changed"] = plan["changes"]
+            return result
+        result["after"] = encode_profile.current_main(after_cfg)
+        leftover = encode_profile.plan_main_stream(after_cfg, caps, profile)
+        stuck = set(leftover["keys"])
+        result["not_applied"] = leftover["changes"]
+        result["changed"] = [c for c, k in zip(plan["changes"], plan["keys"]) if k not in stuck]
+        return result
 
     # ---------- white light / spotlight (Lighting_V2) ----------
     #

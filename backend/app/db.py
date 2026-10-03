@@ -28,7 +28,18 @@ def _tri_state(value: Any) -> Optional[bool]:
     """
     return None if value is None else bool(value)
 
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 30
+
+
+def _json_or_none(value: Any) -> Any:
+    """A nullable JSON TEXT column: None stays None (= inherit), unreadable
+    JSON reads as None rather than failing the whole camera row."""
+    if value is None:
+        return None
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def column_or(row: Any, name: str, default: Any) -> Any:
@@ -244,6 +255,11 @@ CREATE TABLE IF NOT EXISTS cameras (
     -- different instructions, and a front door and a pavement-facing camera
     -- want opposite ones.
     dwell_seconds   INTEGER,
+    -- Per-camera main-stream encode profile (amcrest/encode.py) as JSON, or
+    -- NULL to follow settings.streams.main — the same inherit contract as the
+    -- two columns above, so "set it for every camera" is one global change
+    -- and a camera that needs something different pins its own.
+    main_stream     TEXT,
     audio_codec     TEXT NOT NULL DEFAULT 'g711a',
     smart_spotlight INTEGER NOT NULL DEFAULT 0,
     spotlight_hold_seconds INTEGER NOT NULL DEFAULT 60,
@@ -970,6 +986,24 @@ class Database:
                             "ALTER TABLE events ADD COLUMN clip_error "
                             "TEXT NOT NULL DEFAULT ''"
                         )
+            if version < 30:
+                # v30: cameras.main_stream — per-camera main-stream encode
+                # profile, NULL = follow settings.streams.main. Nullable with
+                # no default for the inherit contract above: the migration
+                # pins nothing.
+                cur = await self.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cameras'"
+                )
+                if await cur.fetchone() is not None:
+                    existing = [
+                        r[1] for r in await (
+                            await self.conn.execute("PRAGMA table_info(cameras)")
+                        ).fetchall()
+                    ]
+                    if "main_stream" not in existing:
+                        await self.conn.execute(
+                            "ALTER TABLE cameras ADD COLUMN main_stream TEXT"
+                        )
         if version < SCHEMA_VERSION:
             await self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         await self.conn.commit()
@@ -1018,6 +1052,9 @@ class Database:
             # None = follow settings.detection.dwell_alert_seconds; 0 = off
             # here specifically. Not coerced, for the same reason.
             "dwell_seconds": column_or(row, "dwell_seconds", None),
+            # None = follow settings.streams.main; a dict pins this camera's
+            # main-stream encode profile (amcrest/encode.py).
+            "main_stream": _json_or_none(column_or(row, "main_stream", None)),
             "detect_width": row["detect_width"],
             "detect_height": row["detect_height"],
             "detect_fps": row["detect_fps"],
@@ -1185,6 +1222,22 @@ class Database:
         )
         await self.conn.commit()
         return added["labels"] if added else []
+
+    async def set_camera_main_stream(
+        self, name: str, profile: Optional[dict[str, Any]]
+    ) -> None:
+        """Pin one camera's main-stream encode profile, or clear it (None) to
+        follow settings.streams.main."""
+        await self.conn.execute(
+            "UPDATE cameras SET main_stream = ? WHERE name = ?",
+            (None if profile is None else json.dumps(profile), name),
+        )
+        await self.conn.commit()
+
+    async def clear_camera_main_streams(self) -> None:
+        """Every camera back to following settings.streams.main."""
+        await self.conn.execute("UPDATE cameras SET main_stream = NULL")
+        await self.conn.commit()
 
     async def set_camera_dwell(self, name: str, dwell_seconds: Optional[int]) -> None:
         """Pin one camera's loitering threshold, or clear it to inherit.

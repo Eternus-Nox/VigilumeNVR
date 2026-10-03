@@ -652,6 +652,12 @@ struct SettingsHomeView: View {
                 Label("Privacy Mode", systemImage: "eye.slash.fill")
                     .foregroundStyle(Theme.textPrimary)
             }
+            NavigationLink {
+                MainStreamAllCamerasView()
+            } label: {
+                Label("Video quality", systemImage: "slider.horizontal.3")
+                    .foregroundStyle(Theme.textPrimary)
+            }
         }
         .listRowBackground(Theme.surface)
     }

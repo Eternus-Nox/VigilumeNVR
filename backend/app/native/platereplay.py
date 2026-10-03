@@ -177,6 +177,9 @@ class RecordingReplay:
         # it costs an ffmpeg run and a keyframe decode, which used to be paid
         # on every burst (0.58 s of CPU at 4K, a third of the burst itself).
         self._dims: dict[str, tuple[tuple[int, int], float]] = {}
+        # camera -> monotonic time until which the size is probed every time
+        # (forget_dims, after a resolution change).
+        self._probe_until: dict[str, float] = {}
         self._queue: list[_Request] = []
         self._worker: Optional["asyncio.Task[None]"] = None
 
@@ -273,10 +276,22 @@ class RecordingReplay:
             out.append([f for f in frames if r.start - half <= f.time <= r.end + half])
         return out
 
+    def forget_dims(self, camera: str, probe_for_s: float = 120.0) -> None:
+        """The camera's main stream just changed size (amcrest/stream_profiles).
+        For the next `probe_for_s` every window probes its own first segment:
+        windows still on old-size segments and new-size ones both come in that
+        period, and caching either would mis-place the other's crops."""
+        import time as _time
+
+        self._dims.pop(camera, None)
+        self._probe_until[camera] = _time.monotonic() + probe_for_s
+
     def _dims_for(self, camera: str, segment: Path, *, fresh: bool = False) -> Optional[tuple[int, int]]:
         import time as _time
 
         cached = self._dims.get(camera)
+        if _time.monotonic() < self._probe_until.get(camera, 0.0):
+            fresh = True
         if cached is not None and not fresh and _time.monotonic() - cached[1] < DIMS_TTL_S:
             return cached[0]
         dims = self._probe_dims(segment)

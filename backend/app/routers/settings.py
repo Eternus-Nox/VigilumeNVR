@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
+from ..amcrest import encode as encode_profile
 from ..auth import require_admin
 from ..config import DEFAULT_CAMERA_TIMEZONE
 from ..native.recorder import SEGMENT_SECONDS, max_clip_post_s
@@ -508,6 +509,30 @@ class RecognitionSettings(BaseModel):
     face_replay: bool = True
 
 
+class MainStreamProfile(BaseModel):
+    """A main-stream encode profile (amcrest/encode.py). "keep" / null leaves
+    that setting as the camera has it."""
+
+    resolution: str = "keep"
+    codec: str = "keep"
+    keyframe_s: Optional[float] = None
+    bitrate_kbps: Optional[int] = None
+
+    @model_validator(mode="after")
+    def _valid(self) -> "MainStreamProfile":
+        clean = encode_profile.normalize_profile(self.model_dump())
+        self.resolution, self.codec = clean["resolution"], clean["codec"]
+        self.keyframe_s, self.bitrate_kbps = clean["keyframe_s"], clean["bitrate_kbps"]
+        return self
+
+
+class StreamsSettings(BaseModel):
+    """What every camera's main stream is set to, unless a camera pins its
+    own profile (PUT /api/cameras/{name}/main-stream)."""
+
+    main: MainStreamProfile = Field(default_factory=MainStreamProfile)
+
+
 class AppSettings(BaseModel):
     notifications: NotificationSettings = Field(default_factory=NotificationSettings)
     recording: RecordingSettings = Field(default_factory=RecordingSettings)
@@ -516,6 +541,7 @@ class AppSettings(BaseModel):
     system: SystemSettings = Field(default_factory=SystemSettings)
     mqtt: MqttSettings = Field(default_factory=MqttSettings)
     time_sync: TimeSyncSettings = Field(default_factory=TimeSyncSettings)
+    streams: StreamsSettings = Field(default_factory=StreamsSettings)
     archive: ArchiveSettings = Field(default_factory=ArchiveSettings)
 
 
@@ -635,7 +661,24 @@ async def put_settings(body: AppSettings, request: Request) -> dict[str, Any]:
         mqtt = getattr(state, "mqtt", None)
         if mqtt is not None:
             await mqtt.restart()
+    await _apply_streams_if_changed(state, previous, updated)
     return _mask_secrets(_with_webrtc(updated))
+
+
+async def _apply_streams_if_changed(state: Any, previous: dict[str, Any],
+                                    updated: dict[str, Any]) -> None:
+    """The all-cameras main-stream profile changed: push it to every camera
+    that follows it, in the background (a dozen cameras restarting their
+    encoders must not hold a settings save open). The dedicated endpoint
+    (POST /api/cameras/main-stream/apply) is the one that waits and reports."""
+    if (previous.get("streams") or {}) == (updated.get("streams") or {}):
+        return
+    manager = getattr(state, "stream_profiles", None)
+    if manager is None:
+        return
+    cams = [c for c in await state.db.list_cameras() if c.get("main_stream") is None]
+    log.info("main-stream profile changed — applying to %d camera(s)", len(cams))
+    manager.apply_in_background(cams)
 
 
 def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:

@@ -34,6 +34,7 @@ from ..config import (
     VALID_DETECT_MODES,
     effective_detect_mode,
 )
+from .settings import MainStreamProfile
 
 log = logging.getLogger(__name__)
 
@@ -733,6 +734,85 @@ async def set_camera_order(body: CameraOrder, request: Request) -> list[dict[str
     return await _cameras_payload(request, is_admin=True)
 
 
+# ---------- main-stream encode profiles (amcrest/encode.py, stream_profiles.py) ----------
+#
+# NOTE: the all-cameras routes are registered before PUT /{name}, so
+# "main-stream" is never captured as a camera name.
+
+
+class AllCamerasMainStream(BaseModel):
+    """PUT /api/cameras/main-stream: the profile every camera follows.
+
+    `reset_cameras` also clears every camera's own profile, so "set it up for
+    all cameras" really means all of them."""
+
+    profile: MainStreamProfile
+    reset_cameras: bool = False
+
+
+class CameraMainStream(BaseModel):
+    """PUT /api/cameras/{name}/main-stream. `profile: null` = follow the
+    all-cameras profile again."""
+
+    profile: Optional[MainStreamProfile] = None
+
+
+def _stream_manager(request: Request) -> Any:
+    manager = getattr(request.app.state, "stream_profiles", None)
+    if manager is None:
+        raise HTTPException(status_code=503, detail="main-stream profiles are not available")
+    return manager
+
+
+def _main_stream_row(manager: Any, cam: dict[str, Any]) -> dict[str, Any]:
+    profile, inherited = manager.effective(cam)
+    return {
+        "camera": cam["name"],
+        "inherited": inherited,
+        "own": cam.get("main_stream"),
+        "effective": profile,
+        "last": manager.last(cam["name"]),
+    }
+
+
+@router.get("/main-stream", dependencies=[Depends(require_admin)])
+async def get_main_stream_overview(request: Request) -> dict[str, Any]:
+    """The all-cameras profile and, per camera, whether it follows it and
+    what the last apply did. No camera is contacted."""
+    manager = _stream_manager(request)
+    cams = await request.app.state.db.list_cameras()
+    return {
+        "profile": manager.global_profile(),
+        "cameras": [_main_stream_row(manager, c) for c in cams],
+    }
+
+
+@router.put("/main-stream", dependencies=[Depends(require_admin)])
+async def set_main_stream_for_all(body: AllCamerasMainStream, request: Request) -> dict[str, Any]:
+    """Store the all-cameras profile and apply it now to every camera that
+    follows it (all of them with `reset_cameras`). Waits for the cameras and
+    returns what each one actually did."""
+    manager = _stream_manager(request)
+    state = request.app.state
+    current = state.settings.get()
+    current.setdefault("streams", {})["main"] = body.profile.model_dump()
+    await state.settings.update(current)
+    if body.reset_cameras:
+        await state.db.clear_camera_main_streams()
+    cams = [c for c in await state.db.list_cameras() if c.get("main_stream") is None]
+    results = await manager.apply_many(cams)
+    return {"profile": manager.global_profile(), "results": results}
+
+
+@router.post("/main-stream/apply", dependencies=[Depends(require_admin)])
+async def reapply_main_streams(request: Request) -> dict[str, Any]:
+    """Apply every camera's effective profile now (its own or the
+    all-cameras one) and report each result."""
+    manager = _stream_manager(request)
+    cams = await request.app.state.db.list_cameras()
+    return {"results": await manager.apply_many(cams)}
+
+
 # The hardware lens-mask routes (GET/POST /api/cameras/privacy) were REMOVED.
 # They drove the camera's own LeLensMask blackout, which meant reconfiguring the
 # device and left the camera itself in a modified state. Software Privacy Mode
@@ -868,6 +948,9 @@ async def delete_camera(name: str, request: Request) -> Response:
     state = request.app.state
     await _get_cam_or_404(request, name)
     await state.db.delete_camera(name)
+    manager = getattr(state, "stream_profiles", None)
+    if manager is not None:
+        manager.forget(name)
     await _apply_camera_change(request)
     return Response(status_code=204)
 
@@ -1134,6 +1217,62 @@ async def set_camera_stationary(
         "name": name,
         "ignore_stationary": cam.get("ignore_stationary"),
     }
+
+
+@router.get("/{name}/main-stream", dependencies=[Depends(require_admin)])
+async def get_camera_main_stream(name: str, request: Request) -> dict[str, Any]:
+    """This camera's profile (own or inherited) plus its main stream AS IT
+    IS NOW and the resolutions / codecs it offers, read live from the camera.
+    `live` is null with `error` set when the camera cannot be read."""
+    manager = _stream_manager(request)
+    cam = await _get_cam_or_404(request, name)
+    out = _main_stream_row(manager, cam)
+    out["global"] = manager.global_profile()
+    out["live"], out["error"] = None, None
+    if not (cam.get("username") and cam.get("password")):
+        out["error"] = "no camera credentials stored"
+        return out
+    client = _client_for(cam)
+    try:
+        live = await asyncio.wait_for(client.read_main_stream(), timeout=_PROBE_TIMEOUT_S)
+        caps = live["caps"]
+        out["live"] = {
+            "current": live["current"],
+            "resolutions": [{"label": r[0], "width": r[1], "height": r[2]}
+                            for r in sorted(caps["resolutions"], key=lambda r: -r[1] * r[2])],
+            "codecs": caps["codecs"],
+            "fps_max": caps["fps_max"],
+            "bitrate_range": list(caps["bitrate_range"]) if caps["bitrate_range"] else None,
+        }
+    except asyncio.TimeoutError:
+        out["error"] = "the camera did not answer in time"
+    except AmcrestError as exc:
+        out["error"] = str(exc)
+    finally:
+        await client.aclose()
+    return out
+
+
+@router.put("/{name}/main-stream", dependencies=[Depends(require_admin)])
+async def set_camera_main_stream(
+    name: str, body: CameraMainStream, request: Request
+) -> dict[str, Any]:
+    """Pin this camera's own profile, or send `profile: null` to follow the
+    all-cameras one again; applied now, and the result returned.
+
+    Lightweight like the other per-camera overrides: no device re-probe, no
+    go2rtc regeneration. The camera restarts its own encoder on a resolution
+    or codec change and go2rtc / the recorder reconnect by themselves."""
+    manager = _stream_manager(request)
+    await _get_cam_or_404(request, name)
+    await request.app.state.db.set_camera_main_stream(
+        name, None if body.profile is None else body.profile.model_dump()
+    )
+    cam = await _get_cam_or_404(request, name)
+    result = await manager.apply(cam)
+    out = _main_stream_row(manager, cam)
+    out["result"] = result
+    return out
 
 
 class DwellOverride(BaseModel):

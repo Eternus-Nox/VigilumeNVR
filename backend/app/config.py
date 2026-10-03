@@ -469,6 +469,12 @@ DEFAULT_SETTINGS: dict = {
     # `timezone` (an IANA name) and its on-device NTP client disabled — on
     # connect and every 30 min (see amcrest/time_sync.py).
     "time_sync": {"auto_sync": True, "timezone": DEFAULT_CAMERA_TIMEZONE},
+    # The MAIN-stream encode profile every camera follows unless it pins its
+    # own (cameras.main_stream). All "keep" by default: nothing is changed on
+    # a camera until someone asks (amcrest/encode.py, stream_profiles.py).
+    "streams": {
+        "main": {"resolution": "keep", "codec": "keep", "keyframe_s": None, "bitrate_kbps": None},
+    },
     # default_mode is the effective detect mode for cameras whose per-camera
     # detect_mode is unset/NULL (see VALID_DETECT_MODES / effective_detect_mode).
     # backend: which silicon runs inference.

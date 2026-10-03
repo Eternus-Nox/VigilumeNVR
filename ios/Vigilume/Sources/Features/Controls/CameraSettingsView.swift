@@ -126,6 +126,7 @@ struct CameraSettingsView: View {
                 identityCard
                 detectionCard
                 streamsCard
+                videoQualityCard
                 zonesCard
                 recognitionZonesCard
                 credentialsCard
@@ -356,6 +357,32 @@ struct CameraSettingsView: View {
                 )
             }
             Text("These do NOT filter detection — they only mark where detail is legible enough to be worth a recognition pass. Each editor draws a heatmap of where sightings have actually been readable on this camera, which is usually not where people walk.")
+                .font(.caption2)
+                .foregroundStyle(Theme.textSecondary)
+        }
+    }
+
+    // MARK: - Video quality (main-stream encode profile)
+
+    /// Resolution / codec / keyframes / bitrate of the camera's main stream,
+    /// written to the camera itself — on its own screen because it reads the
+    /// camera live and applies straight away, unlike the Save-batched form.
+    private var videoQualityCard: some View {
+        settingsCard("Video quality", systemImage: "slider.horizontal.3") {
+            NavigationLink {
+                CameraMainStreamView(camera: camera)
+            } label: {
+                HStack {
+                    Label("Main stream", systemImage: "film")
+                        .foregroundStyle(Theme.textPrimary)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                .contentShape(Rectangle())
+            }
+            Text("Resolution, codec and keyframe interval of what is recorded and shown in fullscreen live view — the same as all cameras, or this camera's own.")
                 .font(.caption2)
                 .foregroundStyle(Theme.textSecondary)
         }

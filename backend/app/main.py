@@ -31,6 +31,7 @@ from .amcrest.features import static_capabilities
 from .amcrest.ir_reassert import IrReasserter
 from .amcrest.lens_mask import LensMaskCleaner
 from .amcrest.speaker_probe import SpeakerProbeManager
+from .amcrest.stream_profiles import StreamProfileManager
 from .amcrest.time_sync import TimeSyncManager
 from .auth import AuthService, load_or_create_secrets, ws_token
 from .config import APP_VERSION, BACKEND_TO_DETECTOR, Config, DEFAULT_DETECT_FPS, DEFAULT_DETECT_OBJECTS, MODEL_DETECT_DEFAULTS
@@ -101,6 +102,9 @@ class CameraProber:
         # coming online is our "on connect" signal — set its local time + disable
         # its NTP client then. None-safe: skipped when unset.
         self._time_sync: Optional[TimeSyncManager] = None
+        # Optional main-stream encode profile keeper; same on-connect hook (a
+        # camera that was reset while offline is put back). None-safe.
+        self._stream_profiles: Optional[StreamProfileManager] = None
         # Optional on-connect talk-speaker probe; set via set_speaker_probe.
         # Driven off the same online-transition hook as time-sync. None-safe.
         self._speaker_probe: Optional[SpeakerProbeManager] = None
@@ -115,6 +119,9 @@ class CameraProber:
 
     def set_time_sync(self, time_sync: "TimeSyncManager") -> None:
         self._time_sync = time_sync
+
+    def set_stream_profiles(self, stream_profiles: "StreamProfileManager") -> None:
+        self._stream_profiles = stream_profiles
 
     def set_speaker_probe(self, speaker_probe: "SpeakerProbeManager") -> None:
         self._speaker_probe = speaker_probe
@@ -178,6 +185,11 @@ class CameraProber:
                                 await self._time_sync.notify_reachable(by_name[name])
                             except Exception:  # noqa: BLE001
                                 log.exception("time-sync notify failed for %s", name)
+                        if online and self._stream_profiles is not None and name in by_name:
+                            try:
+                                await self._stream_profiles.notify_reachable(by_name[name])
+                            except Exception:  # noqa: BLE001
+                                log.exception("main-stream notify failed for %s", name)
                         # Same "on connect" hook: probe the camera's real
                         # talk-speaker so the Talk button only shows where audio
                         # output exists. Non-fatal — must never stall probing.
@@ -493,6 +505,14 @@ async def lifespan(app: FastAPI):
     # resync + a periodic re-push loop (time_sync.run) back it up. Non-fatal.
     time_sync = TimeSyncManager(settings, cameras_provider=db.list_cameras)
     prober.set_time_sync(time_sync)
+    # Main-stream encode profiles (settings.streams.main, or a camera's own):
+    # applied on save, on reconnect and every 30 min (amcrest/stream_profiles).
+    # A size change makes the recording reader re-probe frame sizes.
+    stream_profiles = StreamProfileManager(
+        settings, cameras_provider=db.list_cameras,
+        on_stream_changed=plate_replay.forget_dims,
+    )
+    prober.set_stream_profiles(stream_profiles)
     # On-connect talk-speaker detection: probe ONVIF GetAudioOutputs the first
     # time each camera is reachable and pin the `speaker` capability so the Talk
     # button only appears on cameras with a real speaker. Same prober hook +
@@ -543,6 +563,7 @@ async def lifespan(app: FastAPI):
     app.state.spotlight = spotlight
     app.state.ir_reasserter = ir_reasserter
     app.state.time_sync = time_sync
+    app.state.stream_profiles = stream_profiles
     app.state.speaker_probe = speaker_probe
     app.state.lens_mask = lens_mask
     app.state.prober = prober
@@ -587,6 +608,8 @@ async def lifespan(app: FastAPI):
             # local time on every camera so a drifting clock self-heals between
             # reconnects. Non-fatal; cancelled + drained in the finally below.
             asyncio.create_task(time_sync.run(), name="camera-time-sync"),
+            # Periodic main-stream profile re-assert (every 30 min).
+            asyncio.create_task(stream_profiles.run(), name="camera-main-stream"),
             # Optional nightly restart (settings.system.auto_restart). Off by
             # default; the loop is always running so the setting takes effect
             # without needing a restart to schedule a restart.
@@ -653,6 +676,7 @@ async def lifespan(app: FastAPI):
         await mqtt.stop()
         await ir_reasserter.stop()
         await time_sync.stop_all()
+        await stream_profiles.stop_all()
         await speaker_probe.stop_all()
         await lens_mask.stop_all()
         await doorbells.stop_all()

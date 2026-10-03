@@ -1511,6 +1511,65 @@ export interface CameraHealthReport {
   cameras: CameraHealthRow[];
 }
 
+/** A camera MAIN-stream encode profile (backend amcrest/encode.py). "keep" /
+ *  null leaves that setting as the camera has it. `resolution` is a ceiling
+ *  ("1080p" = the camera's largest size at or under 1080 high) or an exact
+ *  "WxH" from that camera's own list. */
+export type MainStreamResolution = 'keep' | '720p' | '1080p' | '1440p' | '4k' | 'max' | string;
+export interface MainStreamProfile {
+  resolution: MainStreamResolution;
+  codec: 'keep' | 'h264' | 'h265';
+  keyframe_s: number | null;
+  bitrate_kbps: number | null;
+}
+
+/** What one apply did, as the camera reported it afterwards. */
+export interface MainStreamResult {
+  camera: string;
+  ok: boolean;
+  inherited: boolean;
+  at: number;
+  skipped?: boolean;
+  error?: string;
+  changed?: string[];
+  rejected?: string[];
+  not_applied?: string[];
+  notes?: string[];
+}
+
+export interface MainStreamNow {
+  width: number | null;
+  height: number | null;
+  codec: string | null;
+  codec_raw: string | null;
+  fps: number | null;
+  gop: number | null;
+  keyframe_s: number | null;
+  bitrate_kbps: number | null;
+  bitrate_control: string | null;
+}
+
+export interface CameraMainStreamRow {
+  camera: string;
+  inherited: boolean;
+  own: Partial<MainStreamProfile> | null;
+  effective: MainStreamProfile;
+  last: MainStreamResult | null;
+}
+
+export interface CameraMainStreamDetail extends CameraMainStreamRow {
+  global: MainStreamProfile;
+  live: {
+    current: MainStreamNow | null;
+    resolutions: { label: string; width: number; height: number }[];
+    codecs: string[];
+    fps_max: number | null;
+    bitrate_range: [number, number] | null;
+  } | null;
+  error: string | null;
+  result?: MainStreamResult;
+}
+
 /** Per-camera ingest health from GET /api/system/detector. */
 export interface DetectorCameraStatus {
   name: string;
@@ -1855,6 +1914,33 @@ export const api = {
     request<{ name: string; dwell_seconds: number | null }>(
       `/api/cameras/${encodeURIComponent(name)}/dwell`,
       { method: 'PUT', body: JSON.stringify({ dwell_seconds: dwellSeconds }) },
+    ),
+
+  /** The all-cameras main-stream profile + each camera's status. No camera
+   *  is contacted. */
+  mainStreamOverview: () =>
+    request<{ profile: MainStreamProfile; cameras: CameraMainStreamRow[] }>(
+      '/api/cameras/main-stream',
+    ),
+  /** Store the all-cameras profile and apply it now; waits for the cameras.
+   *  `resetCameras` also puts every camera with its own profile back on it. */
+  setMainStreamForAll: (profile: MainStreamProfile, resetCameras = false) =>
+    request<{ profile: MainStreamProfile; results: MainStreamResult[] }>(
+      '/api/cameras/main-stream',
+      { method: 'PUT', body: JSON.stringify({ profile, reset_cameras: resetCameras }) },
+    ),
+  reapplyMainStreams: () =>
+    request<{ results: MainStreamResult[] }>('/api/cameras/main-stream/apply', {
+      method: 'POST',
+    }),
+  /** One camera's profile + its main stream as it is now (read live). */
+  cameraMainStream: (name: string) =>
+    request<CameraMainStreamDetail>(`/api/cameras/${encodeURIComponent(name)}/main-stream`),
+  /** Pin one camera's profile (applied now), or null to follow all-cameras. */
+  setCameraMainStream: (name: string, profile: MainStreamProfile | null) =>
+    request<CameraMainStreamRow & { result: MainStreamResult }>(
+      `/api/cameras/${encodeURIComponent(name)}/main-stream`,
+      { method: 'PUT', body: JSON.stringify({ profile }) },
     ),
 
   setCameraStationary: (name: string, ignoreStationary: boolean | null) =>

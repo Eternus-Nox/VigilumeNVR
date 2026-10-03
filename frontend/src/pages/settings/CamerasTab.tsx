@@ -36,6 +36,7 @@ import ReorderList from '../../components/ReorderList';
 import { useAppState, useCameraLive } from '../../state/AppState';
 import CameraHealthCard from '../../components/CameraHealthCard';
 import PrivacyModeCard from '../../components/PrivacyModeCard';
+import MainStreamCard, { CameraMainStreamPanel } from '../../components/MainStreamCard';
 import { amcrestDefaultUrl, titleCase } from '../../lib/format';
 
 const KNOWN_MODELS = ['IP5M-T1277EW-AI', 'IP8M-2779EW-AI', 'AD410', 'IP3M-941B', 'IP4M-1041B', 'IP4M-1056E'];
@@ -260,6 +261,10 @@ export default function CamerasTab() {
       {/* Privacy Mode: the switch you reach for when you want capture to stop
           NOW, so it stays near the top. */}
       <PrivacyModeCard />
+
+      {/* Main-stream resolution / codec / keyframes for every camera at once;
+          a camera's own override lives in its edit form. */}
+      <MainStreamCard />
 
       <div className="section-head">
         <h2>Cameras</h2>
@@ -598,6 +603,7 @@ export default function CamerasTab() {
                 </p>
               </div>
             )}
+            {editingExisting && <CameraMainStreamPanel name={editingExisting} />}
             <details className="form-span advanced-section">
               <summary>Advanced — streams &amp; detection rate</summary>
               <div className="form-stack">
