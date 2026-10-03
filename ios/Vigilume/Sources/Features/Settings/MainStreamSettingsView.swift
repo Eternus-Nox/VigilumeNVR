@@ -35,7 +35,7 @@ struct MainStreamProfile: Codable, Equatable {
     var summary: String {
         var parts: [String] = []
         if resolution != "keep" {
-            parts.append(MainStreamProfile.resolutionChoices.first { $0.0 == resolution }?.1
+            parts.append(MainStreamProfile.resolutionChoices.first { $0.value == resolution }?.label
                          ?? resolution.replacingOccurrences(of: "x", with: "×"))
         }
         if codec != "keep" { parts.append(codec == "h264" ? "H.264" : "H.265") }
@@ -44,12 +44,23 @@ struct MainStreamProfile: Codable, Equatable {
         return parts.isEmpty ? "Unchanged" : parts.joined(separator: " · ")
     }
 
-    static let resolutionChoices: [(String, String)] = [
-        ("keep", "Leave as is"), ("720p", "Up to 720p"), ("1080p", "Up to 1080p"),
-        ("1440p", "Up to 1440p"), ("4k", "Up to 4K"), ("max", "Camera maximum"),
+    struct Choice: Hashable {
+        let value: String
+        let label: String
+    }
+
+    static let resolutionChoices: [Choice] = [
+        Choice(value: "keep", label: "Leave as is"),
+        Choice(value: "720p", label: "Up to 720p"),
+        Choice(value: "1080p", label: "Up to 1080p"),
+        Choice(value: "1440p", label: "Up to 1440p"),
+        Choice(value: "4k", label: "Up to 4K"),
+        Choice(value: "max", label: "Camera maximum"),
     ]
-    static let codecChoices: [(String, String)] = [
-        ("keep", "Leave as is"), ("h264", "H.264"), ("h265", "H.265"),
+    static let codecChoices: [Choice] = [
+        Choice(value: "keep", label: "Leave as is"),
+        Choice(value: "h264", label: "H.264"),
+        Choice(value: "h265", label: "H.265"),
     ]
 
     static func seconds(_ s: Double) -> String {
@@ -97,7 +108,7 @@ struct MainStreamNow: Decodable {
         let size = (width != nil && height != nil) ? "\(width!)×\(height!)" : "?"
         let key = keyframeS.map { MainStreamProfile.seconds($0) } ?? "?"
         let rate = bitrateKbps.map { "\($0) kbps" } ?? "? kbps"
-        return "\(size) · \(codecRaw ?? "?") · \(fps.map(String.init) ?? "?") fps · "
+        return "\(size) · \(codecRaw ?? "?") · \(fps.map { "\($0)" } ?? "?") fps · "
             + "keyframe every \(key) · \(rate)\(bitrateControl.map { " \($0)" } ?? "")"
     }
 }
@@ -193,16 +204,16 @@ struct MainStreamProfileFields: View {
 
     var body: some View {
         Picker("Resolution", selection: $profile.resolution) {
-            ForEach(MainStreamProfile.resolutionChoices, id: \.0) { choice in
-                Text(choice.1).tag(choice.0)
+            ForEach(MainStreamProfile.resolutionChoices, id: \.value) { choice in
+                Text(choice.label).tag(choice.value)
             }
             ForEach(sizes, id: \.self) { size in
                 Text("\(size.width)×\(size.height)").tag("\(size.width)x\(size.height)")
             }
         }
         Picker("Codec", selection: $profile.codec) {
-            ForEach(MainStreamProfile.codecChoices, id: \.0) { choice in
-                Text(choice.1).tag(choice.0)
+            ForEach(MainStreamProfile.codecChoices, id: \.value) { choice in
+                Text(choice.label).tag(choice.value)
             }
         }
         Picker("Keyframe every", selection: $profile.keyframeS) {
@@ -219,13 +230,13 @@ struct MainStreamProfileFields: View {
                 .multilineTextAlignment(.trailing)
                 .frame(maxWidth: 140)
         }
-        .onAppear { bitrateText = profile.bitrateKbps.map(String.init) ?? "" }
+        .onAppear { bitrateText = profile.bitrateKbps.map { "\($0)" } ?? "" }
         .onChange(of: bitrateText) { _, text in
             let digits = text.filter(\.isNumber)
             profile.bitrateKbps = digits.isEmpty ? nil : Int(digits)
         }
         .onChange(of: profile.bitrateKbps) { _, value in
-            let text = value.map(String.init) ?? ""
+            let text = value.map { "\($0)" } ?? ""
             if text != bitrateText.filter(\.isNumber) { bitrateText = text }
         }
     }

@@ -113,9 +113,11 @@ enum PTZDirection: String, Sendable, CaseIterable {
     case upleft, upright, downleft, downright
 }
 
-// MARK: - Private plumbing
+// MARK: - Plumbing
 
-private extension APIClient {
+// Internal, not private: the main-stream quality screens
+// (Features/Settings/MainStreamSettingsView.swift) ride the same helper.
+extension APIClient {
     func controlsSend(_ method: String, _ path: String, body: Data? = nil) async throws -> Data {
         var request = URLRequest(url: apiBase.appendingPathComponent(path))
         request.httpMethod = method
