@@ -267,25 +267,70 @@ def _caps_codec_label(family: str, offered: list[str]) -> Optional[str]:
     return None
 
 
+def resolution_variants(
+    v: dict[str, str], target: tuple[str, int, int], extra: Optional[dict[str, str]] = None,
+) -> list[dict[str, str]]:
+    """Ways of asking ONE format for `target`, most likely first (field names
+    without the `Encode[0].MainFormat[N].Video.` prefix).
+
+    Amcrest firmware is not consistent about which key sets the size. Most
+    report Width/Height (and a CustomResolutionName next to them); the Dahua
+    API documents a `resolution` key that takes a name ("1080P") or "WxH".
+    Writing all of them at once was REFUSED by real cameras, so each is tried
+    on its own and the size read back after each one. `extra` (the profile's
+    bitrate) rides along with every attempt: these cameras check the bitrate
+    against the new size, and a 4K bitrate can block a drop to 1080p."""
+    label, w, h = target
+    wxh = f"{w}x{h}"
+    out: list[dict[str, str]] = []
+
+    def add(d: dict[str, str]) -> None:
+        d = {**d, **(extra or {})}
+        if d not in out:
+            out.append(d)
+
+    if "Width" in v and "Height" in v:
+        add({"Width": str(w), "Height": str(h)})
+        if "CustomResolutionName" in v:
+            add({"Width": str(w), "Height": str(h), "CustomResolutionName": label})
+            add({"Width": str(w), "Height": str(h), "CustomResolutionName": wxh})
+    add({"resolution": label})
+    add({"resolution": wxh})
+    if "CustomResolutionName" in v:
+        add({"CustomResolutionName": label})
+        add({"CustomResolutionName": wxh})
+    return out
+
+
 def plan_main_stream(
     cfg: dict[str, str], caps: dict[str, Any], profile: dict[str, Any],
 ) -> dict[str, Any]:
-    """The setConfig params that move every main format to `profile`.
+    """What moving every main format to `profile` takes.
 
-    Returns {"groups": {group: {key: value}}, "changes": [str], "keys": [str],
-    "notes": [str]}, where keys[i] ("<format>:<setting>") identifies changes[i]
-    so a read-back can tell which ones stuck,
-    where a group (resolution / codec / keyframes / bitrate) is the unit that is
-    written together and retried alone if the camera rejects the whole set.
+    Returns:
+      primary            the regular stream's format index (the one recorded
+                         and streamed; the others are the variants some
+                         firmware switches to during an event)
+      formats            {N: {field: value}} as read
+      resolution         (label, w, h) to set, or None
+      resolution_formats formats whose size differs, primary first
+      settings           {N: {group: {key: value}}} for codec / keyframes /
+                         bitrate (full setConfig keys)
+      changes, keys      a human line per planned change and its
+                         "<format>:<setting>" id, so a read-back can tell
+                         which ones stuck
+      notes
     Only values that differ are planned, so applying twice is a no-op."""
-    groups: dict[str, dict[str, str]] = {}
     changes: list[str] = []
     keys: list[str] = []
     notes: list[str] = []
     formats = main_formats(cfg)
+    empty = {"primary": None, "formats": {}, "resolution": None, "resolution_formats": [],
+             "settings": {}, "changes": [], "keys": [], "notes": notes}
     if not formats:
-        return {"groups": {}, "changes": [], "keys": [],
-                "notes": ["the camera did not report a main stream"]}
+        notes.append("the camera did not report a main stream")
+        return empty
+    primary = min(formats)
     now = current_main(cfg) or {}
     cur_size = (now["width"], now["height"]) if now.get("width") else None
 
@@ -310,28 +355,25 @@ def plan_main_stream(
             notes.append(f"bitrate clamped to the camera's {lo}-{hi} kbps")
             bitrate = max(lo, min(hi, bitrate))
 
+    resolution_formats: list[int] = []
+    settings: dict[int, dict[str, dict[str, str]]] = {}
     for n, v in formats.items():
         p = f"Encode[0].MainFormat[{n}].Video."
-        label = "main" if n == 0 else f"main #{n}"
+        label = "main" if n == primary else f"main #{n}"
         size = _size_of(v)
-        if target is not None and size != (target[1], target[2]):
-            g = groups.setdefault("resolution", {})
-            if "Width" in v and "Height" in v:
-                g[p + "Width"] = str(target[1])
-                g[p + "Height"] = str(target[2])
-            if "resolution" in v:
-                g[p + "resolution"] = target[0]
-            if "CustomResolutionName" in v:
-                g[p + "CustomResolutionName"] = (
-                    f"{target[1]}x{target[2]}" if _WXH.match(v["CustomResolutionName"] or "")
-                    else target[0])
-            if not any(k.startswith(p) for k in g):
-                g[p + "resolution"] = target[0]
+        # A secondary format smaller than the target is left alone: "up to
+        # 1080p" is a ceiling, and real cameras keep a 1280x720 format #3 that
+        # refuses to be raised (it made every camera's change fail).
+        smaller = (n != primary and size is not None
+                   and size[0] * size[1] < target[1] * target[2]) if target else False
+        if target is not None and size != (target[1], target[2]) and not smaller:
+            resolution_formats.append(n)
             was = f"{size[0]}x{size[1]}" if size else "?"
             changes.append(f"{label} resolution {was} -> {target[1]}x{target[2]}")
             keys.append(f"{n}:resolution")
+        mine = settings.setdefault(n, {})
         if codec_label is not None and _codec_family(v.get("Compression")) != profile["codec"]:
-            groups.setdefault("codec", {})[p + "Compression"] = codec_label
+            mine["codec"] = {p + "Compression": codec_label}
             changes.append(f"{label} codec {v.get('Compression')} -> {codec_label}")
             keys.append(f"{n}:codec")
         if profile["keyframe_s"] is not None:
@@ -343,10 +385,10 @@ def plan_main_stream(
             if fps > 0:
                 want = max(1, int(round(fps * profile["keyframe_s"])))
                 if want != gop:
-                    groups.setdefault("keyframes", {})[p + "GOP"] = str(want)
+                    mine["keyframes"] = {p + "GOP": str(want)}
                     changes.append(f"{label} keyframe every {gop} -> {want} frames ({fps} fps)")
                     keys.append(f"{n}:keyframes")
-            elif n == min(formats):
+            elif n == primary:
                 notes.append("the camera does not report its frame rate; keyframes left alone")
         if bitrate is not None:
             try:
@@ -354,12 +396,17 @@ def plan_main_stream(
             except ValueError:
                 cur_br = None
             if cur_br != bitrate:
-                groups.setdefault("bitrate", {})[p + "BitRate"] = str(bitrate)
+                mine["bitrate"] = {p + "BitRate": str(bitrate)}
                 changes.append(f"{label} bitrate {cur_br} -> {bitrate} kbps")
                 keys.append(f"{n}:bitrate")
-    return {"groups": groups, "changes": changes, "keys": keys, "notes": notes}
+    resolution_formats.sort(key=lambda n: (n != primary, n))
+    return {"primary": primary, "formats": formats, "resolution": target,
+            "resolution_formats": resolution_formats, "bitrate": bitrate,
+            "settings": {n: g for n, g in settings.items() if g},
+            "changes": changes, "keys": keys, "notes": notes}
 
 
-#: Order groups are retried in when the camera rejects the whole set. Lower the
-#: resolution first: some cameras refuse H.264 at 4K but take it at 1080p.
-GROUP_ORDER = ("resolution", "codec", "keyframes", "bitrate")
+#: Order settings are retried in, one at a time, when the camera rejects them
+#: together. Resolution is always set first (and alone): some cameras refuse
+#: H.264 at 4K but take it at 1080p.
+GROUP_ORDER = ("codec", "keyframes", "bitrate")

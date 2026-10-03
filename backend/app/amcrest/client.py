@@ -659,19 +659,80 @@ class AmcrestClient:
     async def read_main_stream(self) -> dict[str, Any]:
         """{current, caps}: the main stream as it is, and what it can be."""
         cfg = await self.get_config("Encode")
-        return {"current": encode_profile.current_main(cfg), "caps": await self.get_encode_caps()}
+        formats = encode_profile.main_formats(cfg)
+        return {"current": encode_profile.current_main(cfg), "caps": await self.get_encode_caps(),
+                # The regular stream's raw Video.* fields, for diagnosing a
+                # camera that refuses a change.
+                "raw": formats[min(formats)] if formats else {},
+                "formats": {n: encode_profile._size_of(v) for n, v in formats.items()}}
+
+    async def _read_encode(self) -> Optional[dict[str, str]]:
+        """getConfig Encode, allowing for an encoder restart: the camera can
+        take a couple of seconds to answer after a resolution or codec change."""
+        for delay in (0.0, 1.0, 2.0):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                return await self.get_config("Encode")
+            except AmcrestError:
+                continue
+        return None
+
+    async def _set_format_resolution(
+        self, n: int, v: dict[str, str], target: tuple[str, int, int],
+        bitrate: Optional[int], first: Optional[dict[str, str]] = None,
+    ) -> tuple[bool, Optional[dict[str, str]], str]:
+        """Set one format's size, trying each key combination
+        (encode.resolution_variants) and reading the size back after each.
+        `first` is a combination that already worked on another format.
+        Returns (ok, the combination that worked, why not)."""
+        p = f"Encode[0].MainFormat[{n}].Video."
+        extra = {"BitRate": str(bitrate)} if bitrate is not None else None
+        variants = encode_profile.resolution_variants(v, target, extra)
+        if first is not None:
+            variants = [first] + [x for x in variants if x != first]
+        why = "the camera refused it"
+        for variant in variants:
+            try:
+                await self.set_config(**{p + k: val for k, val in variant.items()})
+            except AmcrestError as exc:
+                log.info("camera %s [%s]: MainFormat[%d] size %s refused as %s (%s)",
+                         self.ip, self.model or "?", n, target[0], variant, exc)
+                continue
+            cfg = await self._read_encode()
+            if cfg is None:
+                return True, variant, "accepted, but the camera did not answer to confirm"
+            size = encode_profile._size_of(encode_profile.main_formats(cfg).get(n) or {})
+            if size == (target[1], target[2]):
+                log.info("camera %s [%s]: MainFormat[%d] size set to %dx%d with %s",
+                         self.ip, self.model or "?", n, target[1], target[2], sorted(variant))
+                return True, variant, ""
+            why = "the camera answered OK but kept its old size"
+            log.info("camera %s [%s]: MainFormat[%d] answered OK to %s but reads %s",
+                     self.ip, self.model or "?", n, variant, size)
+        return False, None, why
 
     async def apply_main_stream(self, profile: dict[str, Any]) -> dict[str, Any]:
-        """Move the main stream (every MainFormat) to `profile`, then READ IT
-        BACK: a Dahua setConfig can answer OK and keep the old value, so what
-        is reported as changed is what the camera reports afterwards.
+        """Move the main stream to `profile`, then READ IT BACK: a Dahua
+        setConfig can answer OK and keep the old value, so what is reported
+        as changed is what the camera reports afterwards.
 
-        One setConfig with everything first; if the camera rejects that, each
-        group (resolution, codec, keyframes, bitrate — encode.GROUP_ORDER) is
-        tried alone so one unsupported value does not block the rest. Raises
-        AmcrestError only when the camera cannot be read at all.
+        The PRIMARY format (the regular stream — what is recorded and
+        streamed) is what success means. The other MainFormats are the
+        variants some firmware switches to during an event; they are kept in
+        step where the camera allows it, and a camera that will not change
+        one (real cameras keep a 1280x720 format #3 that refuses 1080p) is a
+        note, not a failure. Writing every format at once let that one
+        refusal block the whole change.
 
-        Returns {changed, rejected, not_applied, notes, before, after}."""
+        Order: the size first, format by format (encode.resolution_variants —
+        Amcrest firmware is inconsistent about which key sets it), then
+        codec / keyframes / bitrate together, falling back to one setting
+        and one format at a time if the camera refuses the set.
+
+        Returns {changed, rejected, not_applied, notes, before, after} where
+        changed / rejected / not_applied are about the primary format only.
+        Raises AmcrestError only when the camera cannot be read at all."""
         profile = encode_profile.normalize_profile(profile)
         result: dict[str, Any] = {"changed": [], "rejected": [], "not_applied": [],
                                   "notes": [], "before": None, "after": None}
@@ -682,46 +743,77 @@ class AmcrestClient:
             return result
         caps = await self.get_encode_caps()
         plan = encode_profile.plan_main_stream(cfg, caps, profile)
-        result["notes"] = plan["notes"]
-        groups = plan["groups"]
-        if not groups:
+        notes: list[str] = list(plan["notes"])
+        result["notes"] = notes
+        if not plan["changes"]:
             result["after"] = result["before"]
             return result
-        everything = {k: v for g in groups.values() for k, v in g.items()}
-        try:
-            await self.set_config(**everything)
-        except AmcrestUnsupportedError:
-            raise
-        except AmcrestError as exc:
-            log.info("camera %s [%s]: main-stream profile rejected as a whole (%s); "
-                     "trying each setting alone", self.ip, self.model or "?", exc)
-            for name in encode_profile.GROUP_ORDER:
-                if name not in groups:
-                    continue
-                try:
-                    await self.set_config(**groups[name])
-                except AmcrestError as exc2:
-                    result["rejected"].append(f"{name}: {exc2}")
-        # The camera restarts its encoder on a resolution or codec change and
-        # can take a moment before it answers getConfig again.
-        after_cfg: Optional[dict[str, str]] = None
-        for delay in (0.0, 1.0, 2.0):
-            if delay:
-                await asyncio.sleep(delay)
+        primary = plan["primary"]
+        refused: dict[str, str] = {}   # "<format>:<setting>" -> why
+
+        target = plan["resolution"]
+        if target is not None and plan["resolution_formats"]:
+            worked: Optional[dict[str, str]] = None
+            for n in plan["resolution_formats"]:
+                if n != primary and f"{primary}:resolution" in refused:
+                    break   # event formats alone are not worth changing
+                ok, variant, why = await self._set_format_resolution(
+                    n, plan["formats"][n], target, plan.get("bitrate"), first=worked)
+                if ok:
+                    worked = worked or variant
+                    if why:
+                        notes.append(why)
+                else:
+                    refused[f"{n}:resolution"] = why
+
+        settings = plan["settings"]
+        everything = {k: val for groups in settings.values()
+                      for g in groups.values() for k, val in g.items()}
+        if everything:
             try:
-                after_cfg = await self.get_config("Encode")
-                break
-            except AmcrestError:
-                continue
+                await self.set_config(**everything)
+            except AmcrestError as exc:
+                log.info("camera %s [%s]: main-stream settings refused together (%s); "
+                         "trying one at a time", self.ip, self.model or "?", exc)
+                order = sorted(settings, key=lambda n: (n != primary, n))
+                for name in encode_profile.GROUP_ORDER:
+                    for n in order:
+                        params = settings[n].get(name)
+                        if not params:
+                            continue
+                        try:
+                            await self.set_config(**params)
+                        except AmcrestError:
+                            refused[f"{n}:{name}"] = "the camera refused it"
+
+        after_cfg = await self._read_encode()
         if after_cfg is None:
-            result["notes"].append("the camera did not answer after the change; not verified")
-            result["changed"] = plan["changes"]
+            notes.append("the camera did not answer after the change; not verified")
+            result["changed"] = [c for c, k in zip(plan["changes"], plan["keys"])
+                                 if k.startswith(f"{primary}:") and k not in refused]
             return result
         result["after"] = encode_profile.current_main(after_cfg)
         leftover = encode_profile.plan_main_stream(after_cfg, caps, profile)
-        stuck = set(leftover["keys"])
-        result["not_applied"] = leftover["changes"]
-        result["changed"] = [c for c, k in zip(plan["changes"], plan["keys"]) if k not in stuck]
+        stuck = dict(zip(leftover["keys"], leftover["changes"]))
+
+        def setting_of(key: str) -> str:
+            return key.split(":", 1)[1]
+
+        for c, k in zip(plan["changes"], plan["keys"]):
+            n = int(k.split(":", 1)[0])
+            if n == primary:
+                if k not in stuck:
+                    result["changed"].append(c)
+                elif k in refused:
+                    result["rejected"].append(f"{c[len('main '):]}: {refused[k]}")
+                else:
+                    result["not_applied"].append(
+                        f"{c[len('main '):]}: the camera answered OK but kept its old value")
+        others = sorted({int(k.split(":", 1)[0]) for k in stuck if not k.startswith(f"{primary}:")})
+        for n in others:
+            what = ", ".join(sorted({setting_of(k) for k in stuck if k.startswith(f"{n}:")}))
+            notes.append(f"secondary format #{n} kept its own {what} (the camera would not "
+                         "change it; the regular stream is the one Vigilume records)")
         return result
 
     # ---------- white light / spotlight (Lighting_V2) ----------

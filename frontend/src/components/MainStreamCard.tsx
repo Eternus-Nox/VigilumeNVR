@@ -167,14 +167,20 @@ function ResultLine({ r, name }: { r: MainStreamResult; name?: string }) {
     return <li><strong>{label}</strong>: <span className="form-error">{r.error}</span></li>;
   }
   if (r.skipped) return <li><strong>{label}</strong>: nothing to change</li>;
-  const problems = [...(r.rejected ?? []), ...(r.not_applied ?? [])];
-  const changed = (r.changed ?? []).filter((c) => c.startsWith('main ') && !c.startsWith('main #'));
+  const arrow = (t: string) => t.replace(/ -> /g, ' → ');
+  const problems = [...(r.rejected ?? []), ...(r.not_applied ?? [])].map(arrow);
+  const changed = (r.changed ?? [])
+    .filter((c) => c.startsWith('main ') && !c.startsWith('main #'))
+    .map((c) => arrow(c.replace(/^main /, '')));
   return (
     <li>
       <strong>{label}</strong>:{' '}
-      {changed.length ? changed.map((c) => c.replace(/^main /, '')).join('; ') : 'already set'}
+      {changed.length === 0 && problems.length === 0 && 'already set'}
+      {changed.length > 0 && <>changed {changed.join('; ')}</>}
       {problems.length > 0 && (
-        <span className="form-error"> — not applied: {problems.join('; ')}</span>
+        <span className="form-error">
+          {changed.length > 0 ? ' — ' : ''}not changed: {problems.join('; ')}
+        </span>
       )}
       {(r.notes ?? []).length > 0 && <span className="muted"> ({r.notes!.join('; ')})</span>}
     </li>

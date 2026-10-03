@@ -67,20 +67,33 @@ class FakeCamera:
 
     def __init__(self, *, width=3840, height=2160, codec="H.265", fps=15, gop=30,
                  bitrate=8192, caps=True, wxh_keys=True, max_keys=None,
-                 bitrate_ceiling=None, h264_max_width=None):
+                 bitrate_ceiling=None, h264_max_width=None, format3_720=False,
+                 size_key=None, reject_custom_name=False, bitrate_per_mpx=None):
         self.formats = {n: {"Compression": codec, "FPS": str(fps), "GOP": str(gop),
                             "BitRate": str(bitrate), "BitRateControl": "VBR"}
-                        for n in (0, 1)}
-        for v in self.formats.values():
+                        for n in ((0, 1, 2, 3) if format3_720 else (0, 1))}
+        for n, v in self.formats.items():
+            w, h = (1280, 720) if (format3_720 and n == 3) else (width, height)
             if wxh_keys:
-                v.update(Width=str(width), Height=str(height),
-                         CustomResolutionName=f"{width}x{height}")
+                v.update(Width=str(w), Height=str(h), CustomResolutionName=f"{w}x{h}")
             else:
-                v["resolution"] = f"{width}x{height}"
+                v["resolution"] = f"{w}x{h}"
         self.caps = caps
         self.max_keys = max_keys
         self.bitrate_ceiling = bitrate_ceiling
         self.h264_max_width = h264_max_width
+        # Real-camera quirks seen in the field:
+        #  format3_720       MainFormat[3] is a separate 720p-capped format and
+        #                    refuses anything bigger (rejecting the WHOLE write)
+        #  size_key          the only field that can change the size
+        #                    ("resolution"); Width/Height writes are refused
+        #  reject_custom_name  any write touching CustomResolutionName is refused
+        #  bitrate_per_mpx   a size whose bitrate would exceed this many kbps
+        #                    per megapixel is refused
+        self.format3_720 = format3_720
+        self.size_key = size_key
+        self.reject_custom_name = reject_custom_name
+        self.bitrate_per_mpx = bitrate_per_mpx
         self.sets: list[dict[str, str]] = []
         self.offline = False
 
@@ -96,6 +109,11 @@ class FakeCamera:
             return int(v["Width"])
         return int(v["resolution"].split("x")[0])
 
+    def height(self, v: dict[str, str]) -> int:
+        if "Height" in v:
+            return int(v["Height"])
+        return int(v["resolution"].split("x")[1])
+
     def set_config(self, params: dict[str, str]) -> str:
         if self.max_keys is not None and len(params) > self.max_keys:
             return "Error\r\n"
@@ -107,7 +125,21 @@ class FakeCamera:
             n, field = int(m.group(1)), m.group(2)
             if field == "BitRate" and self.bitrate_ceiling and int(value) > self.bitrate_ceiling:
                 continue  # answers OK, keeps the old value
+            if field == "CustomResolutionName" and self.reject_custom_name:
+                return "Error\r\n"
+            if self.size_key == "resolution" and field in ("Width", "Height"):
+                return "Error\r\n"
+            if field == "resolution" and "Width" in staged[n]:
+                w, h = value.split("x")
+                staged[n]["Width"], staged[n]["Height"] = w, h
+                continue
             staged[n][field] = value
+        for n, v in staged.items():
+            w, h = self.width(v), self.height(v)
+            if self.format3_720 and n == 3 and h > 720:
+                return "Error\r\n"
+            if self.bitrate_per_mpx and int(v["BitRate"]) > self.bitrate_per_mpx * w * h / 1e6:
+                return "Error\r\n"
         if self.h264_max_width:
             for v in staged.values():
                 if v["Compression"].startswith("H.264") and self.width(v) > self.h264_max_width:
@@ -227,16 +259,27 @@ def planning_checks() -> None:
     prof = E.normalize_profile({"resolution": "1080p", "codec": "h264", "keyframe_s": 1,
                                 "bitrate_kbps": 4096})
     plan = E.plan_main_stream(cfg, caps, prof)
-    g = plan["groups"]
-    check(set(g) == {"resolution", "codec", "keyframes", "bitrate"}, "all four groups planned")
-    check(g["resolution"]["Encode[0].MainFormat[1].Video.Width"] == "1920",
-          "the event-time main format is kept in step")
-    check(g["keyframes"]["Encode[0].MainFormat[0].Video.GOP"] == "15", "1 s keyframes at 15 fps = GOP 15")
-    check(not any("ExtraFormat" in k for grp in g.values() for k in grp), "the substream is never touched")
+    check(plan["primary"] == 0 and plan["resolution"] == ("1920x1080", 1920, 1080),
+          "the regular stream is format 0; target 1920x1080")
+    check(plan["resolution_formats"] == [0, 1], "every format with a different size, primary first")
+    check(set(plan["settings"][0]) == {"codec", "keyframes", "bitrate"}, "the other three settings planned")
+    check(plan["settings"][0]["keyframes"]["Encode[0].MainFormat[0].Video.GOP"] == "15",
+          "1 s keyframes at 15 fps = GOP 15")
+    flat = {k: v for g in plan["settings"].values() for grp in g.values() for k, v in grp.items()}
+    check(not any("ExtraFormat" in k for k in flat), "the substream is never touched")
     check(len(plan["keys"]) == len(plan["changes"]) == 8, "one key per change")
-    applied = dict(cfg)
-    for grp in g.values():
-        applied.update(grp)
+    variants = E.resolution_variants(E.main_formats(cfg)[0], plan["resolution"], {"BitRate": "4096"})
+    check(variants[0] == {"Width": "1920", "Height": "1080", "BitRate": "4096"},
+          "first try: Width/Height alone, with the new bitrate")
+    check({"resolution": "1920x1080", "BitRate": "4096"} in variants
+          and all("BitRate" in v for v in variants),
+          "then the other ways of naming the size, each with the bitrate")
+    check(len(variants) == len({tuple(sorted(v.items())) for v in variants}), "no duplicate attempts")
+    applied = dict(flat)
+    applied = {**cfg, **flat}
+    for n in plan["resolution_formats"]:
+        p = f"Encode[0].MainFormat[{n}].Video."
+        applied.update({p + "Width": "1920", p + "Height": "1080", p + "CustomResolutionName": "1920x1080"})
     check(E.plan_main_stream(applied, caps, prof)["changes"] == [],
           "re-planning the result changes nothing (idempotent)")
     cur = E.current_main(cfg)
@@ -249,21 +292,60 @@ def planning_checks() -> None:
 
 async def client_checks() -> None:
     print("B: client apply + read-back")
-    CAMERAS["10.0.0.21"] = cam = FakeCamera(max_keys=6)
+    CAMERAS["10.0.0.21"] = cam = FakeCamera(max_keys=3)
     client = AmcrestClient("10.0.0.21", "u", "p")
     res = await client.apply_main_stream({"resolution": "1080p", "codec": "h264", "keyframe_s": 1})
     check(cam.formats[0]["Width"] == "1920" and cam.formats[1]["Compression"] == "H.264",
-          "a whole-set rejection (too many keys) falls back to one setting at a time")
-    check(len(cam.sets) == 3, f"three group writes after the rejection (got {len(cam.sets)})")
-    check(res["after"]["width"] == 1920 and res["after"]["codec"] == "h264" and not res["not_applied"],
+          "a refused set of settings falls back to one setting and one format at a time")
+    writes = len(cam.sets)
+    check(res["after"]["width"] == 1920 and res["after"]["codec"] == "h264"
+          and not res["not_applied"] and not res["rejected"],
           "result reports what the camera reports afterwards")
+    check(all(c.startswith("main ") and not c.startswith("main #") for c in res["changed"]),
+          "changed lists the regular stream only")
     again = await client.apply_main_stream({"resolution": "1080p", "codec": "h264", "keyframe_s": 1})
-    check(again["changed"] == [] and len(cam.sets) == 3, "applying twice writes nothing")
+    check(again["changed"] == [] and len(cam.sets) == writes, "applying twice writes nothing")
+
+    print("B2: the field report — 720p format #3, picky size keys, bitrate limits")
+    CAMERAS["10.0.0.25"] = cam5 = FakeCamera(format3_720=True)
+    res = await AmcrestClient("10.0.0.25", "u", "p").apply_main_stream(
+        {"resolution": "1080p", "codec": "h264", "keyframe_s": 1})
+    check(cam5.formats[0]["Width"] == "1920" and cam5.formats[0]["Compression"] == "H.264",
+          "a 720p-capped format #3 no longer blocks the regular stream")
+    check(cam5.formats[3]["Height"] == "720", "format #3 left at 720p")
+    check(not res["rejected"] and not res["not_applied"], "...and the camera counts as applied")
+    check(not any("#3" in n for n in res["notes"]),
+          "format #3 already under the ceiling is not an error (1080p would upscale it — skipped)")
+
+    CAMERAS["10.0.0.26"] = cam6 = FakeCamera(size_key="resolution")
+    res = await AmcrestClient("10.0.0.26", "u", "p").apply_main_stream({"resolution": "1080p"})
+    check(cam6.formats[0]["Width"] == "1920" and not res["rejected"],
+          "a camera refusing Width/Height takes the size through `resolution`")
+
+    CAMERAS["10.0.0.27"] = cam7 = FakeCamera(reject_custom_name=True)
+    res = await AmcrestClient("10.0.0.27", "u", "p").apply_main_stream({"resolution": "1080p"})
+    check(cam7.formats[0]["Width"] == "1920" and not res["rejected"],
+          "a camera refusing CustomResolutionName takes Width/Height alone")
+
+    CAMERAS["10.0.0.28"] = cam8 = FakeCamera(bitrate=8192, bitrate_per_mpx=2500)
+    res = await AmcrestClient("10.0.0.28", "u", "p").apply_main_stream(
+        {"resolution": "1080p", "bitrate_kbps": 4096})
+    check(cam8.formats[0]["Width"] == "1920" and cam8.formats[0]["BitRate"] == "4096",
+          "a size blocked by the old bitrate goes through with the new bitrate alongside")
+
+    CAMERAS["10.0.0.29"] = cam9 = FakeCamera(size_key="resolution", reject_custom_name=True,
+                                             bitrate_per_mpx=1)
+    res = await AmcrestClient("10.0.0.29", "u", "p").apply_main_stream({"resolution": "1080p"})
+    check(cam9.formats[0]["Width"] == "3840" and len(res["rejected"]) == 1
+          and "resolution" in res["rejected"][0] and "refused" in res["rejected"][0],
+          "a size refused every way is ONE readable line, not a dump of every format")
 
     CAMERAS["10.0.0.22"] = cam2 = FakeCamera(bitrate_ceiling=12000)
     res = await AmcrestClient("10.0.0.22", "u", "p").apply_main_stream({"bitrate_kbps": 16000})
-    check(res["changed"] == [] and len(res["not_applied"]) == 2,
-          "OK-but-not-kept is reported as not applied")
+    check(res["changed"] == [] and len(res["not_applied"]) == 1
+          and "kept its old value" in res["not_applied"][0],
+          "OK-but-not-kept is reported as not applied (regular stream)")
+    check(any("#1" in n for n in res["notes"]), "...and the secondary format as a note")
 
     CAMERAS["10.0.0.23"] = cam3 = FakeCamera(h264_max_width=3000)
     res = await AmcrestClient("10.0.0.23", "u", "p").apply_main_stream({"codec": "h264"})

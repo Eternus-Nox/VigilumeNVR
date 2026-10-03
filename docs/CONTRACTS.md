@@ -339,16 +339,32 @@ changes until someone asks.
   field of view). An exact `WxH` from the camera's own list is accepted
   per camera. A camera that will not list its sizes gets a standard 16:9 size
   no larger than it runs now.
-* **Every `MainFormat[N]` is kept in step** — some firmware switches the
-  stream to the motion/alarm format during an event, and a different codec
-  there would break recording mid-event. `ExtraFormat` (the substream) is
-  never touched here (`provision_substream_gop` owns it).
-* **Written, then read back.** One `setConfig` with everything; if the camera
-  rejects the set, each setting (resolution, codec, keyframes, bitrate — in
-  that order, since some cameras refuse H.264 at 4K but take it at 1080p) is
-  tried alone. The result lists `changed` (what the camera reports
-  afterwards), `rejected`, and `not_applied` (answered OK, kept the old
-  value). Applying is idempotent: only differing values are written.
+* **The regular stream (the lowest `MainFormat`) is what success means.** The
+  other formats are variants some firmware switches to during an event; they
+  are kept in step where the camera allows, a refusal there is a note, and a
+  secondary format SMALLER than the target is never raised (real cameras keep
+  a 1280x720 format #3 that refuses 1080p — writing every format in one
+  request let that refusal fail every camera). `ExtraFormat` (the substream)
+  is never touched here (`provision_substream_gop` owns it).
+* **The size goes first, format by format, several ways.** Amcrest firmware
+  is not consistent about which key sets it, and real cameras refused
+  Width + Height + CustomResolutionName written together. So
+  `encode.resolution_variants` tries Width/Height alone, then with
+  CustomResolutionName (as the camera's label, then as WxH), then
+  `resolution` (label, then WxH), then CustomResolutionName alone, reading
+  the size back after each; the combination that worked on the regular
+  stream is tried first on the others. The profile's bitrate rides along with
+  every attempt — these cameras check the bitrate against the new size, so a
+  4K bitrate can block a drop to 1080p. Then codec / keyframes / bitrate in
+  one request, falling back to one setting and one format at a time (some
+  cameras refuse H.264 at 4K but take it at 1080p, hence size first).
+* **Results are about the regular stream:** `changed` (what the camera
+  reports afterwards), `rejected` (the camera refused it, every way),
+  `not_applied` (answered OK, kept the old value); secondary formats only
+  ever produce `notes`. Applying is idempotent: only differing values are
+  written. `GET /api/cameras/{name}/main-stream` also returns the regular
+  stream's raw `Video.*` fields and every format's size, to diagnose a camera
+  that still refuses.
 * **When:** on save (the API waits and returns each camera's result), on a
   camera's reconnect (prober hook), and every 30 min — a factory reset or a
   change made in the camera's web page drifts back. A size change makes the

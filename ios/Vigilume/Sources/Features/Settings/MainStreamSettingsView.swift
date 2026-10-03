@@ -87,11 +87,14 @@ struct MainStreamResult: Decodable, Identifiable {
         if skipped == true { return "Nothing to change" }
         let main = (changed ?? [])
             .filter { $0.hasPrefix("main ") && !$0.hasPrefix("main #") }
-            .map { String($0.dropFirst(5)) }
-        var text = main.isEmpty ? "Already set" : main.joined(separator: "; ")
-        let problems = (rejected ?? []) + (notApplied ?? [])
-        if !problems.isEmpty { text += " — not applied: " + problems.joined(separator: "; ") }
-        return text
+            .map { String($0.dropFirst(5)).replacingOccurrences(of: " -> ", with: " → ") }
+        let problems = ((rejected ?? []) + (notApplied ?? []))
+            .map { $0.replacingOccurrences(of: " -> ", with: " → ") }
+        if main.isEmpty && problems.isEmpty { return "Already set" }
+        var lines: [String] = []
+        if !main.isEmpty { lines.append("Changed: " + main.joined(separator: "; ")) }
+        if !problems.isEmpty { lines.append("Not changed: " + problems.joined(separator: "; ")) }
+        return lines.joined(separator: "\n")
     }
 }
 

@@ -35,8 +35,9 @@ from .client import AmcrestClient, AmcrestError
 log = logging.getLogger(__name__)
 
 _INTERVAL_S = 30 * 60.0
-#: One camera's apply, including the read-back after an encoder restart.
-_APPLY_TIMEOUT_S = 25.0
+#: One camera's apply: a size may take several key combinations, each read
+#: back after the camera restarts its encoder.
+_APPLY_TIMEOUT_S = 60.0
 #: Cameras configured at once by an "apply to all".
 _CONCURRENCY = 4
 

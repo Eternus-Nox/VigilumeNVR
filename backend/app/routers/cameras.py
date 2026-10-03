@@ -1243,6 +1243,9 @@ async def get_camera_main_stream(name: str, request: Request) -> dict[str, Any]:
             "codecs": caps["codecs"],
             "fps_max": caps["fps_max"],
             "bitrate_range": list(caps["bitrate_range"]) if caps["bitrate_range"] else None,
+            "raw": live.get("raw") or {},
+            "formats": {str(n): (f"{s[0]}x{s[1]}" if s else None)
+                        for n, s in (live.get("formats") or {}).items()},
         }
     except asyncio.TimeoutError:
         out["error"] = "the camera did not answer in time"
