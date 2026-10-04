@@ -376,12 +376,19 @@ class FaceRecognizer:
 
     # -- inference ------------------------------------------------------
 
-    def detect_blocking(self, frame_bgr: np.ndarray) -> list[FaceDetection]:
-        """Faces in a BGR frame. CPU-bound — call via `detect()` off the loop."""
+    def detect_blocking(
+        self, frame_bgr: np.ndarray, *, min_px: float = MIN_FACE_PX
+    ) -> list[FaceDetection]:
+        """Faces in a BGR frame. CPU-bound — call via `detect()` off the loop.
+
+        Faces narrower than `min_px` are dropped. A caller that needs to tell
+        "no face" apart from "a face, too small to use" passes 0 and splits
+        the result itself (FacePass does, for its drop counters)."""
         if not self.ready or frame_bgr is None or frame_bgr.size == 0:
             return []
         with TIMINGS.face_detect.measure():
-            return self._detect_blocking(frame_bgr)
+            faces = self._detect_blocking(frame_bgr)
+        return [f for f in faces if min(f.width, f.height) >= min_px]
 
     def _detect_blocking(self, frame_bgr: np.ndarray) -> list[FaceDetection]:
         """The real body. Split only so the timer wraps exactly the work."""
@@ -412,8 +419,7 @@ class FaceRecognizer:
         faces = np.asarray(faces, dtype=np.float32).copy()
         if scale < 1.0:
             faces[:, :14] /= scale
-        out = [FaceDetection(row) for row in faces]
-        return [f for f in out if min(f.width, f.height) >= MIN_FACE_PX]
+        return [FaceDetection(row) for row in faces]
 
     def _cv2_detect(self, frame_bgr: np.ndarray) -> Optional[np.ndarray]:
         h, w = frame_bgr.shape[:2]
@@ -509,8 +515,10 @@ class FaceRecognizer:
 
     # -- async wrappers -------------------------------------------------
 
-    async def detect(self, frame_bgr: np.ndarray) -> list[FaceDetection]:
-        return await asyncio.to_thread(self.detect_blocking, frame_bgr)
+    async def detect(
+        self, frame_bgr: np.ndarray, *, min_px: float = MIN_FACE_PX
+    ) -> list[FaceDetection]:
+        return await asyncio.to_thread(self.detect_blocking, frame_bgr, min_px=min_px)
 
     async def align(
         self, frame_bgr: np.ndarray, face: FaceDetection

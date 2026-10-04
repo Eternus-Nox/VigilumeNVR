@@ -1481,8 +1481,15 @@ numbers in an entirely plausible range. Bumping makes existing samples report as
 stale via `/api/recognition/status`, which is the correct visible outcome.
 
 The per-frame cost model is the design (`facepass.py`): face detection runs on
-the **person crop** rather than the frame (D-FINE already said where the people
-are, and a face found in foliage is not inside a person box); the pass is
+the **head region of the person's box** — its upper 65%, plus 8% margin
+(`head_box`) — rather than the frame (D-FINE already said where the people are,
+and a face found in foliage is not inside a person box) or the whole box (a face
+is never in the lower third of a person; measured on 936 looks at 42-90 px, day,
+dark and IR: 634 faces found against 635 for the whole box, at 24% less YuNet
+time, and a face lower in the box — a shirt print, a child carried in front —
+can no longer be taken as theirs). A head region narrower or shorter than
+`MIN_FACE_PX` is not searched at all and counts as `too_small`. The same head
+region is what a snapshot look and every burst frame search. The pass is
 **throttled per track**; and the 128-d embedding is computed **once per track**,
 not per shot — alignment is cheap and needed every pass, embedding is not. The
 answer is written at **track end**, re-identified from the best shot of the whole
@@ -1549,14 +1556,15 @@ Measured on CPU (the GPU path is the same graphs):
 
 #### Why a face may not reach "unknown faces"
 
-A face passes six gates before it is reviewable, and every one of them used to
+A face passes seven gates before it is reviewable, and every one of them used to
 be silent — so "the list is emptier than it should be" had no answer short of
 reading the source. `GET /api/recognition/status` now serves `face.drops`,
 counted since boot, because the remedies are opposite:
 
 | reason | what it means | what to do |
 |---|---|---|
-| `no_face_found` | the person was facing away | nothing |
+| `no_face_found` | no face in the head region of the person's box (the upper 65% of it — only that is searched) — usually facing away | nothing |
+| `too_small` | on the detect frame, the face (or the head region itself) is under `MIN_FACE_PX` (40 px); a head region that small is not searched at all | turn on full-resolution looks (`face_hires`) — they are what read these — or move the camera closer |
 | `below_quality` | under the buffer floor. A face narrower than `FACE_MIN_PX` scores **zero outright** (the resolution veto), so this is usually range | move the camera, raise detect resolution, or lower `identify_quality` |
 | `no_shot_at_end` | the whole visit produced nothing usable | as above |
 | `embed_failed` | a crop was kept but could not be read | check `face.model_key` / `ready` |
@@ -1589,9 +1597,9 @@ its window, up to a GOP thrown away, so fewer longer bursts cost less); then a f
 Each burst decodes at 10 fps (`BURST_FPS`), cropped to where the object was
 (`native/trackpath.py`: interpolated between detect frames, extrapolated up to
 1 s before the first sighting along its motion), and every frame is read: each
-frame cropped around the person at THAT moment (±0.35 s for clock slop), YuNet
-on the crop, a face accepted only if its centre is in the upper 65% of THEIR
-box at that moment, aligned and scored into the track's best-shot buffer;
+frame cropped to the head region of the person at THAT moment (±0.35 s for
+clock slop, 12% margin), YuNet on the crop, a face accepted only if its centre
+is in the upper 65% of THEIR box at that moment, aligned and scored into the track's best-shot buffer;
 identification from the best shot as before.
 
 At most 4 bursts per track (`MAX_BURSTS`, the final included), none once

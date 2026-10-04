@@ -74,6 +74,19 @@ sharp 150 px face simply outscores a 35 px one. It runs in the background —
 the engine's frame loop never waits on a camera — and stops once the person is
 identified from a good shot, or after HIRES_MAX_PER_TRACK looks.
 
+ONLY THE HEAD REGION IS SEARCHED
+--------------------------------
+Every look — the detect frame, a snapshot, a recorded frame — runs YuNet on
+the upper FACE_REGION of the person's box (plus a little margin), not the
+whole box. A face is never in the lower third of a person, so the rest was
+pixels searched for nothing: on real faces placed in person boxes (42-90 px
+faces, day, dark and IR; 936 looks) the head region found 634 where the
+whole box found 635, for 24% less detector time per look (6.1 vs 8.0 ms on
+CPU), and a face lower in the box — a print on a shirt, a child carried in
+front — can no longer be taken as theirs. Contrast-boosting dark crops and
+a lower YuNet threshold were measured the same way and found nothing more. A crop too small to hold a MIN_FACE_PX face is not searched
+at all, and is counted as "too_small" rather than as "no face".
+
 RECORDED BURSTS (native/burst.py)
 ---------------------------------
 A face is often only frontal for a moment — as someone walks up, glances at
@@ -118,7 +131,7 @@ from .bestshot import (
 )
 from .recognition import Gallery, Match, to_blob
 from .heatmap import HeatmapAccumulator
-from .recognizer import FaceRecognizer, crop_with_origin
+from .recognizer import MIN_FACE_PX, FaceRecognizer, crop_with_origin
 
 log = logging.getLogger(__name__)
 
@@ -139,6 +152,23 @@ REIDENTIFY_IMPROVEMENT = 0.15
 #: Padding around the person box before looking for a face in it. A person box
 #: can clip the top of the head, and YuNet wants a little context.
 PERSON_CROP_PAD = 0.08
+
+
+def head_box(box: Sequence[float], pad: float = PERSON_CROP_PAD) -> tuple[float, float, float, float]:
+    """The part of a person box a face can be in: the upper FACE_REGION of it,
+    widened by `pad` of its size on every side — above because a box can clip
+    the top of the head, below so a face centred near the region's edge is
+    not cut in half. Searched instead of the whole box — see the module
+    docstring."""
+    x1, y1, x2, y2 = (float(v) for v in box[:4])
+    w, h = x2 - x1, y2 - y1
+    return (x1 - pad * w, y1 - pad * h, x2 + pad * w, y1 + (FACE_REGION + pad) * h)
+
+
+def split_by_size(faces: Sequence[Any]) -> tuple[list[Any], bool]:
+    """(faces wide enough to use, whether any narrower ones were found)."""
+    big = [f for f in faces if min(f.width, f.height) >= MIN_FACE_PX]
+    return big, len(big) < len(faces)
 
 #: Labels that always get a face pass.
 FACE_LABELS = ("person",)
@@ -295,7 +325,9 @@ class FacePass:
         # quality" means lower the floor; "duplicate" means it is working as
         # intended and the person has already been seen.
         self.drops: dict[str, int] = {
-            "no_face_found": 0,      # YuNet found nothing in the person crop
+            "no_face_found": 0,      # YuNet found nothing in the head region
+            "too_small": 0,          # a face, or a head region, under
+                                     # MIN_FACE_PX on the detect frame
             "below_quality": 0,      # scored under the buffer's floor, incl. the
                                      # resolution veto for a face under FACE_MIN_PX
             "no_shot_at_end": 0,     # track ended with an empty buffer
@@ -433,13 +465,18 @@ class FacePass:
         # is too small to be found HERE is exactly the one worth a snapshot.
         self._maybe_look_hires(cam_row, camera, st, obs, frame_bgr, frame_time)
 
-        cropped = crop_with_origin(frame_bgr, obs.box, pad=PERSON_CROP_PAD)
+        cropped = crop_with_origin(frame_bgr, head_box(obs.box), pad=0.0)
         if cropped is None:
             return
         person, ox, oy = cropped
-        faces = await self._recognizer.detect(person)
+        if min(person.shape[:2]) < MIN_FACE_PX:
+            # No face this region could hold is big enough to use, so it is
+            # not searched. The snapshot look above is what reads this person.
+            self.drops["too_small"] += 1
+            return
+        faces, had_small = split_by_size(await self._recognizer.detect(person, min_px=0))
         if not faces:
-            self.drops["no_face_found"] += 1
+            self.drops["too_small" if had_small else "no_face_found"] += 1
             return
         # One person box, one face: the biggest. A second face inside a person
         # box is someone standing behind them, and it belongs to THEIR track.
@@ -611,7 +648,8 @@ class FacePass:
                 break
             near = trackpath.box_near(path, fr.time, TIME_TOLERANCE_S)
             ch, cw = fr.crop.shape[:2]
-            look = trackpath.to_pixels(trackpath.expand(near, BURST_LOOK_MARGIN),
+            # The head region of where they were, not their whole box.
+            look = trackpath.to_pixels(trackpath.clamp(head_box(near, BURST_LOOK_MARGIN)),
                                        fr.width, fr.height, fr.ox, fr.oy)
             lx1, ly1 = max(0, int(look[0])), max(0, int(look[1]))
             lx2, ly2 = min(cw, int(round(look[2]))), min(ch, int(round(look[3])))
@@ -721,7 +759,7 @@ class FacePass:
                 # head would be.
                 pbox = (box[0] * sx, box[1] * sy, box[2] * sx, box[3] * sy)
                 pad, lost = HIRES_LOST_MARGIN, True
-            cropped = crop_with_origin(hires, pbox, pad=pad)
+            cropped = crop_with_origin(hires, head_box(pbox, pad), pad=0.0)
             if cropped is None:
                 self.hires["lost"] += 1
                 return

@@ -704,6 +704,8 @@ export interface RecognitionStatus {
    * but with opposite remedies, which is why the reason matters:
    *
    *   no_face_found     the person was facing away; nothing to do
+   *   too_small         on the detect frame, the face was under the minimum
+   *                     size; full-resolution looks are what read these
    *   below_quality     too small or too blurry to be worth keeping. A face
    *                     under the model's minimum pixel width scores zero
    *                     outright, so this is usually "the camera is too far"

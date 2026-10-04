@@ -56,6 +56,8 @@ const CANDIDATE_OF: Record<ProfileKind, CandidateKind> = {
  */
 const DROP_REASONS: Record<string, string> = {
   no_face_found: 'The person was facing away, or no face was visible. Nothing to fix.',
+  too_small:
+    'Too far away to read on the detect stream. Full-resolution looks (Detection \u2192 Face recognition) are what read these; if those are on and this still climbs, the camera is too far from where people walk.',
   below_quality:
     'Too small or too blurry to keep. A face narrower than the model\u2019s minimum is scored zero outright, so this usually means the camera is too far from where people walk.',
   no_shot_at_end: 'The whole visit produced nothing usable.',

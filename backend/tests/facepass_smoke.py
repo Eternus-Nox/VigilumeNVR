@@ -47,6 +47,7 @@ from app.native.recognition import to_blob  # noqa: E402
 from app.native.recognizer import (  # noqa: E402
     EMBEDDING_MODEL_KEY,
     FACE_MODELS,
+    MIN_FACE_PX,
     FaceRecognizer,
 )
 
@@ -287,6 +288,63 @@ async def main() -> int:
     await fp.observe(cam_zoned, [Obs(9, (0.0, 0.0, float(w), float(h)))], img, t + 50)
     check(len(fp._tracks) == before,
           "a person whose feet land outside the face ROI gets no pass at all")
+
+    print("\nonly the head region of a person is searched")
+    fx1, fy1, fx2, fy2 = (int(v) for v in face.box)
+    fw, fh = fx2 - fx1, fy2 - fy1
+    patch = img[max(0, fy1 - fh // 3):min(h, fy2 + fh // 3),
+                max(0, fx1 - fw // 3):min(w, fx2 + fw // 3)]
+    ph_, pw_ = patch.shape[:2]
+    tall = np.full((ph_ * 4, pw_ * 2, 3), 96, np.uint8)
+    # A face at the BOTTOM of a person's box — a print on a shirt, a child
+    # carried in front. It is a real face, and it is not this person's.
+    tall[-ph_:, pw_ // 2:pw_ // 2 + pw_] = patch
+    calls = {"n": 0}
+    real_detect = rec.detect
+
+    async def counting_detect(frame, **kw):
+        calls["n"] += 1
+        return await real_detect(frame, **kw)
+
+    rec.detect = counting_detect
+    try:
+        db2 = make_db(tmp / "head.db")
+        fp2 = FacePass(rec, db2, tmp / "crops-head")
+        await fp2.reload_gallery()
+        th, tw = tall.shape[:2]
+        for i in range(3):
+            await fp2.observe(cam, [Obs(20, (0.0, 0.0, float(tw), float(th)))], tall, 100.0 + i)
+        await fp2.finish("front", 20)
+        check(db2.rows("SELECT * FROM recognition_candidates") == [],
+              "a face in the lower part of the box is never taken as theirs")
+        check(fp2.drops["no_face_found"] == 3,
+              f"...because it is never searched there (drops {dict(fp2.drops)})")
+
+        # The same face at the TOP of the box is found as before.
+        top = np.full_like(tall, 96)
+        top[:ph_, pw_ // 2:pw_ // 2 + pw_] = patch
+        for i in range(3):
+            await fp2.observe(cam, [Obs(21, (0.0, 0.0, float(tw), float(th)))], top, 110.0 + i)
+        await fp2.finish("front", 21)
+        check(len(db2.rows("SELECT * FROM recognition_candidates")) == 1,
+              "the same face at the top of the box is read")
+
+        print("\ntoo small is not 'no face'")
+        before = calls["n"]
+        await fp2.observe(cam, [Obs(22, (100.0, 50.0, 130.0, 400.0))], img, 120.0)
+        check(calls["n"] == before,
+              "a person too narrow to hold a usable face is not searched at all")
+        check(fp2.drops["too_small"] == 1, "and is counted as too_small, not no_face_found")
+        # Scaled so YuNet still finds the face, at ~35 px. The box runs below
+        # the frame so its head region covers the whole picture.
+        tiny = cv2.resize(img, None, fx=0.24, fy=0.24, interpolation=cv2.INTER_AREA)
+        sh, sw = tiny.shape[:2]
+        await fp2.observe(cam, [Obs(23, (0.0, 0.0, float(sw), float(sh) * 1.6))], tiny, 130.0)
+        check(calls["n"] == before + 1 and fp2.drops["too_small"] == 2,
+              f"a face found but under {MIN_FACE_PX} px is counted as too_small too "
+              f"(drops {dict(fp2.drops)})")
+    finally:
+        rec.detect = real_detect
 
     print("\nretention")
     removed = await fp.purge_expired(0)
