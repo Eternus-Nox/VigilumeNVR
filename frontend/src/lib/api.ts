@@ -1205,7 +1205,7 @@ export type ApnsMode = 'relay' | 'off';
  */
 /** settings.detection.backend — see AppSettings['detection'].backend. */
 /** `auto` picks an Edge TPU when one is fitted, else the GPU. */
-export type DetectionBackend = 'auto' | 'gpu' | 'coral';
+export type DetectionBackend = 'auto' | 'gpu' | 'cpu' | 'coral';
 
 /** Edge TPU models. Keys match backend app/native/coral.py CORAL_MODELS. */
 export type CoralModel =

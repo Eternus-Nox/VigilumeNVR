@@ -258,14 +258,12 @@ class DetectionSettings(BaseModel):
     # AI (capabilities.ai_on_camera=False) degrades to "always" automatically in
     # effective_detect_mode, so nothing silently stops detecting.
     default_mode: Literal["always", "camera_ai", "camera_ai_only"] = "always"
-    # Which silicon runs inference. Applied at BOOT (build_detector), so a change
-    # here needs a backend restart — unlike model/confidence, which reconfigure
-    # the live detector. Default "gpu": Coral is never opted into uninvited, and
-    # an install with no Edge TPU fitted must keep detecting.
+    # Which silicon runs inference. Applied LIVE on save (SwitchableDetector):
+    # the old detector is stopped and the new one boots in the background.
     # "auto" is the default: use an Edge TPU when the box has one, else the
-    # GPU. "gpu"/"coral" remain as explicit overrides for an operator who wants
-    # to pin one regardless of what is fitted.
-    backend: Literal["auto", "gpu", "coral"] = "auto"
+    # GPU. "gpu" / "cpu" / "coral" pin one regardless of what is fitted; "cpu"
+    # leaves the GPU free for transcoding and other work.
+    backend: Literal["auto", "gpu", "cpu", "coral"] = "auto"
     # Edge TPU model key. Separate from `model` because the GPU (D-FINE tiers)
     # and Coral lists are disjoint — one field would let an invalid pair be
     # stored the instant backend flips. Validated against the registry.
@@ -635,6 +633,17 @@ async def put_settings(body: AppSettings, request: Request) -> dict[str, Any]:
 
     if previous["detection"] != updated["detection"]:
         log.info("detection settings changed — reloading engine")
+        # Hardware first: the model reconfigure below then lands on the new
+        # detector. A coral_model change on the Coral backend also rebuilds it.
+        detector = getattr(state, "detector", None)
+        switch = getattr(detector, "switch", None)
+        prev_d, new_d = previous["detection"], updated["detection"]
+        if switch is not None and (
+            prev_d.get("backend") != new_d.get("backend")
+            or (prev_d.get("coral_model") != new_d.get("coral_model")
+                and new_d.get("backend") in ("coral", "auto"))
+        ):
+            await switch(str(new_d.get("backend") or "auto"), force=True)
         # Route model changes through the SAME activate path as
         # POST /api/detection/models/{key}/activate: reconfigure the detector
         # (non-blocking) + start the store download of the (possibly new)

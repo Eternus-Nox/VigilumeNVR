@@ -32,8 +32,8 @@ VALID_DETECTORS = ("onnx", "onnx_cpu", "coral", "auto")
 # User-facing detection backends (settings.detection.backend) -> detector kind.
 # Deliberately a SMALLER, friendlier set than VALID_DETECTORS: "onnx_cpu" is a
 # debugging/fallback knob, not something to offer in a settings dropdown.
-VALID_BACKENDS = ("auto", "gpu", "coral")
-BACKEND_TO_DETECTOR = {"auto": "auto", "gpu": "onnx", "coral": "coral"}
+VALID_BACKENDS = ("auto", "gpu", "cpu", "coral")
+BACKEND_TO_DETECTOR = {"auto": "auto", "gpu": "onnx", "cpu": "onnx_cpu", "coral": "coral"}
 DEFAULT_DETECTOR = "onnx"
 
 # Camera models with a known static capability map (see amcrest/features.py).
@@ -484,7 +484,9 @@ DEFAULT_SETTINGS: dict = {
     #                       bootstrap never raises, so "is one fitted?" is just
     #                       "did it come up ready?" — see AutoDetector.
     #   "gpu"             — force D-FINE ONNX on CUDA (highest accuracy).
+    #   "cpu"             — D-FINE ONNX on the CPU (frees the GPU; slower).
     #   "coral"           — force the Edge TPU; detection is OFF if none binds.
+    # Switched live on save (native/detector.SwitchableDetector).
     # Env VIGILUME_DETECTOR, when set, overrides this.
     "detection": {
         "model": "dfine_s",

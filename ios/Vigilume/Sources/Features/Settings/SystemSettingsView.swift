@@ -157,14 +157,13 @@ struct SystemSettingsView: View {
         models.first { $0.key == key }?.label ?? key
     }
 
-    /// Which silicon runs inference. Mirrors the web segmented control.
-    /// Applied at BOOT, so a change here needs a backend restart — unlike
-    /// model/confidence, which reconfigure the live detector.
+    /// Which hardware runs inference. Mirrors the web segmented control.
+    /// Applied live when saved — the backend swaps detectors without a restart.
     private var detectionHardwareSection: some View {
         Section {
             Picker("Hardware", selection: $backend) {
                 ForEach(DetectionBackend.allCases, id: \.self) { b in
-                    Text(b.label).tag(b)
+                    Text(b.shortLabel).tag(b)
                 }
             }
             .pickerStyle(.segmented)
@@ -184,7 +183,8 @@ struct SystemSettingsView: View {
         } header: {
             Text("Detection hardware")
         } footer: {
-            Text("Takes effect after a backend restart (Settings → System → Restart server).")
+            Text("Applies as soon as you save — no restart. Detection pauses for a few seconds "
+                 + "while the new hardware loads, and face recognition moves with it.")
         }
         .listRowBackground(Theme.surface)
     }
@@ -889,7 +889,7 @@ struct SystemSettingsView: View {
         } header: {
             Text("Server")
         } footer: {
-            Text("Restarts the backend process now. Use after changing a setting that only takes effect at boot — for example the detection hardware above.")
+            Text("Restarts the backend process now. Rarely needed — the detection hardware above now switches without one.")
         }
         .listRowBackground(Theme.surface)
     }

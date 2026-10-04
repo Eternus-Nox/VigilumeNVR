@@ -20,7 +20,7 @@ import contextlib
 import logging
 import time
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 
@@ -38,7 +38,7 @@ from .config import APP_VERSION, BACKEND_TO_DETECTOR, Config, DEFAULT_DETECT_FPS
 from .db import Database
 from .events_pipeline import DOORBELL_MAX_S, EventsPipeline
 from .integrations.mqtt_ha import MqttPublisher
-from .native.detector import DEFAULT_MODEL, build_detector
+from .native.detector import DEFAULT_MODEL, SwitchableDetector, build_detector
 from .native.engine import DetectionEngine
 from .native.model_store import ModelStore
 from .native.media import NativeMediaProvider
@@ -389,16 +389,22 @@ async def lifespan(app: FastAPI):
     # on one object implementing the interface engine/ingest/self-heal drive, so
     # nothing downstream knows or cares which silicon is running. The model store
     # (D-FINE tiers) is consumed by the ONNX path only.
-    _backend = str(detection.get("backend") or "gpu")
-    detector = build_detector(
-        backend=BACKEND_TO_DETECTOR.get(_backend, "onnx"),
-        coral_model_key=str(detection.get("coral_model") or ""),
-        config=config,
-        models_dir=config.models_dir,
-        model_key=str(detection.get("model") or DEFAULT_MODEL),
-        confidence=float(detection.get("confidence", 0.5)),
-        store=model_store,
-    )
+    # Wrapped in a SwitchableDetector so a hardware change in Settings applies
+    # live (PUT /api/settings -> detector.switch); the builder reads the
+    # CURRENT settings each time, so a rebuild picks up the model too.
+    def _build_detector(backend: str) -> Any:
+        det = settings.detection
+        return build_detector(
+            backend=BACKEND_TO_DETECTOR.get(backend, "onnx"),
+            coral_model_key=str(det.get("coral_model") or ""),
+            config=config,
+            models_dir=config.models_dir,
+            model_key=str(det.get("model") or DEFAULT_MODEL),
+            confidence=float(det.get("confidence", 0.5)),
+            store=model_store,
+        )
+
+    detector = SwitchableDetector(_build_detector, str(detection.get("backend") or "auto"))
     model_store.active_key_getter = lambda: settings.detection.get("model") or DEFAULT_MODEL
     model_store.loaded_key_getter = lambda: detector.model_key if detector.ready else None
     recorder = Recorder(config, db, settings)

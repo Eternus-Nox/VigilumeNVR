@@ -804,6 +804,83 @@ class AutoDetector:
 
 
 
+class SwitchableDetector:
+    """The detector the rest of the app holds, whose hardware can be changed
+    while the app runs (settings.detection.backend: auto / gpu / cpu / coral).
+
+    Before this, the backend was chosen once at boot and a change in Settings
+    did nothing until someone restarted the server. Everything downstream —
+    the ingest worker, the self-heal supervisor, recognition (which follows the
+    detector's RESOLVED device, native/accel.py), the model store, the status
+    API — keeps one reference to this object, and every attribute read is
+    delegated to whichever detector is current, so a switch needs nobody else
+    to know.
+
+    A switch STOPS the old detector before the new one starts: an Edge TPU is
+    claimed exclusively and a CUDA session holds GPU memory, so overlapping
+    them would make the new one fail on exactly the resource the old one is
+    still holding. Detection pauses for the few seconds the new one takes to
+    come up (frames arriving meanwhile see `ready=False` and are skipped, as at
+    boot), and the face models move with it on their next maintenance tick
+    (FaceRecognizer.stale_device).
+    """
+
+    def __init__(self, build: Callable[[str], Any], backend: str) -> None:
+        self._build = build
+        self._backend = backend
+        self._active: Any = build(backend)
+        self._lock = asyncio.Lock()
+        self._start_task: Optional[asyncio.Task] = None
+
+    @property
+    def backend(self) -> str:
+        """The settings value this detector was built for."""
+        return self._backend
+
+    async def start(self) -> None:
+        await self._active.start()
+
+    async def stop(self) -> None:
+        if self._start_task is not None and not self._start_task.done():
+            self._start_task.cancel()
+        await self._active.stop()
+
+    async def switch(self, backend: str, *, force: bool = False) -> bool:
+        """Rebuild on `backend` if it differs (or always, with `force` — a new
+        Edge TPU model is a rebuild on the same backend); the new detector
+        boots in the background. Returns whether anything changed. Never
+        raises."""
+        async with self._lock:
+            if backend == self._backend and not force:
+                return False
+            old = self._active
+            try:
+                new = self._build(backend)
+            except Exception:  # noqa: BLE001 — a bad choice must not kill detection
+                log.exception("detector switch to %r failed to build — keeping %r",
+                              backend, self._backend)
+                return False
+            if self._start_task is not None and not self._start_task.done():
+                self._start_task.cancel()
+            try:
+                await old.stop()
+            except Exception:  # noqa: BLE001
+                log.exception("stopping the previous detector failed (continuing)")
+            self._active, self._backend = new, backend
+            log.info("detector switched to %s — starting it", backend)
+            self._start_task = asyncio.create_task(new.start(), name="detector-switch-start")
+            return True
+
+    def __getattr__(self, name: str) -> Any:
+        # Only reached for attributes not defined above: the whole detector
+        # contract (ready, device, kind, detect, status, reconfigure, ...).
+        # Never for this class's own fields — reading one before __init__ set
+        # it would otherwise recurse forever.
+        if name.startswith("_") and name in {"_active", "_build", "_backend", "_lock", "_start_task"}:
+            raise AttributeError(name)
+        return getattr(self._active, name)
+
+
 def build_detector(
     *,
     config: Any,

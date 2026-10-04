@@ -711,13 +711,26 @@ enum DetectionBackend: String, Codable, Sendable, CaseIterable {
     /// hardware should be picked up without anyone hunting for a setting.
     case auto
     case gpu
+    /// D-FINE on the processor: frees the graphics card, much slower.
+    case cpu
     case coral
 
     var label: String {
         switch self {
         case .auto: return "Automatic"
         case .gpu: return "GPU"
+        case .cpu: return "CPU"
         case .coral: return "Coral Edge TPU"
+        }
+    }
+
+    /// For the segmented control, where four long labels do not fit.
+    var shortLabel: String {
+        switch self {
+        case .auto: return "Auto"
+        case .gpu: return "GPU"
+        case .cpu: return "CPU"
+        case .coral: return "Coral"
         }
     }
     var blurb: String {
@@ -727,6 +740,9 @@ enum DetectionBackend: String, Codable, Sendable, CaseIterable {
                  + "Fit or remove a Coral and it is picked up on the next restart."
         case .gpu:
             return "D-FINE on CUDA — highest accuracy."
+        case .cpu:
+            return "D-FINE on the processor — same accuracy as the GPU, much slower, and "
+                 + "leaves the graphics card free. Best with a smaller model and few cameras."
         case .coral:
             return "SSDLite MobileDet on the Edge TPU — about 2 W instead of the GPU."
         }
@@ -931,7 +947,10 @@ struct SettingsDocument: Decodable, Sendable {
             // Absent on a backend predating per-camera AI gating — "always" is
             // the backend's own default (continuous server inference).
             defaultMode = try c.decodeIfPresent(DetectMode.self, forKey: .defaultMode) ?? .always
-            backend = try c.decodeIfPresent(DetectionBackend.self, forKey: .backend) ?? .gpu
+            // Decoded as a string so a backend option this build does not know
+            // yet reads as Automatic instead of failing the whole settings load.
+            let rawBackend = try c.decodeIfPresent(String.self, forKey: .backend)
+            backend = rawBackend.map { DetectionBackend(rawValue: $0) ?? .auto } ?? .gpu
             coralModel = try c.decodeIfPresent(String.self, forKey: .coralModel)
                 ?? CoralModelInfo.defaultKey
             absenceTimeoutS = try c.decodeIfPresent(Int.self, forKey: .absenceTimeoutS) ?? 5

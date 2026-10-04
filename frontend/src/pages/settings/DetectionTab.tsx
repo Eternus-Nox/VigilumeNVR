@@ -341,8 +341,9 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
       <section className="card">
         <h2>Detection hardware</h2>
         <p className="muted small">
-          Which silicon runs object detection. Takes effect on the next{' '}
-          <strong>backend restart</strong> (Settings → System → Restart server).
+          Which hardware runs object detection. Applies <strong>as soon as you save</strong> —
+          no restart. Detection pauses for a few seconds while the new hardware loads, and face
+          recognition moves with it.
         </p>
         {/* Segmented control, matching the spotlight / night-vision pickers
             elsewhere — two mutually exclusive choices read better side by side
@@ -351,6 +352,7 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
           {([
             { key: 'auto', label: 'Automatic' },
             { key: 'gpu', label: 'GPU' },
+            { key: 'cpu', label: 'CPU' },
             { key: 'coral', label: 'Coral Edge TPU' },
           ] as const).map(({ key, label }) => (
             <button
@@ -370,7 +372,10 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
               + 'Fit or remove a Coral and it is picked up on the next restart.'
             : backend === 'gpu'
               ? 'D-FINE on CUDA — highest accuracy.'
-              : 'SSDLite MobileDet on the Edge TPU — about 2 W instead of the GPU.'}
+              : backend === 'cpu'
+                ? 'D-FINE on the processor — same accuracy as the GPU, much slower, and '
+                  + 'leaves the graphics card free. Best with a smaller model and few cameras.'
+                : 'SSDLite MobileDet on the Edge TPU — about 2 W instead of the GPU.'}
         </p>
         {backend === 'coral' && (
           <div className="banner banner-warn">

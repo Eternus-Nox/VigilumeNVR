@@ -131,6 +131,19 @@ interface the ingest worker + self-heal supervisor drive (`ready`/`device`/`kind
 An unknown value falls back to `onnx` with a WARNING. Precedence: `VIGILUME_REQUIRE_GPU`
 is meaningful ONLY for the `onnx` kind — `onnx_cpu` forces CPU regardless.
 
+**Switching from Settings, live.** `settings.detection.backend` is the normal
+control (`VIGILUME_DETECTOR`, when set non-empty, still wins): `auto` (Edge TPU
+if fitted, else GPU), `gpu` (→ `onnx`), `cpu` (→ `onnx_cpu`: D-FINE on the
+processor, leaving the GPU free) or `coral`. The app holds a
+`SwitchableDetector`; saving a different backend (or a new Edge TPU model)
+STOPS the running detector — an Edge TPU is claimed exclusively and a CUDA
+session holds GPU memory — then builds the new one from the current settings
+and boots it in the background. No restart. Detection pauses for the few
+seconds the new one takes to load (frames see `ready=False` and are skipped,
+as at boot), and recognition follows it on its next maintenance tick
+(`FaceRecognizer.stale_device`). A build failure keeps the old detector.
+`tests/detector_switch_smoke.py`.
+
 ### Tracking → events
 
 Pinned stack: `supervision>=0.29.1,<0.30` + `trackers==2.4.0` (`ByteTrackTracker`, one

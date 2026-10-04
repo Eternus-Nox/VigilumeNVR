@@ -239,10 +239,10 @@ export default function MainStreamCard() {
 
   return (
     <section className="card">
-      <details className="privacy-details">
+      <details className="card-disclosure">
         <summary>
-          <span className="privacy-summary-title">Camera video quality</span>
-          <span className="privacy-summary-badge">All cameras: {describe(profile)}</span>
+          <span className="card-disclosure-title">Camera video quality</span>
+          <span className="card-disclosure-badge">All cameras: {describe(profile)}</span>
         </summary>
         <p className="muted small">
           What every camera&rsquo;s <strong>main stream</strong> — the one that is recorded,
