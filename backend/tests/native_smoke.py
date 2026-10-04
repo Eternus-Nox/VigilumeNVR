@@ -110,7 +110,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 import app.main  # noqa: E402,F401 — import hygiene: must not pull onnxruntime
 from app.auth import AuthService  # noqa: E402
 from app.config import APP_VERSION, Config  # noqa: E402
-from app.db import Database  # noqa: E402
+from app.db import SCHEMA_VERSION, Database  # noqa: E402
 from app.events_pipeline import EventsPipeline  # noqa: E402
 from app.native import detector as detector_module  # noqa: E402
 from app.native import ingest as ingest_module  # noqa: E402
@@ -507,7 +507,31 @@ def require_gpu_checks() -> None:
     asyncio.run(_require_gpu_cases())
 
 
+#: Sections skipped because a real model could not be downloaded. Reported in
+#: the final line, never silently: these two sections are the only real-model
+#: coverage, and a skip must not read as a pass.
+SKIPPED: list[str] = []
+
+
+async def _model_or_skip(key: str, section: str) -> bool:
+    """Fetch a real model into MODEL_CACHE, or record a skip when there is no
+    network. Before this, an offline host CRASHED here — and every section
+    after it stopped running, which is how stale checks further down went
+    unnoticed. Needs the network once; the cache serves every later run."""
+    try:
+        await ensure_model(MODEL_CACHE, key)
+        return True
+    except httpx.TransportError as exc:
+        print(f"  SKIP: {section} — could not download {key} "
+              f"({exc.__class__.__name__}: {exc}); needs network once, then runs from "
+              f"the cache ({MODEL_CACHE})")
+        SKIPPED.append(section)
+        return False
+
+
 async def _dfine_n_cases() -> None:
+    if not await _model_or_skip("dfine_n", "detector 6 (real dfine_n)"):
+        return
     path = await ensure_model(MODEL_CACHE, "dfine_n")
     check(path.stat().st_size == MODELS["dfine_n"]["bytes"], "dfine_n artifact size matches pin")
     check(sha256_file(path) == MODELS["dfine_n"]["sha256"], "dfine_n SHA-256 matches pin")
@@ -619,6 +643,10 @@ def _dog_frame(x: int, patch: np.ndarray) -> np.ndarray:
 
 
 async def _pipeline_cases() -> None:
+    # Pre-fetched here: det.start() retries a failed download with backoff
+    # forever, so offline it would sit out the whole 300 s wait below.
+    if not await _model_or_skip("dfine_s", "detector 7 (real dfine_s pipeline)"):
+        return
     check(DOG_JPG.is_file(), "dog fixture image present")
     dog = cv2.imread(str(DOG_JPG))
     check(dog is not None and dog.shape == (480, 704, 3), "dog fixture decodes at 704x480")
@@ -1155,8 +1183,14 @@ def boot_endpoint_checks() -> None:
               "health.detector: REQUIRE_GPU=1, GPU-less host -> ready:false, device:null")
         check(isinstance(health["go2rtc"], bool), "health.go2rtc is a boolean")
         check(isinstance(health["cameras_online"], int), "health.cameras_online is an int")
-        check(set(health) == {"status", "version", "detector", "go2rtc", "cameras_online"},
+        # schema_version / expects_schema / started_at answer "is what I just
+        # changed actually running?" (docs/CONTRACTS.md, the deploy card).
+        check(set(health) == {"status", "version", "detector", "go2rtc", "cameras_online",
+                              "schema_version", "expects_schema", "started_at"},
               "health carries exactly the contract keys (no legacy fields)")
+        check(health["schema_version"] == health["expects_schema"] == SCHEMA_VERSION,
+              "health: the database is on the schema this build expects")
+        check(isinstance(health["started_at"], (int, float)), "health.started_at is a timestamp")
 
         models_dir = Path(os.environ["DATA_DIR"]) / "models"
         check(not list(models_dir.glob("*.onnx*")) if models_dir.exists() else True,
@@ -1359,7 +1393,16 @@ def retention_checks() -> None:
 
     rec._disk_free = fake_free
     check(fake_free() < LOW_DISK_BYTES, "fixture starts below the 5 GB floor")
-    forced = rec._low_disk_prune(now)
+    # space_pass reads free space ONCE and then counts the bytes it deletes
+    # (it no longer re-queries the disk after every rmtree), so each fake hour
+    # dir has to WEIGH what it stands for: 2 GB, matching fake_free above.
+    # Floor 5 GB + 1 GB headroom = 6 GB wanted; 4 GB + one 2 GB dir reaches it.
+    real_size = recorder_module.hour_dir_size
+    recorder_module.hour_dir_size = lambda hd: 2 * 1024**3
+    try:
+        forced = rec._low_disk_prune(now)
+    finally:
+        recorder_module.hour_dir_size = real_size
     check(forced == [h1], "low-disk guard deletes exactly the oldest hour dir, then stops")
     check(h2.is_dir() and h3.is_dir() and h4.is_dir(), "newer + active hour dirs survive")
 
@@ -1997,7 +2040,11 @@ def main() -> None:
     media_route_checks()
     # app-boot endpoint shapes last (boots the real app twice)
     boot_endpoint_checks()
-    print(f"\nALL {PASS} CHECKS PASSED (detector/ingest/pipeline + recorder sections)")
+    if SKIPPED:
+        print(f"\nALL {PASS} CHECKS PASSED, {len(SKIPPED)} SECTION(S) SKIPPED "
+              f"(no network for the real models): {'; '.join(SKIPPED)}")
+    else:
+        print(f"\nALL {PASS} CHECKS PASSED (detector/ingest/pipeline + recorder sections)")
 
 
 if __name__ == "__main__":
