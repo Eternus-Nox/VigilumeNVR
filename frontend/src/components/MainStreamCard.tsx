@@ -372,6 +372,16 @@ export function CameraMainStreamPanel({ name }: { name: string }) {
               <>Could not read the camera{detail?.error ? `: ${detail.error}` : ''}.</>
             )}
           </p>
+          {detail?.live?.substream && (
+            <p className={`small ${detail.live.substream.codec === 'h264' ? 'muted' : 'form-error'}`}>
+              Live-view substream: {detail.live.substream.codec_raw ?? '?'}
+              {detail.live.substream.width
+                ? ` ${detail.live.substream.width}×${detail.live.substream.height}` : ''}
+              {detail.live.substream.codec !== 'h264'
+                && ' — live video cannot play until this is H.264. Vigilume sets it '
+                   + 'automatically when the camera connects (and every 30 minutes).'}
+            </p>
+          )}
           <label className="row-label">
             <input
               type="radio"

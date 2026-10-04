@@ -204,6 +204,33 @@ def current_main(cfg: dict[str, str]) -> Optional[dict[str, Any]]:
     }
 
 
+_SUB_VIDEO_KEY = re.compile(r"^Encode\[0\]\.ExtraFormat\[0\]\.Video\.([A-Za-z]+)$")
+
+
+def current_sub(cfg: dict[str, str]) -> Optional[dict[str, Any]]:
+    """The SUBSTREAM (ExtraFormat[0], RTSP subtype=1) as it is now, or None.
+    It is what every live tile and fullscreen view opens on, and what the
+    detector ingests."""
+    v = {m.group(1): val for key, val in cfg.items() if (m := _SUB_VIDEO_KEY.match(key))}
+    if "Compression" not in v:
+        return None
+    size = _size_of(v)
+    return {
+        "codec": _codec_family(v.get("Compression")),
+        "codec_raw": v.get("Compression"),
+        "width": size[0] if size else None,
+        "height": size[1] if size else None,
+    }
+
+
+def sub_needs_h264(cfg: dict[str, str]) -> bool:
+    """Live view needs an H.264 substream: go2rtc cannot restream MJPEG at all
+    (the tile shows only its poster image), and H.265 has no WebRTC decoder on
+    iOS, so it falls back to slow HLS."""
+    sub = current_sub(cfg)
+    return sub is not None and sub["codec"] != "h264"
+
+
 def _size_of(v: dict[str, str]) -> Optional[tuple[int, int]]:
     try:
         return int(v["Width"]), int(v["Height"])

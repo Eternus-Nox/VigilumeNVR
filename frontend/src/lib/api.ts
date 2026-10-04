@@ -1565,6 +1565,10 @@ export interface CameraMainStreamDetail extends CameraMainStreamRow {
     codecs: string[];
     fps_max: number | null;
     bitrate_range: [number, number] | null;
+    /** The live-view substream. Anything but H.264 means no live video on
+     *  iPhone (MJPEG cannot be restreamed at all); the server fixes it. */
+    substream?: { codec: string | null; codec_raw: string | null;
+                  width: number | null; height: number | null } | null;
   } | null;
   error: string | null;
   result?: MainStreamResult;

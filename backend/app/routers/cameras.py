@@ -1244,6 +1244,9 @@ async def get_camera_main_stream(name: str, request: Request) -> dict[str, Any]:
             "fps_max": caps["fps_max"],
             "bitrate_range": list(caps["bitrate_range"]) if caps["bitrate_range"] else None,
             "raw": live.get("raw") or {},
+            # What live view opens on. Not H.264 = no live video on iPhone
+            # (MJPEG cannot be restreamed at all); provisioned automatically.
+            "substream": live.get("substream"),
             "formats": {str(n): (f"{s[0]}x{s[1]}" if s else None)
                         for n, s in (live.get("formats") or {}).items()},
         }

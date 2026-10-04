@@ -227,6 +227,24 @@ class TimeSyncManager:
             # main source, so changing its ExtraFormat would buy live view
             # nothing — and this is the camera whose encoder/session handling has
             # already cost us the talk backchannel once. Not worth the risk.
+            # The substream must be H.264 before anything else about it
+            # matters: go2rtc cannot restream MJPEG (live view shows only the
+            # poster image) and iPhones have no WebRTC H.265 decoder. Same
+            # doorbell skip as below — its `_sub` is the main stream.
+            provision_codec = getattr(client, "provision_substream_codec", None)
+            if provision_codec is not None and not _is_doorbell(cam):
+                try:
+                    sub = await provision_codec()
+                    for line in sub.get("changed") or []:
+                        log.info("substream-codec %s: %s", name, line)
+                    for line in sub.get("failed") or []:
+                        log.warning("substream-codec %s: %s — live view on this camera "
+                                    "will not work until it is H.264", name, line)
+                except AmcrestError as exc:
+                    log.info("substream-codec %s: not set yet (%s)", name, exc)
+                except Exception:  # noqa: BLE001 — never crash over codec provisioning
+                    log.exception("substream-codec %s: unexpected error", name)
+
             provision_gop = getattr(client, "provision_substream_gop", None)
             if provision_gop is not None and not _is_doorbell(cam):
                 try:

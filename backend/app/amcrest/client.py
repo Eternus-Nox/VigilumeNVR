@@ -661,6 +661,7 @@ class AmcrestClient:
         cfg = await self.get_config("Encode")
         formats = encode_profile.main_formats(cfg)
         return {"current": encode_profile.current_main(cfg), "caps": await self.get_encode_caps(),
+                "substream": encode_profile.current_sub(cfg),
                 # The regular stream's raw Video.* fields, for diagnosing a
                 # camera that refuses a change.
                 "raw": formats[min(formats)] if formats else {},
@@ -815,6 +816,52 @@ class AmcrestClient:
             notes.append(f"secondary format #{n} kept its own {what} (the camera would not "
                          "change it; the regular stream is the one Vigilume records)")
         return result
+
+    # ---------- substream codec (live view needs H.264) ----------
+
+    async def provision_substream_codec(self) -> dict[str, Any]:
+        """Set the SUBSTREAM (ExtraFormat[0]) to H.264 if it is anything else.
+
+        WHY. Every live surface opens on the substream. Amcrest ships some
+        models with it as MJPEG — the AD410 does (streams.stream_sources), and
+        the indoor ProHD domes can — and go2rtc cannot restream MJPEG: WebRTC
+        and the HLS fallback both fail, so the app shows the cached poster
+        image and never any video. An H.265 substream plays, but only via the
+        slow HLS fallback on iPhone (no WebRTC HEVC decoder). H.264 is the one
+        codec every live path carries.
+
+        Tried a few ways and read back, since a camera may refuse the codec at
+        the bitrate its MJPEG stream used. Returns {changed, failed, before,
+        after}. Raises AmcrestError only when the camera cannot be read."""
+        cfg = await self.get_config("Encode")
+        before = encode_profile.current_sub(cfg)
+        out: dict[str, Any] = {"changed": [], "failed": [], "before": before, "after": before}
+        if not encode_profile.sub_needs_h264(cfg):
+            return out
+        p = "Encode[0].ExtraFormat[0].Video."
+        attempts = [
+            {"Compression": "H.264"},
+            {"Compression": "H.264", "Profile": "Main"},
+            {"Compression": "H.264", "BitRateControl": "VBR", "BitRate": "1024"},
+            {"Compression": "H.264", "Profile": "Main", "BitRateControl": "VBR", "BitRate": "512"},
+        ]
+        for attempt in attempts:
+            try:
+                await self.set_config(**{p + k: v for k, v in attempt.items()})
+            except AmcrestError as exc:
+                log.info("camera %s [%s]: substream H.264 refused as %s (%s)",
+                         self.ip, self.model or "?", attempt, exc)
+                continue
+            after_cfg = await self._read_encode()
+            if after_cfg is None:
+                out["changed"].append(f"substream {before['codec_raw']} -> H.264 (not verified)")
+                return out
+            out["after"] = encode_profile.current_sub(after_cfg)
+            if not encode_profile.sub_needs_h264(after_cfg):
+                out["changed"].append(f"substream {before['codec_raw']} -> H.264")
+                return out
+        out["failed"].append(f"substream is {before['codec_raw']}; the camera would not take H.264")
+        return out
 
     # ---------- white light / spotlight (Lighting_V2) ----------
     #

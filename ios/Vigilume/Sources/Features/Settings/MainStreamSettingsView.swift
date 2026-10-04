@@ -136,9 +136,25 @@ struct CameraMainStreamDetail: Decodable {
         let height: Int
     }
 
+    /// The live-view substream (ExtraFormat[0]).
+    struct Sub: Decodable {
+        let codec: String?
+        let codecRaw: String?
+        let width: Int?
+        let height: Int?
+
+        var isH264: Bool { codec == "h264" }
+        var summary: String {
+            let size = (width != nil && height != nil) ? " \(width!)×\(height!)" : ""
+            return "Live-view substream: \(codecRaw ?? "?")\(size)"
+        }
+    }
+
     struct Live: Decodable {
         let current: MainStreamNow?
         let resolutions: [Size]
+        /// Absent on an older backend.
+        let substream: Sub?
     }
 
     let camera: String
@@ -422,6 +438,13 @@ struct CameraMainStreamView: View {
                     Text(now.summary)
                         .font(.footnote)
                         .foregroundStyle(Theme.textPrimary)
+                    if let sub = detail?.live?.substream {
+                        Text(sub.summary + (sub.isH264 ? "" :
+                            " — live video cannot play until this is H.264. Vigilume sets it "
+                            + "automatically when the camera connects (and every 30 minutes)."))
+                            .font(.caption)
+                            .foregroundStyle(sub.isH264 ? Theme.textSecondary : Theme.danger)
+                    }
                 } else {
                     Text("Could not read the camera" + (detail?.error.map { ": \($0)" } ?? "."))
                         .font(.footnote)

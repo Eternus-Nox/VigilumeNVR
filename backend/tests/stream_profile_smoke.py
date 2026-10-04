@@ -68,7 +68,8 @@ class FakeCamera:
     def __init__(self, *, width=3840, height=2160, codec="H.265", fps=15, gop=30,
                  bitrate=8192, caps=True, wxh_keys=True, max_keys=None,
                  bitrate_ceiling=None, h264_max_width=None, format3_720=False,
-                 size_key=None, reject_custom_name=False, bitrate_per_mpx=None):
+                 size_key=None, reject_custom_name=False, bitrate_per_mpx=None,
+                 sub_codec="H.264", sub_h264_max_bitrate=None, sub_sticky=False):
         self.formats = {n: {"Compression": codec, "FPS": str(fps), "GOP": str(gop),
                             "BitRate": str(bitrate), "BitRateControl": "VBR"}
                         for n in ((0, 1, 2, 3) if format3_720 else (0, 1))}
@@ -91,6 +92,13 @@ class FakeCamera:
         #  bitrate_per_mpx   a size whose bitrate would exceed this many kbps
         #                    per megapixel is refused
         self.format3_720 = format3_720
+        # The substream (ExtraFormat[0]). sub_h264_max_bitrate: H.264 is
+        # refused while the (MJPEG-sized) bitrate is above it; sub_sticky:
+        # answers OK and stays MJPEG.
+        self.sub = {"Compression": sub_codec, "Width": "640", "Height": "480",
+                    "FPS": "15", "GOP": "30", "BitRate": "4096", "BitRateControl": "CBR"}
+        self.sub_h264_max_bitrate = sub_h264_max_bitrate
+        self.sub_sticky = sub_sticky
         self.size_key = size_key
         self.reject_custom_name = reject_custom_name
         self.bitrate_per_mpx = bitrate_per_mpx
@@ -98,8 +106,7 @@ class FakeCamera:
         self.offline = False
 
     def encode_text(self) -> str:
-        lines = ["table.Encode[0].ExtraFormat[0].Video.Compression=H.264",
-                 "table.Encode[0].ExtraFormat[0].Video.GOP=15"]
+        lines = [f"table.Encode[0].ExtraFormat[0].Video.{k}={v}" for k, v in self.sub.items()]
         for n, v in self.formats.items():
             lines += [f"table.Encode[0].MainFormat[{n}].Video.{k}={val}" for k, val in v.items()]
         return "\r\n".join(lines) + "\r\n"
@@ -117,6 +124,17 @@ class FakeCamera:
     def set_config(self, params: dict[str, str]) -> str:
         if self.max_keys is not None and len(params) > self.max_keys:
             return "Error\r\n"
+        if all(k.startswith("Encode[0].ExtraFormat[0].Video.") for k in params):
+            sub = dict(self.sub)
+            for key, value in params.items():
+                sub[key.rsplit(".", 1)[1]] = value
+            if (self.sub_h264_max_bitrate and sub["Compression"] == "H.264"
+                    and int(sub["BitRate"]) > self.sub_h264_max_bitrate):
+                return "Error\r\n"
+            if not self.sub_sticky:
+                self.sub = sub
+            self.sets.append(dict(params))
+            return "OK\r\n"
         staged = {n: dict(v) for n, v in self.formats.items()}
         for key, value in params.items():
             m = re.match(r"^Encode\[0\]\.MainFormat\[(\d+)\]\.Video\.(\w+)$", key)
@@ -361,6 +379,62 @@ async def client_checks() -> None:
           "read_main_stream: current + caps")
 
 
+async def substream_checks() -> None:
+    print("B3: substream codec (live view needs H.264)")
+    CAMERAS["10.0.0.51"] = mj = FakeCamera(sub_codec="MJPG")
+    c = AmcrestClient("10.0.0.51", "u", "p")
+    live = await c.read_main_stream()
+    check(live["substream"]["codec"] == "mjpg" and live["substream"]["width"] == 640,
+          "read_main_stream reports the substream (MJPEG 640x480)")
+    res = await c.provision_substream_codec()
+    check(mj.sub["Compression"] == "H.264" and res["changed"] and not res["failed"],
+          "an MJPEG substream is switched to H.264")
+    n = len(mj.sets)
+    res = await c.provision_substream_codec()
+    check(res["changed"] == [] and len(mj.sets) == n, "an H.264 substream is left alone")
+    check(mj.formats[0]["Compression"] == "H.265", "the main stream is not touched")
+
+    CAMERAS["10.0.0.52"] = hv = FakeCamera(sub_codec="H.265")
+    await AmcrestClient("10.0.0.52", "u", "p").provision_substream_codec()
+    check(hv.sub["Compression"] == "H.264", "an H.265 substream is switched too")
+
+    CAMERAS["10.0.0.53"] = br = FakeCamera(sub_codec="MJPG", sub_h264_max_bitrate=2048)
+    res = await AmcrestClient("10.0.0.53", "u", "p").provision_substream_codec()
+    check(br.sub["Compression"] == "H.264" and int(br.sub["BitRate"]) <= 2048 and res["changed"],
+          "refused at the MJPEG bitrate: retried with an H.264-sized bitrate")
+
+    CAMERAS["10.0.0.54"] = st = FakeCamera(sub_codec="MJPG", sub_sticky=True)
+    res = await AmcrestClient("10.0.0.54", "u", "p").provision_substream_codec()
+    check(res["failed"] and not res["changed"], "OK-but-still-MJPEG is reported as failed")
+
+    from app.amcrest.time_sync import TimeSyncManager
+
+    class TS:
+        time_sync = {"auto_sync": True, "timezone": "UTC"}
+
+    called: list[str] = []
+
+    class Probe:
+        def __init__(self, cam):
+            self.cam = cam
+
+        async def provision_time(self, tz):
+            return {}
+
+        async def provision_substream_codec(self):
+            called.append(self.cam["name"])
+            return {"changed": [], "failed": []}
+
+        async def aclose(self):
+            pass
+
+    mgr = TimeSyncManager(TS(), client_factory=Probe)
+    for cam in ({"name": "dome", "ip": "1", "username": "u", "password": "p", "model": "IP4M-1041B"},
+                {"name": "bell", "ip": "2", "username": "u", "password": "p", "model": "AD410"}):
+        await mgr._provision(cam, ("1", "u", "p"), "UTC")
+    check(called == ["dome"], "provisioned on connect; the doorbell (sub = main) is skipped")
+
+
 # ---------------- C. manager ----------------
 
 
@@ -485,6 +559,7 @@ def main() -> None:
     _no_sleep_patch()
     planning_checks()
     asyncio.run(client_checks())
+    asyncio.run(substream_checks())
     asyncio.run(manager_checks())
     api_checks()
     print(f"\nALL {PASS} CHECKS PASSED (main-stream profiles)")
