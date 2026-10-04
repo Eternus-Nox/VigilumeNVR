@@ -233,6 +233,10 @@ ANY_AUTH_ROUTES = [
     ("GET", "/api/events/1", None),
     ("GET", "/api/events/1/snapshot.jpg", None),
     ("GET", "/api/events/1/clip.mp4", None),
+    # Re-cutting a missing clip is viewer-accessible for the same reason PTZ
+    # is: it is part of WATCHING an event, changes no configuration, and only
+    # (re)makes the clip the event already promises. Idempotent per event.
+    ("POST", "/api/events/1/clip/retry", None),
     ("GET", "/api/recordings/cameras", None),
     ("GET", "/api/recordings/front/index?date=2026-01-01", None),
     ("GET", "/api/groups", None),
@@ -329,6 +333,8 @@ def dynamic_admin_enumeration(client: TestClient, viewer_h: dict) -> None:
         # GET /api/cameras, which needs no access to the configuration.
         ("GET", "/api/events"), ("GET", "/api/events/{event_id}"),
         ("GET", "/api/events/{event_id}/snapshot.jpg"), ("GET", "/api/events/{event_id}/clip.mp4"),
+        # "Try again" under a missing clip — viewing, not configuring (above).
+        ("POST", "/api/events/{event_id}/clip/retry"),
         # DELETE /api/events/{event_id} stays ADMIN-ONLY (viewers are view-only —
         # hard-deleting shared events/recordings is a management action).
         ("GET", "/api/recordings/cameras"), ("GET", "/api/recordings/{camera}/index"),
