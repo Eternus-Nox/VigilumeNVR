@@ -1241,6 +1241,19 @@ class Recorder:
             return
         self._queue_clip(camera, frigate_id, start_time, end_time, delay=self._clip_delay())
 
+    def retry_clip(
+        self, camera: str, frigate_id: str, start_time: float, end_time: float
+    ) -> bool:
+        """Cut this event's clip again, now (a "Try again" in the app).
+        False when it cannot be queued: recorder down, ffmpeg missing, Privacy
+        Mode, or a job for it already queued or running."""
+        if not self._running or self._ffmpeg_path is None:
+            return False
+        if self._settings.is_private(camera) or frigate_id in self._clip_pending:
+            return False
+        self._queue_clip(camera, frigate_id, start_time, end_time, delay=0.0)
+        return True
+
     def clip_pending(self, frigate_id: str) -> bool:
         """Is a clip job for this event queued or running right now?"""
         return frigate_id in self._clip_pending

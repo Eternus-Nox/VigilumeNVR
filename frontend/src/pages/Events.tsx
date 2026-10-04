@@ -2,9 +2,10 @@
  * Events timeline: filter by camera / label / date range, with incremental
  * offset pagination (auto-load sentinel + explicit Load-more button).
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api, type NvrEvent } from '../lib/api';
+import { saveEventsReturnPoint, takeEventsReturnPoint } from '../lib/eventsReturn';
 import EventCard from '../components/EventCard';
 import { useAppState } from '../state/AppState';
 import { localInputToEpochSeconds, titleCase } from '../lib/format';
@@ -38,6 +39,30 @@ export default function Events() {
     }),
     [camera, label, afterStr, beforeStr],
   );
+  const queryKey = useMemo(() => JSON.stringify(query), [query]);
+
+  // Where you were, for the trip into an event and back (lib/eventsReturn).
+  const latest = useRef({ events, total, key: queryKey });
+  latest.current = { events, total, key: queryKey };
+  const scrollYRef = useRef(0);
+  const restoreScrollRef = useRef<number | null>(null);
+  useEffect(() => {
+    const onScroll = () => {
+      scrollYRef.current = window.scrollY;
+    };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      window.removeEventListener('scroll', onScroll);
+      saveEventsReturnPoint({
+        key: latest.current.key,
+        events: latest.current.events,
+        total: latest.current.total,
+        offset: offsetRef.current,
+        scrollY: scrollYRef.current,
+        at: Date.now(),
+      });
+    };
+  }, []);
 
   const load = useCallback(
     async (reset: boolean) => {
@@ -62,10 +87,30 @@ export default function Events() {
   );
 
   useEffect(() => {
+    // Coming back from an event with the same filters: put the list back as
+    // it was — the pages already loaded and the scroll position — instead of
+    // starting again at the top with one page.
+    const back = takeEventsReturnPoint(queryKey);
+    if (back) {
+      offsetRef.current = back.offset;
+      setTotal(back.total);
+      setEvents(back.events);
+      restoreScrollRef.current = back.scrollY;
+      return;
+    }
     setEvents([]);
     offsetRef.current = 0;
     void load(true);
-  }, [load]);
+  }, [load, queryKey]);
+
+  // Restore the scroll position once the restored list has rendered.
+  useLayoutEffect(() => {
+    const y = restoreScrollRef.current;
+    if (y == null || events.length === 0) return;
+    restoreScrollRef.current = null;
+    window.scrollTo(0, y);
+    scrollYRef.current = y;
+  }, [events]);
 
   const hasMore = events.length < total;
 

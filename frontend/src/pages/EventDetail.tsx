@@ -6,7 +6,8 @@
  * plainly why there is no video.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { forgetEventInReturnPoint } from '../lib/eventsReturn';
 import { api, headlineRecognition, type NvrEventDetail } from '../lib/api';
 import { downloadAttachment } from '../lib/download';
 import AuthImage from '../components/AuthImage';
@@ -51,7 +52,17 @@ function DownloadIcon() {
 export default function EventDetail() {
   const { id = '' } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const { pushToast, isAdmin } = useAppState();
+  const [retrying, setRetrying] = useState(false);
+
+  // Back to wherever you came from — the Events list puts itself back where
+  // you left it (lib/eventsReturn). Opened directly (a push notification, a
+  // shared link) there is nothing to go back to, so go to the list.
+  const goBack = () => {
+    if (location.key !== 'default') navigate(-1);
+    else navigate('/events');
+  };
   const [event, setEvent] = useState<NvrEventDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -114,6 +125,7 @@ export default function EventDetail() {
     setDeleting(true);
     try {
       await api.deleteEvent(id);
+      forgetEventInReturnPoint(id);
       pushToast({ kind: 'info', title: 'Event deleted', body: '' });
       navigate('/events', { replace: true });
     } catch (e) {
@@ -131,6 +143,7 @@ export default function EventDetail() {
     setRejecting(true);
     try {
       await api.rejectEvent(id);
+      forgetEventInReturnPoint(id);
       pushToast({
         kind: 'info',
         title: 'Detection excluded',
@@ -145,6 +158,24 @@ export default function EventDetail() {
       });
       setRejecting(false);
       setConfirmReject(false);
+    }
+  };
+
+  const retryClip = async () => {
+    setRetrying(true);
+    try {
+      await api.retryEventClip(id);
+      attemptsRef.current = 0;
+      setStalled(false);
+      refreshEvent();
+    } catch (e) {
+      pushToast({
+        kind: 'error',
+        title: "Couldn't cut the clip",
+        body: e instanceof Error ? e.message : '',
+      });
+    } finally {
+      setRetrying(false);
     }
   };
 
@@ -200,6 +231,9 @@ export default function EventDetail() {
 
   return (
     <div className="page event-detail">
+      <button type="button" className="btn btn-sm event-back" onClick={goBack}>
+        <span aria-hidden="true">←</span> Back to events
+      </button>
       <div className="page-head">
         <div>
           <h1>
@@ -305,6 +339,14 @@ export default function EventDetail() {
                 'that usually means it failed before this version started keeping ' +
                 'track. The backend log has the detail.'}
           </p>
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={retrying}
+            onClick={() => void retryClip()}
+          >
+            {retrying ? 'Asking…' : 'Try cutting the clip again'}
+          </button>
         </div>
       )}
 

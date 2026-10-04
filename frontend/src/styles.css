@@ -1326,6 +1326,13 @@ label > select {
 }
 
 /* Action cluster in the event-detail header (download clip/snapshot + delete). */
+/* Back to the Events list (which restores its own scroll position). */
+.event-back {
+  margin-bottom: 0.6rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
 .event-actions {
   display: flex;
   flex-wrap: wrap;

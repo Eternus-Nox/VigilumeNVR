@@ -1,5 +1,6 @@
 import SwiftUI
 import AVKit
+import Combine
 
 /// Event detail — the push-notification / deep-link landing target.
 /// The media area is driven by the backend's `clip_state` (docs/CONTRACTS.md)
@@ -27,6 +28,12 @@ struct EventDetailView: View {
     @State private var rejecting = false
     /// Presents the event clip full-screen (landscape, tap to dismiss).
     @State private var showClipFullScreen = false
+    /// The clip was "ready" but AVPlayer could not play it (a file that went
+    /// away, a network drop, a codec it will not take). Shown with Try again
+    /// instead of leaving a player with a crossed-out play button.
+    @State private var playbackError: String?
+    /// A "Try again" (re-cut / re-load) is in flight.
+    @State private var retrying = false
 
     /// ONE alert modifier, switched by this.
     ///
@@ -178,7 +185,10 @@ struct EventDetailView: View {
 
     @ViewBuilder
     private func media(for detail: EventDetail) -> some View {
-        if clipReady(detail), !clipAwaitingTap, let player {
+        if clipReady(detail), let playbackError {
+            if detail.hasSnapshot { snapshotImage(id: detail.id) }
+            problemCard("Couldn't play this clip: \(playbackError)", detail: detail, reload: true)
+        } else if clipReady(detail), !clipAwaitingTap, let player {
             VideoPlayer(player: player)
                 .aspectRatio(16 / 9, contentMode: .fit)
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -318,7 +328,12 @@ struct EventDetailView: View {
                 ? "Recording is off for this camera, so no clip was saved — the annotated snapshot is shown above."
                 : "Recording is off for this camera, so no clip was saved.")
         case .unavailable:
-            statusCard("No recording was saved for this event.")
+            problemCard(
+                (detail.clipError?.isEmpty == false)
+                    ? detail.clipError!
+                    : "No clip was saved for this event.",
+                detail: detail, reload: false
+            )
         }
     }
 
@@ -347,6 +362,37 @@ struct EventDetailView: View {
             .padding(14)
             .background(Theme.cardBackground())
         }
+    }
+
+    /// A clip that is not coming (or would not play), with the reason the
+    /// server recorded and a way to ask again. `reload` re-opens the existing
+    /// clip; otherwise the server is asked to cut it again from the 24/7
+    /// recording.
+    private func problemCard(_ text: String, detail: EventDetail, reload: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(Theme.textSecondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                Task { await tryAgain(reload: reload) }
+            } label: {
+                HStack(spacing: 6) {
+                    if retrying {
+                        ProgressView().controlSize(.small).tint(Theme.accent)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    Text(reload ? "Try again" : "Try cutting the clip again")
+                }
+                .font(.caption.weight(.semibold))
+            }
+            .buttonStyle(.bordered)
+            .tint(Theme.accent)
+            .disabled(retrying)
+        }
+        .padding(12)
+        .background(Theme.cardBackground())
     }
 
     private func statusCard(_ text: String) -> some View {
@@ -502,7 +548,60 @@ struct EventDetailView: View {
             guard generation == pollGeneration else { return }
             if detail?.clipState != .processing { return }
         }
-        if generation == pollGeneration { pollStalled = true }
+        guard generation == pollGeneration else { return }
+        pollStalled = true
+        // Keep looking, slower. A long event's clip, a queue of them after a
+        // busy minute, or an H.265 camera's re-encode can take minutes, and
+        // stopping at ~45 s left the screen on "processing" for a clip that
+        // had already landed — it looked like the clip was not there at all.
+        for _ in 0..<40 {
+            try? await Task.sleep(for: .seconds(15))
+            guard !Task.isCancelled, generation == pollGeneration else { return }
+            guard detail?.clipState == .processing else { return }
+            await refetch(restartPolling: false)
+            guard generation == pollGeneration else { return }
+            if detail?.clipState != .processing { return }
+        }
+    }
+
+    /// "Try again": reload a clip that would not play, or ask the server to
+    /// cut a missing one again and follow it until it lands.
+    private func tryAgain(reload: Bool) async {
+        guard let api = session.api, let detail else { return }
+        retrying = true
+        defer { retrying = false }
+        if reload {
+            playbackError = nil
+            player = nil
+            await refetch(restartPolling: true)
+            return
+        }
+        do {
+            try await api.retryEventClip(id: detail.id)
+            pollStalled = false
+            await refetch(restartPolling: true)
+        } catch {
+            session.handleAPIError(error)
+            activeAlert = .failure(
+                title: "Couldn't cut the clip",
+                message: (error as? ApiError)?.message ?? error.localizedDescription
+            )
+        }
+    }
+
+    /// Watch a freshly made player's item and surface a failure, so a clip
+    /// that will not load says so instead of sitting on a dead player.
+    private func watchPlayback(_ item: AVPlayerItem?) {
+        guard let item else { return }
+        Task { @MainActor in
+            for await status in item.publisher(for: \.status).values {
+                if status == .failed {
+                    playbackError = item.error?.localizedDescription ?? "the clip could not be loaded"
+                    return
+                }
+                if status == .readyToPlay { return }
+            }
+        }
     }
 
     private func apply(_ loaded: EventDetail, api: APIClient) {
@@ -510,7 +609,9 @@ struct EventDetailView: View {
         let wasReady = detail.map(clipReady) ?? false
         detail = loaded
         if clipReady(loaded), !wasReady || player == nil {
+            playbackError = nil
             player = AVPlayer(url: api.eventClipURL(id: loaded.id))
+            watchPlayback(player?.currentItem)
             if wasProcessing || clipAwaitingTap {
                 // The user is watching live — offer "tap to watch" rather
                 // than yanking the live view out from under them.

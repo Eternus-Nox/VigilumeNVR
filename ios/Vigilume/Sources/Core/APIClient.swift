@@ -387,6 +387,13 @@ struct APIClient: Sendable {
         try await send(try makeRequest("DELETE", "api/events/\(id)"))
     }
 
+    /// POST /api/events/{id}/clip/retry — cut this event's clip again now
+    /// (the "Try again" under an unavailable clip). The event then reads
+    /// "processing" and is polled as usual.
+    func retryEventClip(id: Int) async throws {
+        try await send(try makeRequest("POST", "api/events/\(id)/clip/retry"))
+    }
+
     /// ADMIN: permanently delete ALL events plus their snapshots and clips.
     /// Continuous recordings are kept. Irreversible.
     func deleteAllEvents() async throws {

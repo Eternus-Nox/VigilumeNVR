@@ -2098,6 +2098,10 @@ export const api = {
    */
   rejectEvent: (id: string | number) =>
     request<void>(`/api/events/${id}/reject`, { method: 'POST' }),
+  /** Cut this event's clip again now ("Try again" under an unavailable clip);
+   *  the event then reads "processing". */
+  retryEventClip: (id: string | number) =>
+    request<{ clip_state: string }>(`/api/events/${id}/clip/retry`, { method: 'POST' }),
   /** ADMIN: permanently delete ALL events + their snapshots/clips. Irreversible. */
   deleteAllEvents: () =>
     request<{ deleted: number; files_removed: number }>('/api/events', { method: 'DELETE' }),

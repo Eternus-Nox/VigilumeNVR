@@ -462,6 +462,10 @@ struct EventDetail: Decodable, Identifiable, Sendable {
     let snapshotUrl: String
     let recordEnabled: Bool
     let clipState: ClipState
+    /// Why the clip never landed, in words the recorder chose (no footage for
+    /// that moment, the cut failed, retention removed it). nil on an older
+    /// backend; empty when nothing went wrong.
+    let clipError: String?
     /// What recognition read here (see EventRecognition). nil on an older
     /// backend, empty on a box that never enabled recognition.
     let recognitions: [EventRecognition]?

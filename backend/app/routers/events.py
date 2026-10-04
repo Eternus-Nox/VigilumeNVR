@@ -272,16 +272,69 @@ async def get_event(event_id: int, request: Request) -> dict[str, Any]:
     event = await _get_event_or_404(request, event_id)
     event = (await _with_recognitions(request.app.state.db, [event]))[0]
     record_enabled = await _record_enabled_for(request, event)
+    # STAT THE FILE. has_clip is a DB flag the clip retention sweep never
+    # clears, so a row can say "ready" for a clip that was deleted — and both
+    # apps then mounted a player against a URL that 404s: the event opened on
+    # a dead video with no explanation. The clip route already checked; this
+    # is the same check on the call the apps actually decide with.
+    file_present = await asyncio.to_thread(_clip_file_present, request, event)
     # Additive fields (existing consumers keep working): record_enabled and a
     # derived clip_state let the UI show an accurate clip status instead of a
     # dead "recording unavailable" whenever a clip is late or never coming.
-    return {
+    state = _clip_state(event, record_enabled, file_present=file_present,
+                        pending=_clip_pending(request, event))
+    out = {
         **event,
         "clip_url": f"/api/events/{event_id}/clip.mp4",
         "snapshot_url": f"/api/events/{event_id}/snapshot.jpg",
         "record_enabled": record_enabled,
-        "clip_state": _clip_state(event, record_enabled, pending=_clip_pending(request, event)),
+        "clip_state": state,
     }
+    if event.get("has_clip") and not file_present:
+        out["has_clip"] = False
+        if not out.get("clip_error"):
+            out["clip_error"] = ("This clip was removed by the clip retention setting "
+                                 "(Settings → Recording). Try again to cut it from the "
+                                 "24/7 recording, if that footage is still kept.")
+    return out
+
+
+def _clip_file_present(request: Request, event: dict[str, Any]) -> bool:
+    try:
+        return request.app.state.media.clip_path(event["id"]).is_file()
+    except Exception:  # noqa: BLE001 — a media-layer fault reads as "no file"
+        return False
+
+
+@router.post("/{event_id}/clip/retry", dependencies=[Depends(require_auth)])
+async def retry_event_clip(event_id: int, request: Request) -> dict[str, Any]:
+    """Cut this event's clip again, now — the "Try again" under a clip that
+    is unavailable. A failed clip records its reason and is never retried on
+    its own (clip recovery skips it, so a clip that cannot be made is not
+    re-cut every half hour); this is how a person asks for it anyway, e.g.
+    after the recorder or the transcoder has been fixed.
+
+    Harmless to repeat (one job per event at a time), so any signed-in user
+    may ask. Returns the new clip_state; the apps poll the event as usual."""
+    event = await _get_event_or_404(request, event_id)
+    if _never_has_clip(event):
+        raise HTTPException(status_code=400, detail="This event never has a clip")
+    if not await _record_enabled_for(request, event):
+        raise HTTPException(status_code=409, detail="Recording is off for this camera")
+    if event.get("end_time") is None:
+        raise HTTPException(status_code=409,
+                            detail="The event is still going — its clip is cut when it ends")
+    if await asyncio.to_thread(_clip_file_present, request, event):
+        return {"clip_state": "ready"}
+    recorder = getattr(request.app.state, "recorder", None)
+    if _clip_pending(request, event):
+        return {"clip_state": "processing"}
+    retry = getattr(recorder, "retry_clip", None)
+    if retry is None or not retry(event["camera"], event["frigate_id"],
+                                  float(event["start_time"]), float(event["end_time"])):
+        raise HTTPException(status_code=503,
+                            detail="The recorder is not running, so the clip cannot be cut now")
+    return {"clip_state": "processing"}
 
 
 @router.get("/{event_id}/snapshot.jpg", dependencies=[Depends(require_media_auth)])

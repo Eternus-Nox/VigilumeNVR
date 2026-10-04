@@ -395,6 +395,26 @@ in the background. UI: web Settings → Cameras → "Camera video quality" and t
 camera edit form; iOS Settings → Cameras → Video quality and a camera's
 settings → Video quality. `tests/stream_profile_smoke.py`.
 
+### Opening an event's clip
+
+`GET /api/events/{id}` STATS the clip file before answering `clip_state`:
+`has_clip` is a DB flag the clip retention sweep never clears, so a row could
+say "ready" for a deleted clip and both apps mounted a player against a 404 —
+the event opened on a dead video. A missing file now reads as not ready, with
+`has_clip: false` and a `clip_error` naming the retention setting.
+`POST /api/events/{id}/clip/retry` (any signed-in user) cuts the clip again
+now: a failed clip records its reason and clip recovery deliberately never
+retries it, so this is how a person asks after fixing the cause. 400 for an
+event that never has a clip, 409 for a still-open event or a recording-off
+camera, 503 when the recorder is down; "ready" when the file is already there;
+one job per event at a time. Both apps show `clip_error` with a **Try again**
+under an unavailable clip; iOS also keeps polling a slow clip (every 15 s, up
+to ~10 min, after the first ~45 s) instead of stopping, and reports a clip
+AVPlayer cannot play (with Try again) instead of a crossed-out player. The web
+event page has a **Back to events** button, and the Events list restores its
+loaded pages and scroll position on return (`lib/eventsReturn.ts`, same
+filters, 15 min). `tests/clip_access_smoke.py`.
+
 ### Substream codec: live view needs H.264 (`provision_substream_codec`)
 
 Every live surface opens on the substream (`ExtraFormat[0]`, RTSP subtype=1).
