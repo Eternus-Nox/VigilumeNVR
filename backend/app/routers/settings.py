@@ -429,7 +429,7 @@ class TimeSyncSettings(BaseModel):
 
 
 class RecognitionSettings(BaseModel):
-    """Face / plate recognition (native/facepass.py, native/platepass.py).
+    """Face recognition (native/facepass.py). Licence plate reading was removed.
 
     MUST be on AppSettings below. Anything absent from that model is silently
     DROPPED by validation, and since PATCH validates the merged document and
@@ -450,10 +450,10 @@ class RecognitionSettings(BaseModel):
     # would let one event's deferral swallow the next event's alert.
     notify_grace_seconds: float = Field(default=4.0, ge=0.0, le=30.0)
     # "all" names a known subject in the alert; "unknown_only" stays silent for
-    # enrolled people and vehicles. A Literal, so a typo is a 422 rather than a
+    # enrolled people. A Literal, so a typo is a 422 rather than a
     # value that silently behaves as "all" and floods the phone.
     notify_mode: Literal["all", "unknown_only"] = "all"
-    # How many distinct shots of one face/vehicle are kept to choose the best
+    # How many distinct shots of one face are kept to choose the best
     # from. More shots means a better chance one of them is legible, which is
     # what actually suppresses false matches: a marginal crop scored against the
     # gallery is where a wrong name comes from, and the fix is to have a better
@@ -477,8 +477,7 @@ class RecognitionSettings(BaseModel):
     pass_interval_seconds: float = Field(default=0.6, ge=0.1, le=5.0)
     # Look for a face on VEHICLES too, not just people — a driver through a
     # windscreen. Off by default because it is a real cost on a busy road for a
-    # crop that is usually glare, and because a plate is the better identifier
-    # for a car. Worth turning on for a driveway or a gate.
+    # crop that is usually glare. Worth turning on for a driveway or a gate.
     face_on_vehicles: bool = False
     # Quality a crop must reach before an embedding is computed from it.
     # LOWERING THIS IS NOT FREE and is not "more accurate": a marginal crop
@@ -486,24 +485,12 @@ class RecognitionSettings(BaseModel):
     # from. It is exposed so an operator who is missing people entirely can
     # trade the other way knowingly, not as a general accuracy dial.
     identify_quality: float = Field(default=0.45, ge=0.15, le=0.9)
-    # Read plates from a full-resolution camera snapshot as well as the detect
-    # stream (native/platesnap.py). On by default: at the detect stream's size
-    # a plate is usually too small to read unless the car is at the lens.
-    plate_hires: bool = True
     # Read faces from a full-resolution camera snapshot as well as the detect
-    # stream (native/facepass.py). On by default for the same reason: a face
+    # stream (native/facepass.py, native/snapshots.py). On by default: a face
     # at the detect stream's size is a few dozen pixels and matches poorly.
     face_hires: bool = True
-    # Find plates with the learned plate detector instead of the classical
-    # localizer (native/plates.py explains the trade, including licensing).
-    plate_detector: bool = True
-    # "us" reads letter O/I/Q as 0/1/0 (US standard plates omit them); "any"
-    # keeps reads as the readers gave them. A Literal so a typo is a 422.
-    plate_region: Literal["us", "any"] = "us"
-    # Read plates from the recording too: bursts while the vehicle is in view,
-    # from just before it was detected, and after it leaves (native/burst.py).
-    plate_replay: bool = True
-    # The same for faces (native/facepass.py, native/burst.py).
+    # Read faces from the RECORDING too: bursts while the person is in view,
+    # from just before they were detected (native/facepass.py, native/burst.py).
     face_replay: bool = True
 
 

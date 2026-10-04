@@ -42,7 +42,6 @@ struct CameraSettingsView: View {
     // off `camera` (a `let`) so the row updates when the editor saves, instead
     // of lying until the screen is revisited.
     @State private var faceZones: [IncludeZone] = []
-    @State private var plateZones: [IncludeZone] = []
     @State private var notifyOnCross = false
     @State private var configSaving = false
 
@@ -332,14 +331,14 @@ struct CameraSettingsView: View {
 
     // MARK: - Recognition regions
 
-    /// Where a face or a plate is worth LOOKING for — a different question from
-    /// the detection zones above, which decide what produces an event at all.
-    /// These never suppress anything; leaving them empty searches the whole
+    /// Where a face is worth LOOKING for — a different question from the
+    /// detection zones above, which decide what produces an event at all.
+    /// This never suppresses anything; leaving it empty searches the whole
     /// frame, which is correct and merely slower.
     private var recognitionZonesCard: some View {
-        settingsCard("Recognition areas", systemImage: "viewfinder") {
+        settingsCard("Recognition area", systemImage: "viewfinder") {
             NavigationLink {
-                RecognitionZoneEditor(camera: camera, kind: "face") { await reloadCamera() }
+                RecognitionZoneEditor(camera: camera) { await reloadCamera() }
             } label: {
                 recognitionZoneRow(
                     title: "Face area",
@@ -347,16 +346,7 @@ struct CameraSettingsView: View {
                     systemImage: "person.crop.square"
                 )
             }
-            NavigationLink {
-                RecognitionZoneEditor(camera: camera, kind: "plate") { await reloadCamera() }
-            } label: {
-                recognitionZoneRow(
-                    title: "Plate area",
-                    count: plateZones.count,
-                    systemImage: "car"
-                )
-            }
-            Text("These do NOT filter detection — they only mark where detail is legible enough to be worth a recognition pass. Each editor draws a heatmap of where sightings have actually been readable on this camera, which is usually not where people walk.")
+            Text("This does NOT filter detection — it only marks where a face is legible enough to be worth a recognition pass. The editor draws a heatmap of where faces have actually been readable on this camera, which is usually not where people walk.")
                 .font(.caption2)
                 .foregroundStyle(Theme.textSecondary)
         }
@@ -522,7 +512,6 @@ struct CameraSettingsView: View {
         crossLines = camera.crossLines ?? []
         notifyOnCross = camera.notifyOnCross ?? false
         faceZones = camera.faceZones ?? []
-        plateZones = camera.plateZones ?? []
     }
 
     /// Re-read this camera after the ROI editor saved, so the rows stop saying
@@ -534,7 +523,6 @@ struct CameraSettingsView: View {
         guard let fresh = try? await api.cameras().first(where: { $0.name == camera.name })
         else { return }
         faceZones = fresh.faceZones ?? []
-        plateZones = fresh.plateZones ?? []
     }
 
     private func loadDeviceSettings() async {

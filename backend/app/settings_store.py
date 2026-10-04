@@ -68,6 +68,11 @@ def _strip_legacy(settings: dict) -> dict:
     if isinstance(detection, dict):
         detection.pop("audio_events", None)
         detection.pop("audio_labels", None)
+    recognition = settings.get("recognition")
+    if isinstance(recognition, dict):
+        # Licence plate reading was removed; its switches mean nothing now.
+        for key in ("plate_hires", "plate_detector", "plate_region", "plate_replay"):
+            recognition.pop(key, None)
     time_sync = settings.get("time_sync")
     if isinstance(time_sync, dict):
         # The feature used to enable the camera NTP client (keyed on `auto_ntp`
@@ -156,7 +161,7 @@ class SettingsStore:
 
     @property
     def recognition(self) -> dict[str, Any]:
-        """Face/plate recognition settings.
+        """Face recognition settings.
 
         ``.get(...)`` on the result rather than indexing, because a /data
         volume written before recognition existed has no such block and must

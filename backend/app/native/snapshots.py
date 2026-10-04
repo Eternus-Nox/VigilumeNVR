@@ -1,33 +1,31 @@
-"""Full-resolution frames for the plate pass.
+"""Full-resolution frames for the face pass.
 
 WHY THIS EXISTS
 ===============
 Detection decodes each camera's SUBSTREAM, scaled to the detect size — 704x480
-by default. That is plenty to find a car, and far too little to read its plate:
-a car filling a third of the frame carries a plate about 40 px wide, and the
-plate scorer needs 64 px before a crop is worth reading at all (bestshot.
-PLATE_MIN_PX; ~160 px for a clean read). Measured on a synthetic driveway, the
-substream produced no plate regions whatsoever until the car filled more than
-half the frame. Plates were only being read when a car was right up at the lens.
+by default. That is plenty to find a person, and too little to tell faces
+apart: a face at the door is a few dozen pixels there, and below ~56 px the
+embedding is measurably weaker (bestshot.FACE_MIN_PX; 112 px is what the
+embedder consumes).
 
 The camera already has the pixels — its main stream is three to six times
 wider. Decoding that continuously for every camera would cost more than
 detection itself, so this asks the camera for ONE full-resolution JPEG
-(`snapshot.cgi`) only while a vehicle is being tracked on a camera with plate
-reading on, at most about once a second per vehicle, and stops once the plate
-has been read confidently.
+(`snapshot.cgi`) only while a person is being tracked on a camera with face
+recognition on, at most about once a second, and stops once they have been
+identified.
 
 LINING THE TWO FRAMES UP
 ------------------------
 The snapshot is taken AFTER the detect frame — by however long ingest,
 detection and the HTTP round trip took, a few hundred milliseconds in which a
-moving car moves. So the detect-frame box is not simply scaled up. The
-snapshot is shrunk to the detect frame's size and the vehicle found in it by
-template matching against the detect-frame crop, near where it was; only then
-is the box scaled up and the plate cut from the full-resolution pixels. A
-match below `MATCH_MIN` means the car moved too far or the view differs, and
-that look is skipped rather than guessed at: a plate cut from the wrong place
-is a wrong plate.
+moving person moves. So the detect-frame box is not simply scaled up. The
+snapshot is shrunk to the detect frame's size and the person found in it by
+template matching against the detect-frame crop, near where they were; only
+then is the box scaled up and the face cut from the full-resolution pixels. A
+match below `MATCH_MIN` means they moved too far or the view differs, and that
+look is skipped rather than guessed at: a face cut from the wrong place is the
+wrong face.
 
 Both frames are the same sensor's full field of view, so one per-axis scale
 maps between them even when the substream is anamorphic (704x480 is 4:3-ish;
@@ -77,14 +75,14 @@ MIN_GAIN = 1.3
 #: parked car.
 SEARCH_MARGIN = 0.75
 
-#: Template scales tried: the car may have come closer or moved away.
+#: Template scales tried: the person may have come closer or moved away.
 MATCH_SCALES = (1.0, 0.9, 1.1)
 
 #: Normalized cross-correlation below which the match is not trusted.
 MATCH_MIN = 0.5
 
-#: A detect-frame vehicle smaller than this cannot be matched reliably — and
-#: is too far away for its plate to be legible even at full resolution.
+#: A detect-frame box smaller than this cannot be matched reliably — and is
+#: too far away for a face to be legible even at full resolution.
 MIN_TEMPLATE_PX = 24
 
 
@@ -164,7 +162,7 @@ class SnapshotSource:
     def proven(self, camera: str) -> bool:
         """This camera has served a usable full-resolution snapshot and is not
         currently failing — so its snapshots, not the detect frame, are what
-        plates should be read from."""
+        faces should be read from."""
         h = self._health.get(camera)
         return (h is not None and h.ok > 0 and not h.no_gain
                 and h.retry_at <= time.monotonic() and h.consecutive == 0)
@@ -215,7 +213,7 @@ class SnapshotSource:
             return None
         except Exception as exc:  # noqa: BLE001
             h.note_failure(_describe(exc))
-            log.debug("plate snapshot from %s failed: %s", camera, exc)
+            log.debug("full-resolution snapshot from %s failed: %s", camera, exc)
             return None
         taken = time.time()
         h.note_success(frame.shape, time.monotonic() - started)
@@ -243,7 +241,7 @@ class SnapshotSource:
         failed — the fix is usually a camera setting, and the status screen
         says which. But it used to be permanent until restart, so ONE small
         snapshot (a camera mid-reboot serving its substream size) switched
-        full-resolution plate reading off for the life of the process. Now it
+        full-resolution face reading off for the life of the process. Now it
         is re-checked after the backoff, and `note_gain` clears it.
         """
         h = self._health.setdefault(camera, _Health())
@@ -305,11 +303,11 @@ def locate(
     detect_shape: Sequence[int],
     hires_bgr: np.ndarray,
 ) -> Optional[tuple[tuple[float, float, float, float], float]]:
-    """Find the vehicle in a full-resolution frame.
+    """Find the subject in a full-resolution frame.
 
-    ``template_bgr`` is the vehicle as the DETECT frame saw it, cut at ``box``
+    ``template_bgr`` is the subject as the DETECT frame saw it, cut at ``box``
     (detect-frame pixels); ``detect_shape`` is that frame's ``(h, w)``. Returns
-    ``(box_in_hires_pixels, match_score)``, or None when the vehicle cannot be
+    ``(box_in_hires_pixels, match_score)``, or None when the subject cannot be
     found with confidence — in which case the caller skips this look.
     """
     if template_bgr is None or template_bgr.size == 0 or hires_bgr is None or hires_bgr.size == 0:
@@ -377,7 +375,7 @@ def _describe(exc: BaseException) -> str:
     if "401" in lowered or "unauthorized" in lowered:
         return "the camera rejected the stored username/password for snapshots"
     if "404" in lowered or "not found" in lowered:
-        return "the camera has no snapshot.cgi — full-resolution plate reading needs an Amcrest/Dahua camera"
+        return "the camera has no snapshot.cgi — full-resolution face reading needs an Amcrest/Dahua camera"
     return text[:200]
 
 

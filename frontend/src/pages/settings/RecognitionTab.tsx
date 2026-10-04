@@ -1,11 +1,12 @@
 /**
- * Settings → Faces & plates: the enrolled people and vehicles, and the
- * unmatched sightings you enroll them from.
+ * Settings → Faces: the enrolled people, and the unmatched sightings you
+ * enroll them from. (Licence plate reading was removed; vehicle profiles in an
+ * older database are no longer listed.)
  *
  * ADMIN-ONLY, INCLUDING JUST LOOKING AT IT. Every other settings tab is gated
  * because it configures the system; this one is gated because of what it
- * CONTAINS — a named register of who comes to this address and which cars they
- * drive, plus a rolling gallery of strangers' faces. The server enforces it
+ * CONTAINS — a named register of who comes to this address, plus a rolling
+ * gallery of strangers' faces. The server enforces it
  * (`require_admin` on the whole router, reads included) and the shell never
  * routes a viewer here, so the 403 never has to be explained.
  *
@@ -42,12 +43,10 @@ import CandidateReview from '../../components/CandidateReview';
 import { ConfirmDialog } from '../../components/Modal';
 import { useAppState } from '../../state/AppState';
 import { formatDateTime, titleCase } from '../../lib/format';
-import PlateDiagnostics from './PlateDiagnostics';
 
 /** A profile kind and the candidate kind you enroll into it, in one place. */
 const CANDIDATE_OF: Record<ProfileKind, CandidateKind> = {
   person: 'face',
-  vehicle: 'plate',
 };
 
 /**
@@ -71,13 +70,12 @@ const STAGES: [string, string][] = [
   ['face_detect', 'Find a face'],
   ['face_align', 'Align it'],
   ['face_embed', 'Read the face'],
-  ['plate_localize', 'Find a plate'],
-  ['plate_ocr', 'Read the plate'],
 ];
 
 export default function RecognitionTab() {
   const { pushToast } = useAppState();
-  const [kind, setKind] = useState<ProfileKind>('person');
+  // People only: licence plate reading (and with it vehicle profiles) was removed.
+  const kind: ProfileKind = 'person';
   const [profiles, setProfiles] = useState<RecognitionProfile[]>([]);
   const [status, setStatus] = useState<RecognitionStatus | null>(null);
   const [candidates, setCandidates] = useState<RecognitionCandidate[]>([]);
@@ -114,7 +112,6 @@ export default function RecognitionTab() {
   >(null);
 
   const candidateKind = CANDIDATE_OF[kind];
-  const isPerson = kind === 'person';
 
   const fail = useCallback(
     (e: unknown, title: string) =>
@@ -142,7 +139,7 @@ export default function RecognitionTab() {
         return new Set([...prev].filter((id) => live.has(id)));
       });
     } catch (e) {
-      fail(e, 'Could not load faces & plates');
+      fail(e, 'Could not load faces');
     } finally {
       setLoading(false);
     }
@@ -219,29 +216,6 @@ export default function RecognitionTab() {
     }
   };
 
-  const setPlate = async (profileId: number, plate: string) => {
-    setBusy(true);
-    try {
-      const saved = await api.addRecognitionPlate(profileId, plate);
-      // Say so when sightings were absorbed. The rows vanishing from the unread
-      // list with no explanation reads as a bug, even though it is the feature.
-      if (saved.absorbed_candidates) {
-        pushToast({
-          kind: 'info',
-          title: `Matched ${saved.absorbed_candidates} unread ${
-            saved.absorbed_candidates === 1 ? 'sighting' : 'sightings'
-          }`,
-          body: 'Already-read sightings of this plate were cleared from the review list.',
-        });
-      }
-      await Promise.all([reload(), refreshOpen(profileId)]);
-    } catch (e) {
-      fail(e, 'Could not add the plate');
-    } finally {
-      setBusy(false);
-    }
-  };
-
   /**
    * Turn recognition on or off for ONE camera.
    *
@@ -250,8 +224,9 @@ export default function RecognitionTab() {
    * still a round trip, and a checkbox that waits for the network to agree
    * before it moves reads as broken.
    */
-  const toggleCamera = async (cam: Camera, field: 'face' | 'plate') => {
-    const key = field === 'face' ? 'face_recognition' : 'plate_recognition';
+  const toggleCamera = async (cam: Camera) => {
+    const key = 'face_recognition';
+    const field = 'face';
     const previous = cam[key] ?? true;
     const next = !previous;
     setCameras((prev) => prev.map((c) => (c.name === cam.name ? { ...c, [key]: next } : c)));
@@ -267,7 +242,6 @@ export default function RecognitionTab() {
             ? {
                 ...c,
                 face_recognition: saved.face_recognition,
-                plate_recognition: saved.plate_recognition,
                 detect_objects: saved.detect_objects,
               }
             : c,
@@ -418,7 +392,7 @@ export default function RecognitionTab() {
       };
     }
     return {
-      title: isPerson ? 'Clear unknown faces?' : 'Clear unread plates?',
+      title: 'Clear unknown faces?',
       message:
         'Every unmatched crop shown here is deleted from the server. Anything already enrolled into a profile is kept.',
       label: 'Clear',
@@ -428,37 +402,18 @@ export default function RecognitionTab() {
   return (
     <div className="settings-section">
       <section className="card">
-        <h2>Faces &amp; plates</h2>
+        <h2>Faces</h2>
         <p className="muted small">
-          People and vehicles you want recognized by name. There is{' '}
+          People you want recognized by name. There is{' '}
           <strong>no training step</strong> — a profile is a set of reference shots, so
           enrolling takes effect at once and removing a reference undoes it completely.
           What helps accuracy is <em>variety</em>: the same face at different angles, in
           daylight and at night, rather than five frames of one moment.
         </p>
         <p className="muted small">
-          Recognition itself is switched on under <strong>Detection → Faces &amp; plates</strong>.
+          Recognition itself is switched on under <strong>Detection → Face recognition</strong>.
           Profiles can be set up either way; they start matching once it is on.
         </p>
-
-        <div className="tabs" role="tablist" aria-label="Profile kind">
-          {(['person', 'vehicle'] as ProfileKind[]).map((k) => (
-            <button
-              key={k}
-              type="button"
-              role="tab"
-              aria-selected={kind === k}
-              className={`tab ${kind === k ? 'tab-active' : ''}`}
-              onClick={() => {
-                setKind(k);
-                setOpenProfile(null);
-                setSelected(new Set());
-              }}
-            >
-              {k === 'person' ? 'People' : 'Vehicles'}
-            </button>
-          ))}
-        </div>
 
         {status && !status.ready && (
           <p className="control-hint">
@@ -592,6 +547,14 @@ export default function RecognitionTab() {
               .
             </p>
           )}
+          {Object.entries(status.face.snapshots ?? {})
+            .filter(([, h]) => h.no_gain || (h.failed > 0 && h.last_error))
+            .map(([camera, h]) => (
+              <p key={camera} className="control-hint">
+                <strong>{titleCase(camera)}</strong> snapshots:{' '}
+                {h.no_gain || `${h.failed} failed — ${h.last_error}`}
+              </p>
+            ))}
           {status.face.bursts && status.face.bursts.bursts > 0 && (
             <p className="control-hint">
               From the recording: <strong>{status.face.bursts.frames}</strong> frames read in{' '}
@@ -610,15 +573,6 @@ export default function RecognitionTab() {
             </p>
           )}
         </section>
-      )}
-
-      {status?.plates && (
-        <PlateDiagnostics
-          plates={status.plates}
-          cameras={cameras}
-          refreshing={loading}
-          onRefresh={() => void reload()}
-        />
       )}
 
       {status?.devices && (
@@ -682,8 +636,6 @@ export default function RecognitionTab() {
           pruning: a camera watching a driveway at 30&nbsp;m cannot produce a legible
           face, so every pass spent there is wasted — and the only crops it does produce
           are marginal ones, which is exactly where a <em>wrong name</em> comes from.
-          Faces and plates are independent, so a gate camera can read plates without ever
-          being asked for a face.
         </p>
         {cameras.length === 0 ? (
           <p className="empty-state">{loading ? 'Loading…' : 'No cameras.'}</p>
@@ -693,7 +645,6 @@ export default function RecognitionTab() {
               <tr>
                 <th scope="col">Camera</th>
                 <th scope="col">Faces</th>
-                <th scope="col">Plates</th>
               </tr>
             </thead>
             <tbody>
@@ -706,16 +657,7 @@ export default function RecognitionTab() {
                       checked={c.face_recognition ?? true}
                       disabled={camBusy.has(c.name)}
                       aria-label={`Recognize faces on ${c.friendly_name || c.name}`}
-                      onChange={() => void toggleCamera(c, 'face')}
-                    />
-                  </td>
-                  <td>
-                    <input
-                      type="checkbox"
-                      checked={c.plate_recognition ?? true}
-                      disabled={camBusy.has(c.name)}
-                      aria-label={`Read plates on ${c.friendly_name || c.name}`}
-                      onChange={() => void toggleCamera(c, 'plate')}
+                      onChange={() => void toggleCamera(c)}
                     />
                   </td>
                 </tr>
@@ -731,16 +673,16 @@ export default function RecognitionTab() {
       </section>
 
       <section className="card">
-        <h2>{isPerson ? 'People' : 'Vehicles'}</h2>
+        <h2>People</h2>
         <div className="form-stack">
           <label>
-            {isPerson ? 'Add a person' : 'Add a vehicle'}
+            Add a person
             <div className="inline-form">
               <input
                 id="recog-new-name"
                 type="text"
                 value={newName}
-                placeholder={isPerson ? 'Name' : 'Vehicle name'}
+                placeholder="Name"
                 onChange={(e) => setNewName(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
@@ -759,9 +701,7 @@ export default function RecognitionTab() {
               </button>
             </div>
             <span className="control-hint">
-              {isPerson
-                ? "Create the person first, then enroll their face from real sightings below."
-                : 'Create the vehicle, then type its plate or enroll a sighting below.'}
+              Create the person first, then enroll their face from real sightings below.
             </span>
           </label>
         </div>
@@ -770,9 +710,7 @@ export default function RecognitionTab() {
           <p className="muted small">Loading…</p>
         ) : profiles.length === 0 ? (
           <p className="empty-state">
-            {isPerson
-              ? 'Nobody enrolled yet.'
-              : 'No vehicles enrolled yet.'}
+            Nobody enrolled yet.
           </p>
         ) : (
           <ul className="recog-profile-list">
@@ -823,7 +761,6 @@ export default function RecognitionTab() {
                   <ProfileDetail
                     profile={openProfile}
                     busy={busy}
-                    onAddPlate={(plate) => void setPlate(p.id, plate)}
                     onDeleteSample={(id) => setConfirm({ kind: 'sample', id })}
                     onAlertMode={(mode) => void setAlertMode(p, mode)}
                   />
@@ -836,7 +773,7 @@ export default function RecognitionTab() {
 
       <section className="card">
         <div className="card-head">
-          <h2>{isPerson ? 'Unknown faces' : 'Unread plates'}</h2>
+          <h2>Unknown faces</h2>
           {candidates.length > 0 && (
             <button
               type="button"
@@ -898,12 +835,9 @@ export default function RecognitionTab() {
                       {c.has_image && c.image_url ? (
                         <AuthImage src={c.image_url} alt="" loading="lazy" />
                       ) : (
-                        <span className="recog-candidate-noimg">
-                          {c.plate || 'no image'}
-                        </span>
+                        <span className="recog-candidate-noimg">no image</span>
                       )}
                       <span className="recog-candidate-meta">
-                        {c.plate && <strong className="mono">{c.plate}</strong>}
                         <span>{titleCase(c.camera)}</span>
                         <span>{formatDateTime(c.created_at)}</span>
                       </span>
@@ -968,27 +902,22 @@ function subtitle(p: RecognitionProfile): string {
   // "Stopped matching" is the state worth naming: sample_count looks healthy
   // while nothing can actually be compared against it.
   if (p.sample_count > 0 && p.usable_sample_count === 0) return 'Needs re-enrolling';
-  if (p.sample_count === 0) return p.kind === 'person' ? 'No faces enrolled' : 'No plate set';
-  const unit = p.kind === 'person' ? 'face' : 'plate';
-  return `${p.sample_count} ${unit}${p.sample_count === 1 ? '' : 's'}`;
+  if (p.sample_count === 0) return 'No faces enrolled';
+  return `${p.sample_count} face${p.sample_count === 1 ? '' : 's'}`;
 }
 
 function ProfileDetail({
   profile,
   busy,
-  onAddPlate,
   onDeleteSample,
   onAlertMode,
 }: {
   profile: RecognitionProfileDetail;
   busy: boolean;
-  onAddPlate: (plate: string) => void;
   onDeleteSample: (id: number) => void;
   onAlertMode: (mode: AlertMode) => void;
 }) {
-  const [plate, setPlate] = useState('');
-  const isVehicle = profile.kind === 'vehicle';
-  const who = isVehicle ? 'this vehicle' : profile.name || 'this person';
+  const who = profile.name || 'this person';
 
   return (
     <div className="recog-profile-detail">
@@ -1014,45 +943,6 @@ function ProfileDetail({
           </span>
         </label>
       </div>
-      {isVehicle && (
-        <div className="form-stack">
-          <label>
-            Add a plate
-            <div className="inline-form">
-              <input
-                type="text"
-                value={plate}
-                placeholder="7ABC123"
-                className="mono"
-                onChange={(e) => setPlate(e.target.value.toUpperCase())}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && plate.trim()) {
-                    e.preventDefault();
-                    onAddPlate(plate.trim());
-                    setPlate('');
-                  }
-                }}
-              />
-              <button
-                type="button"
-                className="btn btn-sm"
-                disabled={busy || !plate.trim()}
-                onClick={() => {
-                  onAddPlate(plate.trim());
-                  setPlate('');
-                }}
-              >
-                Add
-              </button>
-            </div>
-            <span className="control-hint">
-              Spaces and dashes are ignored — the plate is stored normalized, so it matches
-              however the camera happens to read it.
-            </span>
-          </label>
-        </div>
-      )}
-
       {profile.samples.length === 0 ? (
         <p className="empty-state">
           No references yet. Select shots below and enroll them.
@@ -1064,7 +954,7 @@ function ProfileDetail({
               {s.has_image && s.image_url ? (
                 <AuthImage src={s.image_url} alt="" loading="lazy" />
               ) : (
-                <span className="recog-candidate-noimg mono">{s.plate || '—'}</span>
+                <span className="recog-candidate-noimg mono">—</span>
               )}
               <button
                 type="button"

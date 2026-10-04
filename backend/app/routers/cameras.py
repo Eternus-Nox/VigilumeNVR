@@ -146,19 +146,17 @@ class CameraInput(BaseModel):
     cross_lines: Optional[list[CrossLine]] = None
     # Recognition regions of interest. Same None/[] contract again, but the
     # CONSEQUENCE is the opposite of include_zones: these do not filter
-    # detection at all, they only mark where a face or plate is legible enough
+    # detection at all, they only mark where a face is legible enough
     # to be worth a recognition pass. An empty list means the whole frame,
     # which is correct and merely slower — so unlike an include zone, a
     # degenerate one here cannot blind anything.
     face_zones: Optional[list[IncludeZone]] = None
-    plate_zones: Optional[list[IncludeZone]] = None
     # WHETHER this camera recognizes, as opposed to where it looks. The
     # zones above cannot express "off" — [] means whole frame — so without
     # these, enabling recognition ran a face pass on every camera. None
     # (omitted) keeps stored on update and defaults to ON at create, which
     # matches the column default and keeps an upgrade a no-op.
     face_recognition: Optional[bool] = None
-    plate_recognition: Optional[bool] = None
     # "Only alert me when something crosses a line on this camera." None
     # (omitted) = keep stored on update / off on create. Gates the NOTIFICATION
     # only — the event, its clip and its snapshot are recorded either way — and
@@ -233,7 +231,7 @@ class CameraInput(BaseModel):
                 cleaned.append(ExemptZone(name=zone.name.strip(), points=pts))
         return cleaned
 
-    @field_validator("face_zones", "plate_zones")
+    @field_validator("face_zones")
     @classmethod
     def _clean_roi(cls, v: Optional[list[IncludeZone]]) -> Optional[list[IncludeZone]]:
         # Identical cleaning to include zones (clamp, drop under 3 points), but
@@ -476,9 +474,7 @@ def _camera_response(
         "cross_lines": list(cam.get("cross_lines") or []),
         # Recognition ROIs, verbatim. [] means the whole frame.
         "face_zones": list(cam.get("face_zones") or []),
-        "plate_zones": list(cam.get("plate_zones") or []),
         "face_recognition": bool(cam.get("face_recognition", True)),
-        "plate_recognition": bool(cam.get("plate_recognition", True)),
         "notify_on_cross": bool(cam.get("notify_on_cross") or False),
         "detect": {"enabled": bool(cam.get("detect_enabled", True))},
         "record": {"enabled": bool(cam.get("record_enabled", True))},
@@ -662,9 +658,7 @@ async def add_camera(body: CameraInput, request: Request) -> dict[str, Any]:
         "include_zones": _include_to_stored(body.include_zones),
         "cross_lines": _lines_to_stored(body.cross_lines),
         "face_zones": _include_to_stored(body.face_zones),
-        "plate_zones": _include_to_stored(body.plate_zones),
         "face_recognition": True if body.face_recognition is None else body.face_recognition,
-        "plate_recognition": True if body.plate_recognition is None else body.plate_recognition,
         "notify_on_cross": bool(body.notify_on_cross),
         "detect_width": width,
         "detect_height": height,
@@ -854,12 +848,8 @@ async def update_camera(name: str, body: CameraUpdate, request: Request) -> dict
         # Omitted keeps stored; an explicit [] clears them (back to searching
         # the whole frame for faces).
         cam["face_zones"] = _include_to_stored(body.face_zones)
-    if body.plate_zones is not None:
-        cam["plate_zones"] = _include_to_stored(body.plate_zones)
     if body.face_recognition is not None:
         cam["face_recognition"] = body.face_recognition
-    if body.plate_recognition is not None:
-        cam["plate_recognition"] = body.plate_recognition
     if body.notify_on_cross is not None:
         cam["notify_on_cross"] = body.notify_on_cross
     if body.detect_enabled is not None:
@@ -1122,10 +1112,10 @@ async def get_device_settings(name: str, request: Request) -> dict[str, Any]:
 
 
 class RecognitionToggle(BaseModel):
-    """Whether a camera runs face / plate recognition. Omitted = leave alone."""
+    """Whether a camera runs face recognition. Omitted = leave alone. (A
+    `plate` key from an older client is ignored: plate reading was removed.)"""
 
     face: Optional[bool] = None
-    plate: Optional[bool] = None
 
 
 @router.put("/{name}/recognition", dependencies=[Depends(require_admin)])
@@ -1150,18 +1140,18 @@ async def set_camera_recognition(
     the camera rows, which is the only thing needed for the passes to see the
     change. No device I/O, no go2rtc, no recorder restart, no dropped frames.
 
-    Switching a pass ON may also add the object it reads from (`person` for
-    faces, `car` for plates) to this camera's `detect_objects`, because the
+    Switching faces ON may also add `person` to this camera's
+    `detect_objects`, because the
     passes are fed from confirmed DETECTIONS and would otherwise be handed
     nothing at all. Whatever was added comes back in `added_objects` so the UI
     can say so — an adjacent setting that changes itself silently is worse
     than the trap it is fixing.
     """
     await _get_cam_or_404(request, name)
-    if body.face is None and body.plate is None:
+    if body.face is None:
         raise HTTPException(status_code=400, detail="Nothing to change")
     state = request.app.state
-    added = await state.db.set_camera_recognition(name, face=body.face, plate=body.plate)
+    added = await state.db.set_camera_recognition(name, face=body.face)
     # Engine only. It re-reads the camera rows, which is what makes the switch
     # take effect; every other reconciler in _apply_camera_change is about
     # streams, and no stream is affected by this.
@@ -1173,7 +1163,6 @@ async def set_camera_recognition(
     return {
         "name": name,
         "face_recognition": bool(cam.get("face_recognition", True)),
-        "plate_recognition": bool(cam.get("plate_recognition", True)),
         # What this click ALSO turned on, so the client can report it. Empty
         # in the ordinary case where the camera already detected the object.
         "added_objects": added,

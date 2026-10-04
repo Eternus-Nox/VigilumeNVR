@@ -43,7 +43,7 @@ const headings = new Set();
 for (const file of [...listTsx('pages/settings'), ...listTsx('components')]) {
   const text = read(file);
   for (const m of text.matchAll(/<h2>([^<{]+)<\/h2>/g)) {
-    headings.add(m[1].trim().replace(/&amp;/g, '&'));
+    headings.add(m[1].trim().replace(/&amp;/g, '&').replace(/&rsquo;/g, '\u2019'));
   }
   for (const m of text.matchAll(/title="([^"]+)"/g)) headings.add(m[1].trim());
   for (const m of text.matchAll(/-title">([^<]+)<\/span>/g)) headings.add(m[1].trim());

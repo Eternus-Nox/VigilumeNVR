@@ -131,7 +131,7 @@ function ProfileFields({
           ))}
         </select>
         <span className="control-hint">
-          Live view and face/plate reads can only start on a keyframe; shorter starts sooner
+          Live view and face reads can only start on a keyframe; shorter starts sooner
           and makes files a little larger.
         </span>
       </label>
@@ -246,7 +246,7 @@ export default function MainStreamCard() {
         </summary>
         <p className="muted small">
           What every camera&rsquo;s <strong>main stream</strong> — the one that is recorded,
-          read for faces and plates, and shown in fullscreen live view — is set to. Written to
+          read for faces, and shown in fullscreen live view — is set to. Written to
           the cameras directly, kept that way on reconnect and every 30 minutes. A camera can
           have its own setting instead: edit the camera below.
         </p>
@@ -418,7 +418,7 @@ export function CameraMainStreamPanel({ name }: { name: string }) {
           )}
           <span className="control-hint">
             Applied straight away — separate from the Save button. Use a higher resolution
-            on a camera that reads plates from a distance.
+            on a camera that has to recognise faces from a distance.
           </span>
         </>
       )}

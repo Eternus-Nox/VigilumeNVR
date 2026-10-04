@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Recorded bursts: full-resolution frames from just BEFORE detection, read
-while the person or vehicle is still in view.
+while the person is still in view.
 
-The situation this exists for: a car or a person moving quickly, legible for a
-moment that has passed by the time detection has confirmed them and a
+The situation this exists for: a person moving quickly, their face visible for
+a moment that has passed by the time detection has confirmed them and a
 snapshot has come back. Pinned here:
 
 1. Track paths: interpolation between sightings, extrapolation before the
@@ -18,20 +18,20 @@ snapshot has come back. Pinned here:
    segments landed on the NEXT keyframe: frames came back 0.8 s later than
    labelled, and the start of the window was missing.)
 4. A live read drops the last frame of a segment still being written.
-5. PLATES: a car whose plate is legible only BEFORE it is first detected — the
-   detect frames are too small and it is covered afterwards — is read from
-   the recording, while it is still in view.
+5. Decoding: NVDEC first when there is a GPU, the CPU when it cannot start, and
+   a GPU that keeps producing nothing is given up on.
 6. FACES: a face turned to the camera only before the person is detected is
    recognized from the recording; a face elsewhere in the frame is not given
    to another person's track; the switch turns it off.
 
-Sections 5 and 6 need ffmpeg and the models + photos (network on first run);
-they SKIP without. Sections 1-4 always run.
+Section 6 needs ffmpeg and the face models + photo (network on first run); it
+SKIPS without. Sections 1-5 always run.
 """
 from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -48,7 +48,7 @@ import cv2  # noqa: E402
 
 from app.native import burst, trackpath  # noqa: E402
 from app.native.burst import BurstState  # noqa: E402
-from app.native.platereplay import RecordingReplay, ReplayFrame, segment_starts  # noqa: E402
+from app.native.recording_replay import RecordingReplay, ReplayFrame, segment_starts  # noqa: E402
 
 PASS = 0
 _failures: list[str] = []
@@ -170,16 +170,24 @@ async def torn_frame_checks() -> None:
 
 # ---------------------------------------------------------------- helpers
 
-def find_ffmpeg():
-    from plate_replay_smoke import find_ffmpeg as f
+def find_ffmpeg() -> str | None:
+    env = os.environ.get("VIGILUME_TEST_FFMPEG")
+    if env:
+        return env
+    if shutil.which("ffmpeg"):
+        return shutil.which("ffmpeg")
+    try:
+        import imageio_ffmpeg
 
-    return f()
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
 
 
 def write_video(ffmpeg: str, rec_dir: Path, camera: str, start: float, frame_at, seconds: float,
                 fps: int, size: tuple[int, int], *, t0: float = 0.0) -> Path:
     """A recording filed where the recorder would put it (MPEG-TS; MP4 inside
-    the .ts if this ffmpeg cannot read MPEG-TS back — see plate_replay_smoke)."""
+    the .ts if this ffmpeg cannot read MPEG-TS back)."""
     lt = time.localtime(start)
     seg = (rec_dir / camera / time.strftime("%Y-%m-%d", lt) / time.strftime("%H", lt)
            / (time.strftime("%M.%S", lt) + ".ts"))
@@ -207,92 +215,27 @@ class Settings:
         self.current = {"recognition": {"face_hires": False, **recognition}}
 
 
-# ---------------------------------------------------------------- 5. plates
+# ---------------------------------------------------------------- 5. decoding
 
-async def plate_checks(tmp: Path, ffmpeg: str, models_dir: Path) -> None:
-    print("\n5. a car legible only BEFORE it is detected")
-    from app.native.plates import PlateReader
-    from app.native.platepass import PlatePass
-    from plate_real_smoke import CAR, TRUTH, fetch_photo
-    from plates_smoke import FakeDB, Obs
+def decode_checks() -> None:
+    print("\n5. GPU decode first when there is a GPU, the CPU when it cannot start")
+    from app.native.recording_replay import replay_attempts
 
-    photo = fetch_photo(models_dir)
-    reader = PlateReader(models_dir)
-    if photo is None or not await reader.load() or not reader.has_detector:
-        print("  SKIP: needs the plate models and the test photo")
-        return
-    W, H, FPS, SCALE, DET = 1920, 1080, 15, 1.5, 0.25
-    car = cv2.resize(photo, None, fx=SCALE, fy=SCALE, interpolation=cv2.INTER_CUBIC)
-    plate = (reader.detect_blocking(car) or [None])[0]
-    check(plate is not None, "the plate's position in the car photo is known (to cover it later)")
-    rng = np.random.default_rng(5)
-    bg = cv2.add(np.full((H, W, 3), 96, np.uint8), rng.integers(0, 14, (H, W, 3), dtype=np.uint8))
-    VISIBLE, COVERED_FROM, SEEN_FROM, SEEN_TO = (0.5, 5.0), 2.4, 2.2, 4.4
+    att = replay_attempts("ffmpeg", Path("seg.ts"), 1.0, 5.0, 6.0, (64, 64, 0, 0), hwaccel=True)
+    check([h for h, _ in att] == ["cuda", "cuda", "cpu", "cpu"]
+          and att[0][1][att[0][1].index("-hwaccel") + 1] == "cuda"
+          and att[0][1].index("-hwaccel") < att[0][1].index("-i"),
+          "with an NVIDIA GPU: NVDEC first (-hwaccel cuda, before the input), then the CPU")
+    cpu_only = replay_attempts("ffmpeg", Path("seg.ts"), 1.0, 5.0, 6.0, (64, 64, 0, 0),
+                               hwaccel=False)
+    check(all("-hwaccel" not in a for _, a in cpu_only) and len(cpu_only) == 2,
+          "without one: CPU only, nothing tried that cannot work")
+    forced = RecordingReplay(lambda cam: Path("/nowhere") / cam, "/fake/ffmpeg", hwaccel=True)
+    for _ in range(3):
+        forced._note_hw_miss("front", None)
+    check(forced.status()["gpu_decode"] is False,
+          "after three GPU decodes in a row that produced nothing, it stops trying the GPU")
 
-    def car_x(t):
-        a, b = VISIBLE
-        return None if not a <= t <= b else -200.0 + (t - a) * 250.0
-
-    def frame_at(t):
-        f = bg.copy()
-        x = car_x(t)
-        if x is None:
-            return f
-        img = car.copy()
-        if t >= COVERED_FROM:     # turned / glare / behind the gate: unreadable from here on
-            x1, y1, x2, y2 = (int(v) for v in plate[:4])
-            img[y1:y2, x1:x2] = 90
-        x0, ch, cw = int(x), img.shape[0], img.shape[1]
-        sx0, sx1 = max(0, -x0), min(cw, W - x0)
-        if sx1 > sx0:
-            f[480:480 + ch, x0 + sx0:x0 + sx1] = img[:, sx0:sx1]
-        return f
-
-    start = float(int(time.time()) - 120)
-    rec = tmp / "rec-plates"
-    write_video(ffmpeg, rec, "drive", start, frame_at, 8.0, FPS, (W, H))
-    db = FakeDB(tmp / "plates.db")
-    announced: list[tuple[float, str]] = []
-    pp = PlatePass(reader, db, tmp / "crops-p",
-                   replay=RecordingReplay(lambda cam: rec / cam, ffmpeg, hwaccel=False))
-    pp.on_recognition = lambda fid, kind, **kw: announced.append((time.monotonic(), kw.get("plate", "")))
-    await pp.reload_gallery()
-
-    class Cam:
-        row = {"name": "drive"}
-        plate_zones: list = []
-
-    t = SEEN_FROM
-    while t <= SEEN_TO:      # detection only catches it from here on
-        x = car_x(t)
-        frame = cv2.resize(frame_at(t), (int(W * DET), int(H * DET)), interpolation=cv2.INTER_AREA)
-        x1, y1, x2, y2 = (v * SCALE for v in CAR)
-        box = tuple(v * DET for v in (x + x1, 480 + y1, x + x2, 480 + y2))
-        await pp.observe(Cam(), [Obs(1, box)], frame, start + t, event_fid="native.drive")
-        await asyncio.sleep(0.12)    # roughly real time, so bursts run alongside
-        t += 0.2
-    in_view_until = time.monotonic()
-    # Let a burst already started finish, as it would with the car still there.
-    for _ in range(100):
-        st = pp._tracks.get(("drive", 1))
-        if st is None or not st.burst.busy:
-            break
-        await asyncio.sleep(0.1)
-    check(any(p == TRUTH for _, p in announced),
-          f"read from the recording while the car is still tracked — before it is retired "
-          f"(announced {[p for _, p in announced]})")
-    await pp.finish("drive", 1)
-    await pp.wait_idle()
-    rows = db.rows("SELECT plate FROM event_recognitions")
-    check([r["plate"] for r in rows] == [TRUTH], f"and stored as {TRUTH} (got {[r['plate'] for r in rows]})")
-    stats = pp.status()["cameras"]["drive"]
-    check(stats["early_reads"] > 0,
-          f"from frames taken before the car was first detected ({stats['early_reads']} early reads)")
-    check(stats["hires_frames"] == 0, "with no snapshot involved")
-    del in_view_until
-
-
-# ---------------------------------------------------------------- 6. faces
 
 async def face_checks(tmp: Path, ffmpeg: str, models_dir: Path) -> None:
     print("\n6. a face turned to the camera only BEFORE the person is detected")
@@ -356,7 +299,7 @@ async def face_checks(tmp: Path, ffmpeg: str, models_dir: Path) -> None:
           f"a window across two segment files: {len(fr)} frames, each within "
           f"{max(errs or [9]):.3f} s of its label")
 
-    print("\n   one decode serves a face read and a plate read on the same camera")
+    print("\n   one decode serves two reads on the same camera (two people at once)")
     shared = RecordingReplay(lambda cam: rec / cam, ffmpeg, hwaccel=False)
     left, right = (0.05, 0.1, 0.35, 0.9), (0.6, 0.05, 0.95, 0.95)
     a_task = asyncio.ensure_future(shared.frames("front", start + 1.0, start + 2.5, left, fps=10, pad=False))
@@ -367,7 +310,7 @@ async def face_checks(tmp: Path, ffmpeg: str, models_dir: Path) -> None:
     check(len(fa) >= 14 and len(fb) >= 14 and abs(fa[0].time - (start + 1.0)) < 0.06
           and abs(fb[0].time - (start + 1.5)) < 0.06,
           f"each gets its own seconds ({len(fa)} and {len(fb)} frames)")
-    from app.native.platereplay import REGION_MARGIN
+    from app.native.recording_replay import REGION_MARGIN
 
     want_ox = int((right[0] - (right[2] - right[0]) * REGION_MARGIN) * W) & ~1
     check(bool(fb) and abs(fb[0].ox - want_ox) <= 2 and fb[0].crop.shape[1] <= W - want_ox,
@@ -464,10 +407,10 @@ async def main() -> int:
     ffmpeg = find_ffmpeg()
     models_dir = Path(os.environ.get("VIGILUME_TEST_MODELS_DIR", "")
                       or tempfile.mkdtemp(prefix="vigilume-burst-models-"))
+    decode_checks()
     if ffmpeg is None:
-        print("\nSKIP 5-6: no ffmpeg")
+        print("\nSKIP 6: no ffmpeg")
     else:
-        await plate_checks(tmp, ffmpeg, models_dir)
         await face_checks(tmp, ffmpeg, models_dir)
 
     print()

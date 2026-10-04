@@ -1,9 +1,8 @@
 """How a notification says WHO is WHERE.
 
 A recognized subject's alert reads like a sentence — "Adam is at the front
-door", "The car is in the driveway" — rather than "Adam at Front Door". The
-name comes from the matched profile (a person's, or a vehicle's own name); the
-place from the camera's friendly name.
+door", "Sam is in the driveway" — rather than "Adam at Front Door". The name
+comes from the matched profile; the place from the camera's friendly name.
 
 The place is a camera NAME, typed by the operator, so this only rewrites it
 when it is plainly an ordinary place ("Front Door", "Driveway", "Back Yard"):

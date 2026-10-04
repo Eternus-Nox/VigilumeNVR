@@ -2,7 +2,7 @@
 
 Every camera follows ``settings.streams.main`` unless it pins its own profile
 (``cameras.main_stream``) — so one change sets every camera, and a camera that
-needs something different (the one reading plates at the end of the drive,
+needs something different (the one covering the far end of the drive,
 say) keeps it. A profile is applied:
 
   * when it is saved (the API waits for the result, so the screen can say what

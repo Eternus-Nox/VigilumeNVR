@@ -44,10 +44,8 @@ from .native.model_store import ModelStore
 from .native.media import NativeMediaProvider
 from .native.recorder import Recorder
 from .native.facepass import FacePass
-from .native.platepass import PlatePass
-from .native.plates import PlateReader
-from .native.platereplay import RecordingReplay
-from .native.platesnap import SnapshotSource
+from .native.recording_replay import RecordingReplay
+from .native.snapshots import SnapshotSource
 from .native.recognizer import FaceRecognizer
 from .native.spotlight import SpotlightController
 from .native import streams
@@ -453,41 +451,21 @@ async def lifespan(app: FastAPI):
     # models are ~37 MB and a box that never turns this on should never fetch
     # them. A failed load degrades to ready:false; detection and recording are
     # untouched either way.
-    # Like the plate models below, the face models FOLLOW THE DETECTOR: on
-    # onnxruntime's CUDA provider when it resolved to CUDA, on OpenCV's CPU
-    # path otherwise (native/recognizer.py — same faces, same embeddings).
+    # The face models FOLLOW THE DETECTOR: on onnxruntime's CUDA provider when
+    # it resolved to CUDA, on OpenCV's CPU path otherwise (native/recognizer.py
+    # — same faces, same embeddings).
     face_recognizer = FaceRecognizer(config.models_dir, detector=detector)
-    # Full-resolution snapshots, SHARED by faces and plates: the detect stream
-    # is too small to read a plate at any distance or to tell faces apart
-    # reliably (native/platesnap.py, native/facepass.py), so a tracked person
-    # or vehicle also triggers an occasional snapshot from the camera itself —
-    # one request serving everything on that camera at that moment.
-    plate_snapshots = SnapshotSource()
-    # And the RECORDING, read back in short bursts while a person or vehicle
-    # is in view — starting from just before it was detected — and, for
-    # plates, once more after it leaves (native/burst.py, platereplay.py).
-    # One reader, shared, decoding one window at a time.
-    plate_replay = RecordingReplay(recorder.camera_dir)
+    # Full-resolution snapshots: the detect stream is too small to tell faces
+    # apart reliably (native/snapshots.py, native/facepass.py), so a tracked
+    # person also triggers an occasional snapshot from the camera itself.
+    snapshots = SnapshotSource()
+    # And the RECORDING, read back in short bursts while a person is in view —
+    # starting from just before they were detected (native/burst.py,
+    # recording_replay.py). One reader, decoding one window at a time.
+    recording_replay = RecordingReplay(recorder.camera_dir)
     face_pass = FacePass(face_recognizer, db, config.candidate_crops_dir,
-                         snapshots=plate_snapshots, replay=plate_replay)
+                         snapshots=snapshots, replay=recording_replay)
     engine.set_face_pass(face_pass)
-    # Plates: a learned plate detector finds the plate and two OCR models read
-    # it (see native/plates.py, including the licensing note); the classical
-    # localizer is the fallback. Shares the face pass's heatmap accumulator so
-    # one flush covers both kinds.
-    # The detector is handed in so the OCR session FOLLOWS IT onto whatever
-    # silicon it actually resolved to (native/accel.py): CUDA when the detector
-    # is on CUDA, CPU when it is on CPU, and CPU on a Coral box — an Edge TPU
-    # runs int8 graphs compiled for it, and this is float ONNX. Passing the
-    # detector itself rather than a device string is what keeps that automatic:
-    # `backend="gpu"` on a box whose CUDA never came up reports device="cpu",
-    # and following the resolved value is the only way not to claim a card that
-    # is not there.
-    plate_reader = PlateReader(config.models_dir, detector=detector)
-    plate_pass = PlatePass(plate_reader, db, config.candidate_crops_dir,
-                           heatmap=face_pass.heatmap, snapshots=plate_snapshots,
-                           replay=plate_replay)
-    engine.set_plate_pass(plate_pass)
     # Re-assert stored desired IR on doorbells (the AD410 resets IR Mode to Auto
     # whenever RTSP streaming (re)connects). The recorder fires on_connect once
     # per (re)connect cycle; a slow sweep backstops missed reconnects.
@@ -516,7 +494,7 @@ async def lifespan(app: FastAPI):
     # A size change makes the recording reader re-probe frame sizes.
     stream_profiles = StreamProfileManager(
         settings, cameras_provider=db.list_cameras,
-        on_stream_changed=plate_replay.forget_dims,
+        on_stream_changed=recording_replay.forget_dims,
     )
     prober.set_stream_profiles(stream_profiles)
     # On-connect talk-speaker detection: probe ONVIF GetAudioOutputs the first
@@ -629,7 +607,6 @@ async def lifespan(app: FastAPI):
             # retention window. Off by default, so on most boxes this loop
             # does nothing but check a flag.
             asyncio.create_task(face_pass.run(settings), name="recognition"),
-            asyncio.create_task(plate_pass.run(settings), name="recognition-plates"),
         ]
         cams = await db.list_cameras()
         await doorbells.sync(cams)
@@ -689,7 +666,7 @@ async def lifespan(app: FastAPI):
         await ai_events.stop_all()
         await spotlight.stop_all()
         await engine.stop()      # ends open events into the pipeline
-        await plate_snapshots.close()
+        await snapshots.close()
         await recorder.stop()
         await pipeline.shutdown()
         await apns.aclose()

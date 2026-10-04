@@ -349,7 +349,7 @@ class EventsPipeline:
             "notified_labels": set(),
             # Types whose Home Assistant sensor this event has turned ON.
             "mqtt_on": set(),
-            # Live recognitions from the face/plate passes, keyed by kind. These
+            # Live recognitions from the face pass, keyed by kind. These
             # arrive OUT OF BAND (note_recognition) rather than on the event
             # payload, because recognition finishes on its own schedule — a few
             # frames after the object is confirmed, which is already after this
@@ -605,9 +605,14 @@ class EventsPipeline:
     def _click_url(self, event_id: int) -> str:
         return f"{self._settings.public_url}/events/{event_id}"
 
-    #: Labels the recognition passes can say something about. Anything else
-    #: (a dog, a parcel) must never wait on a recognition that will not come.
-    RECOGNIZABLE_LABELS = ("person", "car", "truck", "bus", "motorcycle", "van")
+    #: Labels face recognition can say something about. Anything else (a dog,
+    #: a parcel) must never wait on a recognition that will not come.
+    RECOGNIZABLE_LABELS = ("person",)
+    #: Vehicles count too ONLY with recognition.face_on_vehicles on (a
+    #: driver's face through the windscreen). They used to count always,
+    #: because plates were read; with plate reading removed, holding every car
+    #: alert for a recognition that cannot arrive would just make it late.
+    VEHICLE_LABELS = ("car", "truck", "bus", "motorcycle", "van")
 
     def note_package(self, camera: str, label: str, box: list) -> None:
         """Something that can be carried has been left behind.
@@ -727,15 +732,14 @@ class EventsPipeline:
         *,
         name: str = "",
         profile_id: Optional[int] = None,
-        plate: str = "",
         score: float = 0.0,
         alert_mode: str = "default",
     ) -> None:
-        """A recognition pass identified something on a LIVE event.
+        """The face pass identified someone on a LIVE event.
 
-        Called by FacePass/PlatePass the moment they identify, not when they
-        store — the stored row lands at track end, which for an alert is long
-        after the person has walked away.
+        Called by FacePass the moment it identifies, not when it stores — the
+        stored row lands at track end, which for an alert is long after the
+        person has walked away.
 
         Re-runs the notification check, because the alert may have been held
         precisely for this.
@@ -747,7 +751,6 @@ class EventsPipeline:
             "kind": kind,
             "name": name,
             "profile_id": profile_id,
-            "plate": plate,
             "score": float(score),
             # The matched profile's own notification policy, carried here so
             # the gate below never has to hit the database on the alert path.
@@ -774,7 +777,6 @@ class EventsPipeline:
                 camera,
                 kind=kind,
                 name=name,
-                plate=plate,
                 known=profile_id is not None,
                 score=float(score),
             ))
@@ -786,7 +788,7 @@ class EventsPipeline:
         elif profile_id is not None and state.get("alert") is not None:
             # The alert already went out — usually unnamed, because the face
             # was matched after the hold ran out (a person walking up turned
-            # away, a plate read on the second look). Put the name on it.
+            # away). Put the name on it.
             self._spawn(self._name_sent_alert(fid))
 
     async def _name_sent_alert(self, fid: str) -> None:
@@ -851,10 +853,7 @@ class EventsPipeline:
 
     @staticmethod
     def _named_body(names: list[str], state: dict[str, Any]) -> str:
-        body = f"Recognized {join_names(names)}"
-        plate = next((r.get("plate") for r in (state.get("recognitions") or [])
-                      if r.get("plate")), "")
-        return f"{body} — plate {plate}" if plate else body
+        return f"Recognized {join_names(names)}"
 
     async def _renotify(self, fid: str) -> None:
         state = self._active.get(fid)
@@ -885,7 +884,10 @@ class EventsPipeline:
         if not rs.get("enabled"):
             return True, ""
         label = (after.get("label") or "").lower()
-        if label not in self.RECOGNIZABLE_LABELS:
+        recognizable = label in self.RECOGNIZABLE_LABELS or (
+            label in self.VEHICLE_LABELS and bool(rs.get("face_on_vehicles"))
+        )
+        if not recognizable:
             return True, ""
 
         recognitions = state.get("recognitions") or []
@@ -991,7 +993,7 @@ class EventsPipeline:
             # cooldown that the real one will need.
             return
         # Gated as the type being alerted about, not the event's name: a
-        # person joining a car's event should wait for a face, not a plate.
+        # person joining a car's event should wait for a face.
         send_now, recognized_name = self._recognition_gate({**after, "label": label}, state)
         if not send_now:
             # DEFERRED (or suppressed — the gate sets `notified` itself in that
@@ -1026,16 +1028,10 @@ class EventsPipeline:
         if names:
             # A name is the most useful thing an alert can carry, so it LEADS
             # rather than being appended: the notification is read from a lock
-            # screen where the tail is truncated. "Adam is at the front door",
-            # "The car is in the driveway" — the profile's own name, person or
-            # vehicle.
+            # screen where the tail is truncated. "Adam is at the front door"
+            # — the profile's own name.
             title = named_title(names, friendly)
             body = self._named_body(names, state)
-        else:
-            plate = next((r.get("plate") for r in (state.get("recognitions") or [])
-                          if r.get("plate")), "")
-            if plate:
-                body = f"{body} — plate {plate}"
         has_snapshot = state.get("snap_time") is not None
         tag = f"vigilume-{camera}-{label}"
         # What went out, so a name that is only matched AFTER this (the hold

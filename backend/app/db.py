@@ -1034,17 +1034,18 @@ class Database:
             # alert, never the footage.
             "notify_on_cross": bool(row["notify_on_cross"]),
             # Recognition regions of interest, normalized like include_zones.
-            # They do NOT filter detection — they mark where a face or a plate
-            # is actually readable, so the recognition pass is spent on the
-            # doorstep and the kerb rather than on the whole 4 MP frame.
-            # [] = whole frame (correct, just slower).
+            # They do NOT filter detection — they mark where a face is
+            # actually readable, so the recognition pass is spent on the
+            # doorstep rather than on the whole 4 MP frame.
+            # [] = whole frame (correct, just slower). (plate_zones and
+            # plate_recognition stay in the table, unread: plate reading was
+            # removed, and dropping columns would cost an old database nothing
+            # but risk.)
             "face_zones": json.loads(row["face_zones"]),
-            "plate_zones": json.loads(row["plate_zones"]),
             # WHETHER this camera recognizes, as opposed to where it looks.
             # Keyed off the row with a default of True so a camera row read
             # back from a pre-v24 fixture still answers.
             "face_recognition": bool(column_or(row, "face_recognition", 1)),
-            "plate_recognition": bool(column_or(row, "plate_recognition", 1)),
             # None = follow settings.detection.ignore_stationary. Deliberately
             # NOT coerced to a bool here: the three states have to survive the
             # trip to the client, or "inherit" becomes "off" on the first save.
@@ -1164,9 +1165,9 @@ class Database:
         }
 
     async def set_camera_recognition(
-        self, name: str, *, face: Optional[bool] = None, plate: Optional[bool] = None
+        self, name: str, *, face: Optional[bool] = None
     ) -> list[str]:
-        """Flip one camera's recognition switches. Returns labels auto-added.
+        """Flip one camera's face recognition switch. Returns labels auto-added.
 
         A targeted UPDATE rather than a read-modify-upsert. `upsert_camera`
         rewrites every column, so using it here would make a checkbox tick race
@@ -1178,22 +1179,21 @@ class Database:
         Recognition never sees a frame directly. It is fed from the engine's
         CONFIRMED detections, which are filtered by `detect_objects` first
         (native/engine.py: `obs = [o for o in observations if o.label in
-        wanted]`), so plate reading on a camera that does not detect vehicles
-        finds no vehicles and returns — and face recognition on a camera that
-        does not detect people never runs. Nothing errors and nothing is
-        logged: the pass correctly concludes there was nothing to look at.
+        wanted]`), so face recognition on a camera that does not detect people
+        never runs. Nothing errors and nothing is logged: the pass correctly
+        concludes there was nothing to look at.
 
-        That combination is unreachable as an intention — nobody switches plate
-        reading on for a camera and means "but do not look at cars" — so the
-        prerequisite is added here rather than left as a trap with a warning
-        next to it.
+        That combination is unreachable as an intention — nobody switches face
+        recognition on for a camera and means "but do not look at people" — so
+        the prerequisite is added here rather than left as a trap with a
+        warning next to it.
 
         ONLY EVER ADDITIVE, and only on the way ON. Switching recognition back
         OFF leaves `detect_objects` alone: detection is its own feature that
         the operator configured for their own reasons (events, notifications,
-        recording), and silently removing `car` from a driveway camera because
-        someone stopped reading plates would break something they never touched.
-        `person` is likewise never removed.
+        recording), and silently removing `person` from a camera because
+        someone stopped recognising faces would break something they never
+        touched.
 
         An EMPTY `detect_objects` — "record only, detect nothing", which is
         reachable only by emptying the object picker on purpose — is treated
@@ -1205,13 +1205,10 @@ class Database:
         if face is not None:
             sets.append("face_recognition = ?")
             params.append(int(face))
-        if plate is not None:
-            sets.append("plate_recognition = ?")
-            params.append(int(plate))
         if not sets:
             return []
 
-        added = await self._recognition_prereqs(name, face=face, plate=plate)
+        added = await self._recognition_prereqs(name, face=face)
         if added:
             sets.append("detect_objects = ?")
             params.append(json.dumps(added["objects"]))
@@ -1277,16 +1274,10 @@ class Database:
 
     #: What each recognition pass needs to be detecting before it can run.
     #:
-    #: ONE label each, not the pass's whole accepted set. The plate pass reads
-    #: any of car/truck/bus/motorcycle/motorbike/van, but adding six labels to
-    #: a camera because someone ticked one box is a far bigger change than they
-    #: asked for — every one of them also produces events and notifications.
-    #: `car` is the one that makes the feature work on the driveway it was
-    #: turned on for; the rest stay a deliberate choice in the object picker.
-    _RECOGNITION_PREREQ = {"face": "person", "plate": "car"}
+    _RECOGNITION_PREREQ = {"face": "person"}
 
     async def _recognition_prereqs(
-        self, name: str, *, face: Optional[bool], plate: Optional[bool]
+        self, name: str, *, face: Optional[bool]
     ) -> Optional[dict[str, Any]]:
         """The camera's detect_objects with any missing prerequisite appended.
 
@@ -1298,7 +1289,6 @@ class Database:
         wanted = [
             label for flag, label in (
                 (face, self._RECOGNITION_PREREQ["face"]),
-                (plate, self._RECOGNITION_PREREQ["plate"]),
             ) if flag  # only on the way ON; False and None both skip
         ]
         if not wanted:
@@ -1614,6 +1604,9 @@ class Database:
 
         Rows are returned oldest-first per event, so the FIRST recognition of a
         kind is the one a caller showing a single line should use.
+
+        Faces only: licence plate reading was removed, and plate rows written
+        before that are left in the table but no longer surfaced.
         """
         wanted = [f for f in dict.fromkeys(fids) if f]
         if not wanted:
@@ -1627,7 +1620,7 @@ class Database:
             cur = await self.conn.execute(
                 "SELECT event_fid, kind, profile_id, name, plate, score, quality "
                 f"FROM event_recognitions WHERE event_fid IN ({placeholders}) "
-                "ORDER BY created_at ASC",
+                "AND kind = 'face' ORDER BY created_at ASC",
                 chunk,
             )
             for r in await cur.fetchall():
@@ -1635,6 +1628,8 @@ class Database:
                     "kind": r["kind"],
                     "profile_id": r["profile_id"],
                     "name": r["name"],
+                    # Always "" for a face; kept because the shipped iOS app
+                    # decodes the key as required.
                     "plate": r["plate"],
                     "score": r["score"],
                     "quality": r["quality"],

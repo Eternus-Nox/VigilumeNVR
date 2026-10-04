@@ -294,7 +294,7 @@ struct MainStreamAllCamerasView: View {
             } header: {
                 Text("All cameras")
             } footer: {
-                Text("The main stream is what is recorded, read for faces and plates, and shown "
+                Text("The main stream is what is recorded, read for faces, and shown "
                      + "in fullscreen live view. \"Up to\" picks each camera's largest size at or "
                      + "under that height. Lowering the resolution does not lower the bitrate by "
                      + "itself — about 4096 kbps is plenty for 1080p H.264.")
@@ -472,8 +472,9 @@ struct CameraMainStreamView: View {
                     MainStreamProfileFields(profile: $draft, sizes: detail?.live?.resolutions ?? [])
                 }
             } footer: {
-                Text("Give a camera that reads plates from a distance a higher resolution than "
-                     + "the rest — at 1080p a distant plate has half the pixels it has at 4K.")
+                Text("Give a camera that has to recognise faces from a distance a higher "
+                     + "resolution than the rest — at 1080p a distant face has half the pixels "
+                     + "it has at 4K.")
                     .foregroundStyle(Theme.textSecondary)
             }
             .listRowBackground(Theme.surface)

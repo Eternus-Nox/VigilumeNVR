@@ -1,35 +1,29 @@
 """Read the RECORDING back: full-resolution frames of a moment that has passed.
 
-Used two ways. As LIVE BURSTS (native/burst.py): starting a second after a
-person or vehicle is first seen, the seconds from just BEFORE it was detected
-up to now are decoded at 10 fps and read frame by frame, while it is still in
-view. And, for plates, once more after the vehicle leaves, over whatever the
-bursts did not cover. The original design note, written for the second use:
+Used as LIVE BURSTS (native/burst.py): starting a second after a person is
+first seen, the seconds from just BEFORE they were detected up to now are
+decoded at 10 fps and read frame by frame, while they are still in view.
 
 WHY
 ===
-The live plate path gets one or two looks at a passing car: a full-resolution
-snapshot about once a second (every half second in a plate zone), each arriving
-a few hundred milliseconds after the moment it was asked for, and only once the
-car has been tracked. A car that crosses the view in two or three seconds is
-often read from a single blurred or turned-away look — or not at all. Measured
-offline the reader is right ~90% of the time on a clean look; live, a plate was
-being read about one pass in three. The difference is the number of looks.
+The live path gets one or two looks at a person walking past: a
+full-resolution snapshot about once a second, each arriving a few hundred
+milliseconds after the moment it was asked for, and only once they have been
+tracked. Someone crossing the view in two or three seconds is often seen from
+a single blurred or turned-away look — and the moment they faced the camera
+was usually just before detection confirmed them.
 
 The camera's full-resolution stream is already on disk: the recorder copies it
-continuously into 10 s segments at the camera's full frame rate. So when a
-car's track ends without a settled plate, this decodes exactly the seconds the
-car was in view, cropped to the path it drove, at ~6 frames a second — dozens
-of looks, none of them late — and the plate pass reads every one. A plate
-arrives on the event later than a live read would (the pass finishes a track
-about a minute after it is lost), but it arrives.
+continuously into 10 s segments at the camera's full frame rate. So this
+decodes exactly those seconds, cropped to where the person was — dozens of
+looks, none of them late — and the face pass scores every one.
 
 NEVER RAISES, NEVER BLOCKS DETECTION
 -----------------------------------
 Everything here runs in a background task and in threads. No recording (the
 camera does not record, or the footage has already been pruned), no ffmpeg, or
 a decode that fails all mean "no frames", and the pass concludes on what it
-already had. One replay runs at a time across all cameras, so a busy road
+already had. One replay runs at a time across all cameras, so a busy scene
 cannot turn this into a CPU storm.
 
 WHEN A RECORDED FRAME WAS TAKEN
@@ -37,8 +31,8 @@ WHEN A RECORDED FRAME WAS TAKEN
 A frame's wall time is its segment's start plus its offset in the segment.
 Segment files are NAMED with whole seconds (``%M.%S.ts``), so a start read from
 the name is early by the dropped fraction — up to a second, measured 0.37-0.87
-s on a real-time stream-copy recording. A fast car moves its own length in
-that time, and the frame would be matched to where it was a second earlier.
+s on a real-time stream-copy recording. A brisk walker moves a stride in
+that time, and the frame would be matched to where they were a second earlier.
 But the recorder cuts a segment the instant the next keyframe arrives: the
 PREVIOUS segment's last write (its mtime) is the new one's start, to the
 millisecond. `segment_starts` uses that when it is consistent with the name.
@@ -79,9 +73,9 @@ log = logging.getLogger(__name__)
 #: independent looks (see the time-diversity note in bestshot.py).
 REPLAY_FPS = 6.0
 
-#: Longest stretch of footage read for one vehicle. A car that parks and stays
-#: tracked for an hour does not get an hour decoded: the plate is readable as
-#: it arrives, and the first seconds are what matter.
+#: Longest stretch of footage read for one track. Someone who stays in view
+#: for an hour does not get an hour decoded: the first seconds are what
+#: matter.
 MAX_WINDOW_S = 15.0
 
 #: Padding before the first and after the last sighting, for the car entering
@@ -142,11 +136,11 @@ class _Request:
 
 class RecordingReplay:
     """Decodes a time window of a camera's recording. One per process,
-    shared by the face and plate passes.
+    used by the face pass.
 
     One decode at a time, across every camera, by a single worker. Requests
     for the same camera and overlapping seconds that are waiting together —
-    a face burst and a plate burst for the person getting out of a car — are
+    bursts for two people walking up together — are
     served by ONE decode of their union, each handed its own crop (see
     `_compatible`). Decoding is most of what a burst costs.
     """
@@ -230,9 +224,9 @@ class RecordingReplay:
 
     async def _work(self) -> None:
         while self._queue:
-            # A moment for a request made in the same breath — the face pass
-            # and the plate pass handle the same frame one after the other —
-            # to join this decode rather than queue for its own.
+            # A moment for a request made in the same breath — two tracks on
+            # the same frame are handled one after the other — to join this
+            # decode rather than queue for its own.
             await asyncio.sleep(COALESCE_WAIT_S)
             if not self._queue:
                 break
@@ -388,7 +382,7 @@ class RecordingReplay:
         if self._hw_misses >= HW_GIVE_UP:
             self._hwaccel = False
             log.warning(
-                "plate replay: GPU decoding failed %d times in a row (last on %s) — "
+                "recording replay: GPU decoding failed %d times in a row (last on %s) — "
                 "decoding replays on the CPU from now on", self._hw_misses, camera,
             )
 
@@ -443,9 +437,9 @@ def plan_crop(region: Sequence[float], width: int, height: int) -> Optional[Crop
     w, h = (x2 - x1) & ~1, (y2 - y1) & ~1
     if w < 16 or h < 16:
         return None
-    # A crop bigger than MAX_CROP_SIDE is scaled down as it is decoded: a car
-    # that fills a 4K frame has a plate hundreds of pixels wide, and holding
-    # 40 full-size 4K crops would be a gigabyte.
+    # A crop bigger than MAX_CROP_SIDE is scaled down as it is decoded: a
+    # person filling a 4K frame has a face hundreds of pixels wide, and
+    # holding 40 full-size 4K crops would be a gigabyte.
     scale = min(1.0, MAX_CROP_SIDE / float(max(w, h)))
     if scale < 1.0:
         return CropPlan(x1, y1, w, h, max(16, int(w * scale)) & ~1, max(16, int(h * scale)) & ~1)
@@ -541,8 +535,8 @@ def decode_portions(
     the concat demuxer, because seeking a concat input is not exact: measured,
     `-ss` before a concat input landed on the NEXT keyframe — frames labelled
     0.2 s into the window were 1.0 s in, and the window's first 0.8 s was
-    missing. For a fast car that is the difference between a plate matched to
-    where the car was and one matched to where it had been a second earlier.
+    missing. For someone moving quickly that is the difference between a face
+    matched to where they were and one matched to where they had been.
     Seeking within one file is exact.
     """
     out = []
@@ -552,10 +546,6 @@ def decode_portions(
         if p_end - p_start > 1e-3:
             out.append((seg_start, path, p_start, p_end))
     return out
-
-
-#: The original name, kept for existing imports.
-PlateReplay = RecordingReplay
 
 
 def segment_starts(segments: Sequence[tuple[float, Path]]) -> list[tuple[float, Path]]:

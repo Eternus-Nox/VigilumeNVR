@@ -65,10 +65,9 @@ match — different day, light and angle — has to survive on. The camera's own
 picture is three to six times wider.
 
 So while a person is tracked, the pass also asks the camera for a
-full-resolution snapshot about once a second (`SnapshotSource`, SHARED with the
-plate reader: one request serves both, and every person and vehicle on the
-camera at that moment), finds the person in it (platesnap.locate — the same
-template match the plate reader uses, because the snapshot arrives a few
+full-resolution snapshot about once a second (`SnapshotSource`: one request
+serves every person on the camera at that moment), finds the person in it
+(snapshots.locate — a template match, because the snapshot arrives a few
 hundred milliseconds after the detect frame), and detects, aligns and scores
 the face from those pixels. The shot joins the same best-shot buffer, where a
 sharp 150 px face simply outscores a 35 px one. It runs in the background —
@@ -108,7 +107,7 @@ from typing import Any, Optional, Sequence
 
 import numpy as np
 
-from . import platesnap, trackpath
+from . import snapshots, trackpath
 from . import zones as zonelib
 from .burst import (
     BURST_FPS, MAX_BURSTS, TAIL_DELAY_S, TIME_TOLERANCE_S, BurstState,
@@ -147,8 +146,8 @@ FACE_LABELS = ("person",)
 #: Labels that get one only when settings.recognition.face_on_vehicles is
 #: set — the driver through a windscreen. Kept separate from FACE_LABELS
 #: because it is a genuinely different trade: on a road-facing camera most
-#: windscreens are glare, and a plate identifies a car better than a face
-#: does. On a driveway or at a gate it is the only way to get the driver.
+#: windscreens are glare. On a driveway or at a gate it is the only way to get
+#: the driver.
 VEHICLE_FACE_LABELS = ("car", "truck", "bus", "motorcycle")
 
 #: Hard cap on the rolling candidate store. Age-based purging is the primary
@@ -244,11 +243,11 @@ class FacePass:
         # "Adam is at the door" has to hear about it here.
         self.on_recognition = on_recognition
         self._recognizer = recognizer
-        # Full-resolution frames (platesnap.SnapshotSource, shared with the
-        # plate pass). None disables full-resolution looks.
+        # Full-resolution frames (snapshots.SnapshotSource). None disables
+        # full-resolution looks.
         self._snapshots = snapshots
-        # The recording, read back in bursts (platereplay.RecordingReplay,
-        # shared with the plate pass). None disables bursts.
+        # The recording, read back in bursts (recording_replay.RecordingReplay).
+        # None disables bursts.
         self._replay = replay
         # Recorded bursts, counted since boot, for the status screen.
         self.bursts: dict[str, int] = {
@@ -681,7 +680,7 @@ class FacePass:
         x1, y1, x2, y2 = (float(v) for v in obs.box[:4])
         xi1, yi1 = max(0, int(x1)), max(0, int(y1))
         xi2, yi2 = min(fw, int(round(x2))), min(fh, int(round(y2)))
-        if xi2 - xi1 < platesnap.MIN_TEMPLATE_PX or yi2 - yi1 < platesnap.MIN_TEMPLATE_PX:
+        if xi2 - xi1 < snapshots.MIN_TEMPLATE_PX or yi2 - yi1 < snapshots.MIN_TEMPLATE_PX:
             return
         # The person only, copied: the engine reuses its frames.
         template = frame_bgr[yi1:yi2, xi1:xi2].copy()
@@ -706,14 +705,14 @@ class FacePass:
             if got is None:
                 return
             hires, taken = got
-            if hires.shape[1] < detect_shape[1] * platesnap.MIN_GAIN:
+            if hires.shape[1] < detect_shape[1] * snapshots.MIN_GAIN:
                 self._snapshots.note_no_gain(camera, hires.shape, detect_shape)
                 return
             self._snapshots.note_gain(camera)
             self.hires["frames"] += 1
             hh, hw = hires.shape[:2]
             sx, sy = hw / float(detect_shape[1]), hh / float(detect_shape[0])
-            found = await asyncio.to_thread(platesnap.locate, template, box, detect_shape, hires)
+            found = await asyncio.to_thread(snapshots.locate, template, box, detect_shape, hires)
             if found is not None:
                 pbox, pad, lost = found[0], PERSON_CROP_PAD, False
             else:
@@ -1149,6 +1148,16 @@ class FacePass:
             # Recorded bursts (module docstring), and whether they are on.
             "bursts_enabled": self._replay_on(),
             "bursts": dict(self.bursts),
+            # Per-camera snapshot health ({ok, failed, last_error, resolution,
+            # latency_ms, backing_off_s, no_gain}) and the recording reader's
+            # ({available, gpu_decode, decodes, requests, shared}). These used
+            # to be reported under the plate block; they serve faces too.
+            "snapshots": (self._snapshots.status()
+                          if self._snapshots is not None and hasattr(self._snapshots, "status")
+                          else {}),
+            "replay": (self._replay.status()
+                       if self._replay is not None and hasattr(self._replay, "status")
+                       else None),
             "tuning": {
                 "shots_per_track": self._shots,
                 "shot_min_gap_seconds": self._shot_gap,

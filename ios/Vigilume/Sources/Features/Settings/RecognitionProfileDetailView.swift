@@ -20,19 +20,14 @@ struct RecognitionProfileDetailView: View {
     @State private var detail: RecognitionProfileDetail?
     @State private var loading = true
     @State private var confirmingDelete = false
-    @State private var newPlate = ""
 
-    /// ONE alert modifier, switched by this. Two `.alert` modifiers on one view
-    /// is a SwiftUI trap — only one ever presents — so the plate prompt and the
-    /// error alert would silently swallow each other. (The confirmation dialog
-    /// below is a different modifier and coexists fine.)
+    /// The one alert this screen raises. (The confirmation dialog below is a
+    /// different modifier and coexists fine.)
     private enum ActiveAlert: Identifiable {
-        case plate
         case error(String)
 
         var id: String {
             switch self {
-            case .plate: return "plate"
             case .error(let message): return "error:\(message)"
             }
         }
@@ -40,16 +35,6 @@ struct RecognitionProfileDetailView: View {
     @State private var activeAlert: ActiveAlert?
     @State private var enabled = true
     @State private var strictness: Double = 0
-
-    private var isPerson: Bool { detail?.kind == "person" }
-
-    private var activeAlertTitle: String {
-        guard let activeAlert else { return "Something went wrong" }
-        switch activeAlert {
-        case .plate: return "Add a plate"
-        case .error: return "Something went wrong"
-        }
-    }
 
     private let columns = [GridItem(.adaptive(minimum: 96), spacing: 8)]
 
@@ -70,27 +55,16 @@ struct RecognitionProfileDetailView: View {
             if loading && detail == nil { ProgressView().tint(Theme.accent) }
         }
         .alert(
-            activeAlertTitle,
+            "Something went wrong",
             isPresented: Binding(
                 get: { activeAlert != nil },
                 set: { if !$0 { activeAlert = nil } }
             ),
             presenting: activeAlert
-        ) { alert in
-            switch alert {
-            case .plate:
-                TextField("Plate", text: $newPlate)
-                    .textInputAutocapitalization(.characters)
-                    .autocorrectionDisabled()
-                Button("Cancel", role: .cancel) {}
-                Button("Add") { Task { await addPlate() } }
-            case .error:
-                Button("OK", role: .cancel) {}
-            }
+        ) { _ in
+            Button("OK", role: .cancel) {}
         } message: { alert in
             switch alert {
-            case .plate:
-                Text("Spaces and dashes are ignored. A vehicle can carry more than one plate.")
             case .error(let message):
                 Text(message)
             }
@@ -103,9 +77,7 @@ struct RecognitionProfileDetailView: View {
             Button("Delete", role: .destructive) { Task { await deleteProfile() } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(isPerson
-                 ? "Their enrolled face images are deleted from the server too. This can't be undone."
-                 : "Its plates and any enrolled images are deleted from the server too. This can't be undone.")
+            Text("Their enrolled face images are deleted from the server too. This can't be undone.")
         }
         .task { await reload() }
     }
@@ -116,13 +88,11 @@ struct RecognitionProfileDetailView: View {
     private func referencesSection(_ detail: RecognitionProfileDetail) -> some View {
         Section {
             if detail.samples.isEmpty {
-                Text(isPerson
-                     ? "No faces enrolled. Open Unknown Faces and pick the clearest sightings of them."
-                     : "No plates yet. Add one below, or enroll a sighting from Unread Plates.")
+                Text("No faces enrolled. Open Unknown Faces and pick the clearest sightings of them.")
                     .font(.callout)
                     .foregroundStyle(Theme.textSecondary)
                     .listRowBackground(Theme.surface)
-            } else if isPerson {
+            } else {
                 LazyVGrid(columns: columns, spacing: 8) {
                     ForEach(detail.samples) { sample in
                         sampleTile(sample)
@@ -130,42 +100,11 @@ struct RecognitionProfileDetailView: View {
                 }
                 .listRowBackground(Theme.surface)
                 .listRowInsets(EdgeInsets(top: 10, leading: 12, bottom: 10, trailing: 12))
-            } else {
-                ForEach(detail.samples) { sample in
-                    HStack {
-                        Text(sample.plate.isEmpty ? "(image only)" : sample.plate)
-                            .font(.system(.body, design: .monospaced))
-                            .foregroundStyle(Theme.textPrimary)
-                        Spacer()
-                        Button(role: .destructive) {
-                            Task { await deleteSample(sample.id) }
-                        } label: {
-                            Image(systemName: "trash")
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(Theme.dangerSoft)
-                    }
-                    .listRowBackground(Theme.surface)
-                }
-            }
-
-            if !isPerson {
-                Button {
-                    newPlate = ""
-                    activeAlert = .plate
-                } label: {
-                    Label("Add a plate", systemImage: "plus")
-                }
-                .listRowBackground(Theme.surface)
             }
         } header: {
-            Text(isPerson ? "Enrolled faces" : "Plates")
+            Text("Enrolled faces")
         } footer: {
-            if isPerson {
-                Text("Accuracy comes from VARIETY, not volume — a few shots across different angles, lighting and seasons beat a dozen of the same pose. Tap any reference to remove it; nothing is retrained, so removing one takes effect immediately.")
-            } else {
-                Text("Plates are matched allowing for one misread character, and letters that look like digits (O/0, I/1, S/5) are treated as the same.")
-            }
+            Text("Accuracy comes from VARIETY, not volume — a few shots across different angles, lighting and seasons beat a dozen of the same pose. Tap any reference to remove it; nothing is retrained, so removing one takes effect immediately.")
         }
     }
 
@@ -207,40 +146,34 @@ struct RecognitionProfileDetailView: View {
                     Task { await patch(enabled: newValue) }
                 }
 
-            if isPerson {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("Strictness").foregroundStyle(Theme.textPrimary)
-                        Spacer()
-                        Text(strictnessLabel)
-                            .font(.caption)
-                            .foregroundStyle(Theme.textSecondary)
-                    }
-                    Slider(value: $strictness, in: 0...1, step: 0.05) { editing in
-                        // 0 means "inherit the server default", which has to be
-                        // sent as an explicit null. Omitting the field would
-                        // mean "leave it alone" to the server's partial-update
-                        // semantics, so dragging back to Default would appear
-                        // to work and change nothing.
-                        if !editing {
-                            Task {
-                                await patch(threshold: strictness == 0 ? .useDefault
-                                                                       : .value(strictness))
-                            }
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Strictness").foregroundStyle(Theme.textPrimary)
+                    Spacer()
+                    Text(strictnessLabel)
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                Slider(value: $strictness, in: 0...1, step: 0.05) { editing in
+                    // 0 means "inherit the server default", which has to be
+                    // sent as an explicit null. Omitting the field would
+                    // mean "leave it alone" to the server's partial-update
+                    // semantics, so dragging back to Default would appear
+                    // to work and change nothing.
+                    if !editing {
+                        Task {
+                            await patch(threshold: strictness == 0 ? .useDefault
+                                                                   : .value(strictness))
                         }
                     }
-                    .tint(Theme.accent)
                 }
-                .listRowBackground(Theme.surface)
+                .tint(Theme.accent)
             }
+            .listRowBackground(Theme.surface)
         } header: {
             Text("Matching")
         } footer: {
-            if isPerson {
-                Text("Leave strictness at Default unless this person keeps being confused with someone else — raising it affects only them, not everyone else's recognition.")
-            } else {
-                Text("Turning a profile off keeps it and its plates, but stops it matching.")
-            }
+            Text("Leave strictness at Default unless this person keeps being confused with someone else — raising it affects only them, not everyone else's recognition.")
         }
     }
 
@@ -301,22 +234,6 @@ struct RecognitionProfileDetailView: View {
             if (error as? ApiError)?.isCancelled == true { return }
             activeAlert = .error((error as? ApiError)?.message ?? error.localizedDescription)
             await reload()   // put the controls back where the server says they are
-        }
-    }
-
-    private func addPlate() async {
-        let plate = newPlate.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !plate.isEmpty, let api = session.api else { return }
-        do {
-            _ = try await api.addPlateSample(profileId: profileId, plate: plate)
-            await reload()
-            await onChange()
-        } catch {
-            // A cancelled request is not a failure — SwiftUI cancels the
-            // .task when the view refreshes. Alerting on it turns pull-to-
-            // refresh into a scary "is the NVR reachable?".
-            if (error as? ApiError)?.isCancelled == true { return }
-            activeAlert = .error((error as? ApiError)?.message ?? error.localizedDescription)
         }
     }
 

@@ -153,7 +153,7 @@ def polygon_zones(
     """Parse any normalized-polygon column into detect-space PolygonZones.
 
     Shared by include_zones (which FILTERS detection) and the recognition ROIs
-    face_zones / plate_zones (which only mark where detail is legible). They
+    face_zones (which only mark where detail is legible). They
     have opposite consequences but identical storage and identical failure
     modes, so they get one parser — and one place where a malformed polygon is
     skipped rather than raised.

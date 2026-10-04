@@ -3154,7 +3154,7 @@ label > select {
   gap: 0.35rem;
 }
 
-/* ── Recognition badge (faces & plates) ──────────────────────────────────────
+/* ── Recognition badge (faces) ────────────────────────────────────────────
    Shown on event cards and the event detail. A KNOWN subject reads as a
    positive identification and an unknown one as a caution — but the
    distinction is carried by the ICON and the WORDING as much as the colour,
@@ -3203,13 +3203,6 @@ label > select {
   padding: 0.18rem;
 }
 
-/* A plate is a string of ambiguous glyphs; a monospaced face is what keeps
-   0 apart from O at this size. */
-.recog-chip-plate {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  letter-spacing: 0.04em;
-}
-
 /* On a card thumbnail the chip sits above the label chip rather than beside
    it — side by side, the longer of the two truncates the other. */
 .event-recog-chip {
@@ -3233,7 +3226,7 @@ label > select {
   gap: 0.5rem;
 }
 
-/* ── Faces & plates (Settings → Faces & plates) ──────────────────────────────
+/* ── Faces (Settings → Faces) ──────────────────────────────────────────────
    The crops are the content here: a face at 96px is the smallest size at which
    a person can actually tell two strangers apart, which is the judgement this
    screen exists to support. */
@@ -3789,44 +3782,4 @@ label > select {
 .dwell-cell input {
   width: 6rem;
   flex: none;
-}
-
-/* --- Plate reading diagnostics (Settings → Faces & plates) --------------- */
-
-.plate-diag-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  margin: 0.75rem 0;
-  padding: 0;
-  list-style: none;
-}
-
-.plate-diag {
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-  padding: 0.6rem 0.75rem;
-  border: 1px solid var(--line);
-  border-left-width: 3px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-raise);
-  font-size: 0.88rem;
-}
-
-.plate-diag-ok {
-  border-left-color: var(--ok);
-}
-
-.plate-diag-warn {
-  border-left-color: var(--warn);
-}
-
-.plate-diag-idle {
-  border-left-color: var(--line);
-}
-
-.plate-diag .mono {
-  font-size: 0.72rem;
-  overflow-wrap: anywhere;
 }

@@ -93,12 +93,11 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
             'smoothing', 'jittery boxes', 'wobble'],
   },
   {
-    tab: 'detection', card: 'Faces & plates', admin: true,
+    tab: 'detection', card: 'Face recognition', admin: true,
     label: 'How hard recognition looks (tuning)',
     terms: ['recognition', 'face tuning', 'shots per track', 'quality',
-            'plate tuning', 'retention', 'unknown faces', 'aggressive',
-            'full resolution', 'snapshot', 'plates not reading',
-            'licence plate not working', 'license plate not working'],
+            'retention', 'unknown faces', 'aggressive', 'full resolution',
+            'snapshot', 'faces not recognised', 'faces not recognized'],
   },
 
   // ---- Recording -------------------------------------------------------
@@ -120,13 +119,12 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
             'starts too late', 'cut off', 'misses the start'],
   },
 
-  // ---- Faces & plates --------------------------------------------------
+  // ---- Faces -----------------------------------------------------------
   {
-    tab: 'faces', card: 'Faces & plates', admin: true,
-    label: 'Enrolled people and vehicles, and who to be alerted about',
+    tab: 'faces', card: 'People', admin: true,
+    label: 'Enrolled people, and who to be alerted about',
     terms: ['face', 'person', 'people', 'name', 'enroll', 'recognise',
-            'recognize', 'who', 'unknown face', 'identify', 'plate', 'licence',
-            'license', 'number plate', 'vehicle', 'anpr', 'lpr',
+            'recognize', 'who', 'unknown face', 'identify',
             // The per-profile alert policy lives inside a profile, so these
             // are the words that lead to it.
             'mute', 'silence', 'stop notifying me about me', 'watchlist',
@@ -134,15 +132,14 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
             'notify for one person'],
   },
   {
-    tab: 'faces', card: 'Plate reading by camera', admin: true,
-    label: 'Why plates are or are not being read',
-    terms: ['plate', 'licence plate', 'license plate', 'not reading', 'not working',
-            'no plates', 'anpr', 'lpr', 'plate diagnostics', 'too small',
-            'snapshot', 'full resolution'],
+    tab: 'faces', card: 'Why faces are or aren’t showing up', admin: true,
+    label: 'Why faces are or are not being recognised',
+    terms: ['not reading', 'not working', 'no faces', 'diagnostics', 'too small',
+            'snapshot', 'full resolution', 'unknown faces empty'],
   },
   {
     tab: 'faces', card: 'Which cameras', admin: true,
-    label: 'Turn face or plate recognition off per camera',
+    label: 'Turn face recognition off per camera',
     terms: ['which cameras', 'per camera', 'enable recognition', 'turn off',
             'driveway', 'door'],
   },
@@ -212,7 +209,7 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
  * Entries matching `query`, best first.
  *
  * Scored rather than merely filtered so "car" puts the parked-car card above
- * the vehicle profiles it also legitimately matches. A prefix hit on the label
+ * the other cards it also legitimately matches. A prefix hit on the label
  * beats a mid-word hit on a search term, and a card whose own heading matches
  * beats one that only matched a synonym — otherwise the ranking reads as
  * random to anyone who typed an obvious word.

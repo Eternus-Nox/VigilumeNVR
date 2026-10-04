@@ -1,11 +1,11 @@
 import SwiftUI
 
-/// Settings › Faces & Plates: the enrolled people and vehicles.
+/// Settings › Faces: the enrolled people.
 ///
 /// ADMIN-ONLY, including just LOOKING at it. Every other settings list in this
 /// app is gated because it configures the system; this one is gated because of
-/// what it contains — a named register of who comes to this address and which
-/// cars they drive. The server enforces it (`require_admin` on the whole
+/// what it contains — a named register of who comes to this address. The
+/// server enforces it (`require_admin` on the whole
 /// router, reads included); this view is never reachable for a viewer, so the
 /// 403 never has to be explained.
 ///
@@ -18,7 +18,10 @@ struct RecognitionProfilesView: View {
     @State private var status: RecognitionStatus?
     @State private var settings: SettingsDocument.Recognition?
     @State private var savingSettings = false
-    @State private var kind = "person"
+    /// People only: licence plate reading, and with it vehicle profiles, was
+    /// removed. Vehicle profiles left in an older database are hidden by the
+    /// server.
+    private let kind = "person"
     @State private var loading = true
     @State private var newName = ""
 
@@ -42,7 +45,7 @@ struct RecognitionProfilesView: View {
     private var alertTitle: String {
         guard let activeAlert else { return "Something went wrong" }
         switch activeAlert {
-        case .add: return kind == "person" ? "Add a person" : "Add a vehicle"
+        case .add: return "Add a person"
         case .error: return "Something went wrong"
         }
     }
@@ -81,29 +84,19 @@ struct RecognitionProfilesView: View {
         let hold = Int(settings.notifyGraceSeconds)
         if settings.notifyMode == "unknown_only" {
             return """
-                Enrolled people and vehicles arrive silently; anyone else still alerts — \
+                Enrolled people arrive silently; anyone else still alerts — \
                 including someone nobody could identify. Alerts are held about \(hold)s \
                 while recognition decides.
                 """
         }
         return """
-            Alerts name a recognized person or vehicle. Held about \(hold)s while \
+            Alerts name a recognized person. Held about \(hold)s while \
             recognition decides, then sent either way.
             """
     }
 
     var body: some View {
         List {
-            Section {
-                Picker("Kind", selection: $kind) {
-                    Text("People").tag("person")
-                    Text("Vehicles").tag("vehicle")
-                }
-                .pickerStyle(.segmented)
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
-            }
-
             if let settings {
                 Section {
                     // `newValue in` is NOT optional here. `$0` inside `Task { }`
@@ -113,7 +106,7 @@ struct RecognitionProfilesView: View {
                     // Binding.init(get:set:), and the error talks about 2
                     // arguments and an `@isolated(any) () async -> ()` that
                     // nothing in this code mentions. Name the parameter.
-                    Toggle("Recognize faces & plates", isOn: Binding(
+                    Toggle("Recognize faces", isOn: Binding(
                         get: { settings.enabled },
                         set: { newValue in Task { await setEnabled(newValue) } }
                     ))
@@ -177,9 +170,7 @@ struct RecognitionProfilesView: View {
 
             Section {
                 if shown.isEmpty && !loading {
-                    Text(kind == "person"
-                         ? "No people enrolled yet. Add someone, then pick their best shots from Unknown Faces."
-                         : "No vehicles enrolled yet. Add one, then type its plate or enroll a sighting.")
+                    Text("No people enrolled yet. Add someone, then pick their best shots from Unknown Faces.")
                         .font(.callout)
                         .foregroundStyle(Theme.textSecondary)
                         .listRowBackground(Theme.surface)
@@ -193,23 +184,23 @@ struct RecognitionProfilesView: View {
                     .listRowBackground(Theme.surface)
                 }
             } header: {
-                Text(kind == "person" ? "People" : "Vehicles")
+                Text("People")
             }
 
             Section {
                 NavigationLink {
                     RecognitionCandidatesView(
-                        kind: kind == "person" ? "face" : "plate",
+                        kind: "face",
                         profiles: shown,
                         onChange: reload
                     )
                 } label: {
                     Label {
                         HStack {
-                            Text(kind == "person" ? "Unknown Faces" : "Unread Plates")
+                            Text("Unknown Faces")
                                 .foregroundStyle(Theme.textPrimary)
                             Spacer()
-                            let n = status?.candidates[kind == "person" ? "face" : "plate"] ?? 0
+                            let n = status?.candidates["face"] ?? 0
                             if n > 0 {
                                 Text("\(n)")
                                     .font(.caption.weight(.semibold))
@@ -229,14 +220,14 @@ struct RecognitionProfilesView: View {
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
         .background(Theme.bg)
-        .navigationTitle("Faces & Plates")
+        .navigationTitle("Faces")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { newName = ""; activeAlert = .add } label: {
                     Image(systemName: "plus")
                 }
-                .accessibilityLabel(kind == "person" ? "Add a person" : "Add a vehicle")
+                .accessibilityLabel("Add a person")
             }
         }
         .alert(
@@ -249,7 +240,7 @@ struct RecognitionProfilesView: View {
         ) { alert in
             switch alert {
             case .add:
-                TextField(kind == "person" ? "Name" : "Vehicle name", text: $newName)
+                TextField("Name", text: $newName)
                     .textInputAutocapitalization(.words)
                 Button("Cancel", role: .cancel) {}
                 Button("Add") { Task { await create() } }
@@ -259,9 +250,7 @@ struct RecognitionProfilesView: View {
         } message: { alert in
             switch alert {
             case .add:
-                Text(kind == "person"
-                     ? "You'll enroll their face from real sightings afterwards."
-                     : "You can type its plate directly, or enroll a sighting.")
+                Text("You'll enroll their face from real sightings afterwards.")
             case .error(let message):
                 Text(message)
             }
@@ -302,10 +291,9 @@ struct RecognitionProfilesView: View {
             return "Needs re-enrolling"
         }
         if profile.sampleCount == 0 {
-            return profile.isPerson ? "No faces enrolled" : "No plate set"
+            return "No faces enrolled"
         }
-        let unit = profile.isPerson ? "face" : "plate"
-        return "\(profile.sampleCount) \(unit)\(profile.sampleCount == 1 ? "" : "s")"
+        return "\(profile.sampleCount) face\(profile.sampleCount == 1 ? "" : "s")"
     }
 
     private func reload() async {

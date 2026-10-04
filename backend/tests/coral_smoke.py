@@ -221,9 +221,12 @@ def backend_setting() -> None:
     check(DEFAULT_SETTINGS["detection"]["backend"] == "auto",
           "default backend is 'auto' — a fitted Coral is used without anyone "
           "having to find a setting, and a box without one still detects")
-    check(set(VALID_BACKENDS) == {"auto", "gpu", "coral"},
-          "the user-facing backend set is auto|gpu|coral (onnx_cpu stays a debug knob)")
+    check(set(VALID_BACKENDS) == {"auto", "gpu", "cpu", "coral"},
+          "the user-facing backend set is auto|gpu|cpu|coral — CPU is a real choice "
+          "in Settings now, not only the onnx_cpu debug knob")
     check(BACKEND_TO_DETECTOR["auto"] == "auto", "auto maps to the auto detector kind")
+    check(BACKEND_TO_DETECTOR["cpu"] == "onnx_cpu",
+          "cpu maps to the CPU-only ONNX detector, so choosing it never touches CUDA")
 
     class Cfg:
         detector = "onnx"

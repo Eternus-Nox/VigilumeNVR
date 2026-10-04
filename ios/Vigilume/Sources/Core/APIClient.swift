@@ -442,7 +442,7 @@ struct APIClient: Sendable {
         mediaURL("api/detection/suppressions/\(id)/thumb.jpg")
     }
 
-    // MARK: Recognition (faces & plates)
+    // MARK: Recognition (faces)
     //
     // EVERY route here is admin-only, INCLUDING the reads — the profile list is
     // a register of who visits this address and the candidate list is a gallery
@@ -455,7 +455,7 @@ struct APIClient: Sendable {
         try await get("api/recognition/status")
     }
 
-    /// ADMIN: GET /api/recognition/profiles — people and vehicles, or one kind.
+    /// ADMIN: GET /api/recognition/profiles — the enrolled people.
     func recognitionProfiles(kind: String? = nil) async throws -> [RecognitionProfile] {
         try await get(
             "api/recognition/profiles",
@@ -536,14 +536,6 @@ struct APIClient: Sendable {
     /// their reference images with it.
     func deleteRecognitionProfile(id: Int) async throws {
         try await send(try makeRequest("DELETE", "api/recognition/profiles/\(id)"))
-    }
-
-    /// ADMIN: POST /api/recognition/profiles/{id}/plate — enroll a vehicle by
-    /// typing its plate, with no sighting required.
-    func addPlateSample(profileId: Int, plate: String) async throws -> RecognitionSample {
-        try await sendJSON(
-            "POST", "api/recognition/profiles/\(profileId)/plate", body: ["plate": plate]
-        )
     }
 
     /// ADMIN: POST /api/recognition/profiles/{id}/enroll — turn candidates into
@@ -656,8 +648,7 @@ struct APIClient: Sendable {
     @discardableResult
     func updateCameraZones(
         camera: Camera,
-        faceZones: [IncludeZone]? = nil,
-        plateZones: [IncludeZone]? = nil
+        faceZones: [IncludeZone]? = nil
     ) async throws -> Camera {
         struct ZonePatch: Encodable {
             let name: String
@@ -665,7 +656,6 @@ struct APIClient: Sendable {
             let model: String
             let ip: String
             var faceZones: [IncludeZone]?
-            var plateZones: [IncludeZone]?
         }
         return try await sendJSON(
             "PUT", "api/cameras/\(camera.name)",
@@ -674,8 +664,7 @@ struct APIClient: Sendable {
                 friendlyName: camera.friendlyName,
                 model: camera.model,
                 ip: camera.ip,
-                faceZones: faceZones,
-                plateZones: plateZones
+                faceZones: faceZones
             )
         )
     }

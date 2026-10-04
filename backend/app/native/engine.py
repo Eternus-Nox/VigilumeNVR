@@ -449,15 +449,12 @@ class _CameraState:
     # a face is legible enough to be worth a recognition pass. Empty => the
     # whole frame, which is correct and merely slower.
     face_zones: list[tuple[str, Any]] = field(default_factory=list)
-    # Detect-space PLATE regions of interest. Same contract as face_zones.
-    plate_zones: list[tuple[str, Any]] = field(default_factory=list)
     # WHETHER this camera recognizes at all, as opposed to where it looks.
     # The zones cannot express this: an empty zone list means WHOLE FRAME,
     # so without these a box with recognition on ran a face pass on every
     # camera it had. Default True, matching the column default, so a camera
     # row from before the switches existed behaves as it always did.
     face_recognition: bool = True
-    plate_recognition: bool = True
     # Per-camera override for settings.detection.ignore_stationary. None (the
     # default) means follow the global setting — which is what keeps the
     # global control meaningful for every camera nobody has pinned.
@@ -522,9 +519,6 @@ class DetectionEngine:
         # a box that never turns recognition on pays nothing for it, and every
         # call site below is guarded rather than assuming it exists.
         self._face: Optional[Any] = None
-        # Plate reading (native.platepass.PlatePass). Same contract as _face:
-        # None until enabled, every call site guarded.
-        self._plates: Optional[Any] = None
         self.running = False
 
     def set_spotlight(self, spotlight: Optional[Any]) -> None:
@@ -545,15 +539,10 @@ class DetectionEngine:
         self._face = face
         self._wire_recognition_hook()
 
-    def set_plate_pass(self, plates: Optional[Any]) -> None:
-        """Inject the plate pass. Safe before or after start()."""
-        self._plates = plates
-        self._wire_recognition_hook()
-
     def _wire_recognition_hook(self) -> None:
-        """Give the passes a way to announce a recognition on a LIVE event.
+        """Give the face pass a way to announce a recognition on a LIVE event.
 
-        Called from BOTH set_pipeline and the two pass setters, because the
+        Called from BOTH set_pipeline and the pass setter, because the
         wiring order is not fixed and getting it wrong is silent: main.py
         happens to call set_pipeline first, so wiring only there would have
         found no passes and left every alert unnamed with nothing to show for
@@ -562,9 +551,8 @@ class DetectionEngine:
         note = getattr(self._pipeline, "note_recognition", None)
         if note is None:
             return
-        for pass_ in (self._face, self._plates):
-            if pass_ is not None:
-                pass_.on_recognition = note
+        if self._face is not None:
+            self._face.on_recognition = note
 
     @property
     def recognition_model_key(self) -> str:
@@ -579,8 +567,6 @@ class DetectionEngine:
         """
         if self._face is not None:
             await self._face.reload_gallery()
-        if self._plates is not None:
-            await self._plates.reload_gallery()
 
     def set_pipeline(self, pipeline: "EventsPipeline") -> None:
         """Late-bound: the pipeline needs the media provider, which needs
@@ -658,7 +644,6 @@ class DetectionEngine:
             # ticked a checkbox. Leaving them out of the guard entirely is
             # what makes the switch take effect on the next reload.
             state.face_recognition = bool(row.get("face_recognition", True))
-            state.plate_recognition = bool(row.get("plate_recognition", True))
             # THREE-STATE: None means "follow settings.detection". Read with a
             # default of None rather than coerced with bool(), which would turn
             # "inherit" into "off for this camera" the moment the row came from
@@ -671,7 +656,6 @@ class DetectionEngine:
                 repr(row.get("include_zones") or []),
                 repr(row.get("cross_lines") or []),
                 repr(row.get("face_zones") or []),
-                repr(row.get("plate_zones") or []),
                 row.get("detect_width"),
                 row.get("detect_height"),
             )
@@ -680,7 +664,6 @@ class DetectionEngine:
                 state.include_zones = zonelib.include_detect_zones(row)
                 state.cross_lines = zonelib.cross_detect_lines(row)
                 state.face_zones = zonelib.polygon_zones(row, "face_zones", "face")
-                state.plate_zones = zonelib.polygon_zones(row, "plate_zones", "plate")
                 if state.include_zones:
                     log.info(
                         "camera %s: %d include zone(s) active — detections outside "
@@ -870,9 +853,6 @@ class DetectionEngine:
             # frame's pass over a reused tracker id.
             for tid in forgotten:
                 await self._face.finish(camera, tid)
-        if forgotten and self._plates is not None:
-            for tid in forgotten:
-                await self._plates.finish(camera, tid)
         confirmed = [o for o in obs if cam.hits[o.tracker_id][0] >= MIN_HITS]
 
         # --- stillness: which of these are actually DOING anything ---
@@ -977,20 +957,6 @@ class DetectionEngine:
                 open_ev = self._events.get(camera)
                 await self._face.observe(cam, faceable, frame_bgr, frame_time,
                                          open_ev.fid if open_ev is not None else "")
-
-        # --- plate reading pass ---
-        # Fed the vehicle labels the camera is actually tracking. PlatePass
-        # picks its own out of the set and throttles per track, so handing it
-        # the whole confirmed scene costs nothing when there is no vehicle.
-        # With a plate zone drawn, every tracked vehicle in it is handed over
-        # too (`seen`), before confirmation and the stationary filter: those
-        # decide what deserves an EVENT and cost half a second, and a car
-        # crossing a small box does not have half a second to spare.
-        if self._plates is not None and (confirmed or (obs and cam.plate_zones)):
-            open_ev = self._events.get(camera)
-            await self._plates.observe(cam, confirmed, frame_bgr, frame_time,
-                                       open_ev.fid if open_ev is not None else "",
-                                       seen=obs)
 
         # The full confirmed set is the "scene" saved with the event's best
         # frame — every counted object, all labels.

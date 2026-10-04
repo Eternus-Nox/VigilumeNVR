@@ -36,8 +36,7 @@ import { formatDateTime, titleCase } from '../lib/format';
 
 interface Props {
   candidate: RecognitionCandidate;
-  /** Profiles this candidate can be added to — already filtered to the kind
-   *  that matches it (a face cannot join a vehicle). */
+  /** People this face can be added to. */
   profiles: RecognitionProfile[];
   busy?: boolean;
   onEnroll: (profileId: number) => void;
@@ -56,11 +55,10 @@ export default function CandidateReview({
   onClose,
 }: Props) {
   const [choice, setChoice] = useState<number | ''>('');
-  const isFace = candidate.kind === 'face';
   const box = candidate.frame_box;
 
   return (
-    <Modal title={isFace ? 'Who is this?' : 'Which vehicle is this?'} onClose={onClose} wide>
+    <Modal title="Who is this?" onClose={onClose} wide>
       <div className="candidate-review">
         <div className="candidate-review-frame">
           {candidate.frame_url ? (
@@ -98,17 +96,9 @@ export default function CandidateReview({
             {candidate.has_image && candidate.image_url ? (
               <AuthImage src={candidate.image_url} eager alt="" />
             ) : (
-              <span className="recog-candidate-noimg">
-                {candidate.plate || 'no crop saved'}
-              </span>
+              <span className="recog-candidate-noimg">no crop saved</span>
             )}
-            <span className="control-hint">
-              {isFace
-                ? 'The part that gets enrolled.'
-                : candidate.plate
-                  ? `Read as ${candidate.plate}.`
-                  : 'No plate text was read.'}
-            </span>
+            <span className="control-hint">The part that gets enrolled.</span>
           </div>
 
           <dl className="candidate-review-facts">
@@ -140,11 +130,7 @@ export default function CandidateReview({
               disabled={busy || profiles.length === 0}
             >
               <option value="">
-                {profiles.length === 0
-                  ? isFace
-                    ? 'No people yet'
-                    : 'No vehicles yet'
-                  : 'Choose someone…'}
+                {profiles.length === 0 ? 'No people yet' : 'Choose someone…'}
               </option>
               {profiles.map((p) => (
                 <option key={p.id} value={p.id}>
@@ -163,7 +149,7 @@ export default function CandidateReview({
               Not worth keeping
             </button>
             <button type="button" className="btn" onClick={onCreateProfile} disabled={busy}>
-              New {isFace ? 'person' : 'vehicle'}
+              New person
             </button>
             <button
               type="button"
@@ -171,7 +157,7 @@ export default function CandidateReview({
               disabled={busy || choice === ''}
               onClick={() => choice !== '' && onEnroll(choice)}
             >
-              {busy ? 'Adding…' : isFace ? 'Add to this person' : 'Add to this vehicle'}
+              {busy ? 'Adding…' : 'Add to this person'}
             </button>
           </div>
         </div>

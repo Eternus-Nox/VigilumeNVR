@@ -13,8 +13,8 @@ an admin, and concentrates on the things that would be quietly wrong:
 2. DELETE REALLY DELETES. "Delete this person" leaving their face crops on disk
    makes the button a lie, and this is the one store where that is not
    cosmetic.
-3. KIND IS ENFORCED. A face candidate must not enroll into a vehicle profile;
-   its embedding would sit in a gallery that only ever compares plates.
+3. PEOPLE ONLY. Licence plate reading was removed, so a vehicle profile is
+   refused at the door and plate candidates left from before never surface.
 4. PATH TRAVERSAL. Image paths are read out of a database and joined to a
    directory. They are always bare filenames this code wrote, but this is the
    router that serves biometric imagery, so the guard is tested rather than
@@ -125,9 +125,9 @@ def profile_checks(client: TestClient, h: dict) -> None:
     check(r.status_code == 409, "a duplicate (kind, name) is 409, not a second row")
 
     r = client.post("/api/recognition/profiles", headers=h,
-                    json={"kind": "vehicle", "name": "Adam"})
-    check(r.status_code == 201, "...but the SAME name under a different kind is fine")
-    truck = r.json()
+                    json={"kind": "vehicle", "name": "Adam's truck"})
+    check(r.status_code == 422 and "plate" in r.text,
+          "a VEHICLE profile is refused, and the reason says plate reading was removed")
 
     r = client.post("/api/recognition/profiles", headers=h,
                     json={"kind": "alien", "name": "X"})
@@ -164,22 +164,10 @@ def profile_checks(client: TestClient, h: dict) -> None:
     r = client.put("/api/recognition/profiles/999999", headers=h, json={"notes": "x"})
     check(r.status_code == 404, "updating a missing profile is 404")
 
-    print("\nprofiles: plate samples")
-    r = client.post(f"/api/recognition/profiles/{truck['id']}/plate", headers=h,
-                    json={"plate": "7abc-123"})
-    check(r.status_code == 201, "a vehicle takes a typed plate with no sighting")
-    check(r.json()["plate"] == "7ABC123", "...normalized on the way in")
-    r = client.post(f"/api/recognition/profiles/{adam['id']}/plate", headers=h,
-                    json={"plate": "ABC123"})
-    check(r.status_code == 400, "a PERSON profile refuses a plate")
-    r = client.post(f"/api/recognition/profiles/{truck['id']}/plate", headers=h,
-                    json={"plate": "!!!"})
-    check(r.status_code == 422, "a plate with no alphanumerics is refused")
-
-    return adam, truck
+    return adam
 
 
-def enroll_checks(client: TestClient, h: dict, adam: dict, truck: dict) -> None:
+def enroll_checks(client: TestClient, h: dict, adam: dict) -> None:
     cfg = app.state.config
 
     print("\nenrollment: candidates become samples")
@@ -215,9 +203,6 @@ def enroll_checks(client: TestClient, h: dict, adam: dict, truck: dict) -> None:
     check(len(r.json()) == 1, "the enrolled candidates left the unknown list")
 
     print("\nenrollment: refusals")
-    r = client.post(f"/api/recognition/profiles/{truck['id']}/enroll", headers=h,
-                    json={"candidate_ids": [c3]})
-    check(r.status_code == 400, "a FACE candidate will not enroll into a vehicle profile")
     r = client.post(f"/api/recognition/profiles/{adam['id']}/enroll", headers=h,
                     json={"candidate_ids": [c3, 999999]})
     check(r.status_code == 404, "an unknown candidate id fails the whole request")
@@ -228,25 +213,15 @@ def enroll_checks(client: TestClient, h: dict, adam: dict, truck: dict) -> None:
                     json={"candidate_ids": []})
     check(r.status_code == 422, "an empty enroll list is refused")
 
-    print("\nenrollment: a PLATE candidate enrolls into a vehicle profile")
-    # The plate pipeline produces these, and they are shaped differently from a
-    # face candidate: a string and no embedding. The gallery keeps a sample that
-    # has a plate OR a vector, so a plate-only sample must survive the trip.
-    pc = seed_candidate(client, kind="plate", plate="XYZ789", quality=0.7)
-    r = client.post(f"/api/recognition/profiles/{truck['id']}/enroll", headers=h,
-                    json={"candidate_ids": [pc]})
-    check(r.status_code == 201, f"a plate candidate enrolls into a vehicle "
-                                f"(got {r.status_code}: {r.text[:160]})")
-    detail = client.get(f"/api/recognition/profiles/{truck['id']}", headers=h).json()
-    plates = [s["plate"] for s in detail["samples"]]
-    check("XYZ789" in plates, f"the plate text became a sample (got {plates})")
-    check(detail["usable_sample_count"] == detail["sample_count"],
-          "plate samples are ALWAYS usable — unlike a face embedding they do not "
-          "depend on which model is loaded")
-
+    print("\nenrollment: a leftover PLATE candidate is not offered")
+    # Plate candidates written before plate reading was removed stay in the
+    # rolling store until they age out; they must not reach the review list.
+    pc = seed_candidate(client, kind="plate", plate="XYZ789", quality=0.95)
+    listed = [c["id"] for c in client.get("/api/recognition/candidates", headers=h).json()]
+    check(pc not in listed, "a plate candidate is not listed for review")
     r = client.post(f"/api/recognition/profiles/{adam['id']}/enroll", headers=h,
-                    json={"candidate_ids": [seed_candidate(client, kind='plate', plate='AAA111')]})
-    check(r.status_code == 400, "...and a plate candidate is refused by a PERSON profile")
+                    json={"candidate_ids": [pc]})
+    check(r.status_code == 400, "...and is refused by a person profile")
 
     print("\nenrollment: imagery is served and deleted")
     sid = sample_ids[0]
@@ -273,26 +248,19 @@ def enroll_checks(client: TestClient, h: dict, adam: dict, truck: dict) -> None:
           "...and the profile is a 404 afterwards")
 
     print("\ncandidates: clearing")
-    seed_candidate(client, kind="plate", plate="QQQ222", quality=0.6)
     seed_candidate(client, kind="face", quality=0.55)
-    # Asserted by KIND rather than by an absolute count: earlier sections of
-    # this suite leave candidates behind, and a count here would break whenever
-    # one of them changed.
     r = client.get("/api/recognition/candidates", headers=h, params={"kind": "plate"})
-    plates = r.json()
-    check(plates and all(c["kind"] == "plate" for c in plates),
-          "filtering by kind returns only that kind")
-    check(any(c["plate"] == "QQQ222" for c in plates), "...including the one just seeded")
+    check(r.status_code == 200 and r.json() == [],
+          "asking for plate candidates returns an empty list, not an error")
     faces_before = client.get("/api/recognition/candidates", headers=h,
                               params={"kind": "face"}).json()
-    check(len(faces_before) >= 1, "and there are face candidates to contrast with")
+    check(len(faces_before) >= 1 and all(c["kind"] == "face" for c in faces_before),
+          "filtering by face returns only faces")
 
     r = client.delete("/api/recognition/candidates", headers=h, params={"kind": "face"})
     check(r.status_code == 204, "clearing one kind succeeds")
     remaining = client.get("/api/recognition/candidates", headers=h).json()
-    check(all(c["kind"] == "plate" for c in remaining),
-          "...every face candidate is gone")
-    check(len(remaining) == len(plates), "...and the plate candidates are untouched")
+    check(remaining == [], "...every face candidate is gone")
     client.delete("/api/recognition/candidates", headers=h)
     check(len(client.get("/api/recognition/candidates", headers=h).json()) == 0,
           "clearing with no filter empties the store")
@@ -423,7 +391,7 @@ def roi_zone_checks(client: TestClient, h: dict) -> None:
     })
     check(r.status_code == 201, f"create a camera (got {r.status_code}: {r.text[:120]})")
     check(r.json()["face_zones"] == [], "a new camera has no face ROI (== whole frame)")
-    check(r.json()["plate_zones"] == [], "...and no plate ROI")
+    check("plate_zones" not in r.json(), "...and no plate ROI is reported any more")
 
     zone = [{"name": "door", "points": [[0.1, 0.1], [0.6, 0.1], [0.6, 0.7], [0.1, 0.7]]}]
     # EXACTLY the body the iOS editor sends: identity fields + one zone list,
@@ -436,7 +404,6 @@ def roi_zone_checks(client: TestClient, h: dict) -> None:
     body = r.json()
     check(len(body["face_zones"]) == 1, "the face ROI is stored")
     check(body["face_zones"][0]["points"][1] == [0.6, 0.1], "...with its points intact")
-    check(body["plate_zones"] == [], "the plate ROI was not disturbed")
     check(body["detect_objects"] == ["person", "car"],
           "and an OMITTED field keeps its stored value — the editor's minimal "
           "body must not revert settings it never mentioned")
@@ -448,15 +415,14 @@ def roi_zone_checks(client: TestClient, h: dict) -> None:
         "ip": "192.0.2.77", "plate_zones": [{"name": "kerb",
                                              "points": [[0, 0.5], [1, 0.5], [1, 1], [0, 1]]}],
     })
-    check(len(r.json()["plate_zones"]) == 1, "a plate ROI saves independently")
-    check(len(r.json()["face_zones"]) == 1, "...leaving the face ROI in place")
+    check(r.status_code == 200 and len(r.json()["face_zones"]) == 1,
+          "an older client still sending plate_zones is accepted, and the face ROI stays")
 
     r = client.put("/api/cameras/drive", headers=h, json={
         "name": "drive", "friendly_name": "Drive", "model": "IP4M-1041B",
         "ip": "192.0.2.77", "face_zones": [],
     })
     check(r.json()["face_zones"] == [], "an explicit [] CLEARS the ROI (back to whole frame)")
-    check(len(r.json()["plate_zones"]) == 1, "...without touching the other one")
 
     r = client.put("/api/cameras/drive", headers=h, json={
         "name": "drive", "friendly_name": "Drive", "model": "IP4M-1041B",
@@ -511,18 +477,17 @@ def event_recognition_checks(client: TestClient, h: dict) -> None:
     r = client.get(f"/api/events/{eid}", headers=h)
     check(r.status_code == 200, "the event detail loads")
     recs = r.json().get("recognitions")
-    check(isinstance(recs, list) and len(recs) == 2,
-          f"both recognitions are attached (got {recs})")
+    check(isinstance(recs, list) and len(recs) == 1,
+          f"the face is attached and the old plate read is not (got {recs})")
     check(recs[0]["kind"] == "face" and recs[0]["known"] is False,
           "an unmatched face is reported as a face that matched NOBODY, "
           "not as a missing recognition")
-    check(recs[1]["plate"] == "7ABC123", "the plate read comes through")
-    check([x["kind"] for x in recs] == ["face", "plate"],
-          "ordered oldest-first, so the first of a kind is the one to show")
+    check(recs[0]["plate"] == "",
+          "the plate key is still sent (empty) for the shipped iOS app")
 
     r = client.get("/api/events", headers=h)
     listed = [e for e in r.json()["events"] if e["id"] == eid]
-    check(listed and len(listed[0].get("recognitions") or []) == 2,
+    check(listed and len(listed[0].get("recognitions") or []) == 1,
           "and the LIST carries them too — one query for the page, not one per row")
     others = [e for e in r.json()["events"] if e["id"] != eid]
     check(all(e.get("recognitions") == [] for e in others),
@@ -540,7 +505,7 @@ def event_recognition_checks(client: TestClient, h: dict) -> None:
         vh = {"Authorization": f"Bearer {tok}"}
         rv = client.get(f"/api/events/{eid}", headers=vh)
         check(rv.status_code == 200, "a viewer can open the event")
-        check(len(rv.json().get("recognitions") or []) == 2,
+        check(len(rv.json().get("recognitions") or []) == 1,
               "and DOES see its recognitions — the aggregate register stays "
               "admin-only, one label beside a visible face does not")
         check(client.get("/api/recognition/profiles", headers=vh).status_code == 403,
@@ -606,8 +571,8 @@ def status_checks(client: TestClient, h: dict) -> None:
 def main() -> int:
     with TestClient(app) as client:
         h = login(client)
-        adam, truck = profile_checks(client, h)
-        enroll_checks(client, h, adam, truck)
+        adam = profile_checks(client, h)
+        enroll_checks(client, h, adam)
         frame_review_checks(client, h)
         traversal_checks(client, h)
         roi_zone_checks(client, h)

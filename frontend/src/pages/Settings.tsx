@@ -35,7 +35,7 @@ const ADMIN_TABS = [
   { id: 'integrations', label: 'Integrations' },
   { id: 'detection', label: 'Detection' },
   { id: 'recording', label: 'Recording' },
-  { id: 'faces', label: 'Faces & plates' },
+  { id: 'faces', label: 'Faces' },
   { id: 'excluded', label: 'Excluded objects' },
   { id: 'users', label: 'Users' },
   { id: 'system', label: 'System' },
@@ -189,7 +189,7 @@ export default function Settings() {
     if (activeTab === 'cameras') return <CamerasTab />;
     if (activeTab === 'users') return <UsersTab />;
     if (activeTab === 'excluded') return <ExcludedObjectsTab />;
-    // Faces & plates talks to /api/recognition directly rather than to the
+    // Faces talks to /api/recognition directly rather than to the
     // settings document, so it takes no `shared` props and must NEVER report
     // a draft — its edits are already saved, and reporting one would light
     // the shell's Save bar over nothing.

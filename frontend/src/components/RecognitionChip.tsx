@@ -51,16 +51,12 @@ export default function RecognitionChip({
   recognition: EventRecognition;
   className?: string;
 }) {
-  const known = recognition.known && Boolean(recognition.name || recognition.plate);
+  const known = recognition.known && Boolean(recognition.name);
   // The words to print, or null. "Unknown face" is not information — it spends
   // a chip's width on a thumbnail to say nothing — so it renders as the icon
   // alone and the wording survives on the accessible label below.
   const text = recognitionText(recognition);
   const label = recognitionLabel(recognition);
-  // A plate is a run of ambiguous glyphs; the monospaced variant is what keeps
-  // 0 apart from O at this size. Applied whether or not the vehicle is
-  // enrolled, since an unmatched plate is still read out character by character.
-  const mono = recognition.kind === 'plate' && Boolean(recognition.plate);
   // The chip truncates; the title carries the full reading plus how sure it was,
   // which is the one number an operator questions a match with.
   const title = known && recognition.score > 0
@@ -72,7 +68,6 @@ export default function RecognitionChip({
       className={[
         'recog-chip',
         known ? 'recog-chip-known' : 'recog-chip-unknown',
-        mono ? 'recog-chip-plate' : '',
         text === null ? 'recog-chip-iconly' : '',
         className,
       ]

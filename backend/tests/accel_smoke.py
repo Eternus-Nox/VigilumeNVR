@@ -20,8 +20,8 @@ on a maintenance tick, where the exception costs the whole feature.
 
 CORAL IS CPU, AND THAT IS AN ANSWER
 -----------------------------------
-An Edge TPU runs int8 graphs compiled for it; YuNet, SFace and the plate OCR are
-float ONNX with no Edge TPU build. So the TPU keeps detection and recognition
+An Edge TPU runs int8 graphs compiled for it; YuNet and SFace are float ONNX
+with no Edge TPU build. So the TPU keeps detection and recognition
 runs on CPU. The status report must SAY that, because "cpu" with no reason reads
 as an oversight rather than a decision.
 
@@ -99,13 +99,13 @@ def resolve_checks() -> None:
 
 def report_checks() -> None:
     print("\nthe status report names every stage AND the reason")
-    rep = accel.report(FakeDetector("cuda", "onnx"), plate_ocr_device="cpu")
-    for stage in ("face_detect", "face_embed", "plate_localize", "plate_ocr"):
+    rep = accel.report(FakeDetector("cuda", "onnx"), face_device="cpu")
+    for stage in ("face_detect", "face_embed"):
         check(stage in rep and "device" in rep[stage] and "why" in rep[stage],
               f"{stage} reports a device and a reason")
-    check(rep["plate_ocr"]["device"] == "cpu",
-          "plate_ocr reports what the SESSION ACTUALLY BOUND, not what was "
-          "requested — asking for CUDA and silently getting CPU is exactly the "
+    check(rep["face_detect"]["device"] == "cpu",
+          "face_detect reports what the SESSION ACTUALLY BOUND, not what was "
+          "requested — the detector on CUDA with faces on CPU is exactly the "
           "case that must not be reported as a GPU stage")
     check(rep["follows_detector"]["device"] == "cuda",
           "and the report says which detector device it is following")

@@ -373,12 +373,12 @@ export default function EventDetail() {
         {recognitions.length > 0 && (
           <div>
             {/* All of them here, not just the headline the card shows: two
-                people at a door, or a plate on a car with a face behind the
-                wheel, is exactly the event whose second row matters. */}
+                people at a door is exactly the event whose second row
+                matters. */}
             <dt>Recognized</dt>
             <dd className="recog-list">
               {recognitions.map((r, i) => (
-                <RecognitionChip key={`${r.kind}-${r.profile_id ?? 'x'}-${r.plate}-${i}`} recognition={r} />
+                <RecognitionChip key={`${r.kind}-${r.profile_id ?? 'x'}-${i}`} recognition={r} />
               ))}
             </dd>
           </div>

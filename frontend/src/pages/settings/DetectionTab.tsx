@@ -11,7 +11,7 @@
  * owns `recording`, and neither can clobber the other's slice.
  *
  * The `recognition` block here is TUNING (how many shots per track, how hard
- * to look). The people and vehicles themselves live on the Faces & plates tab,
+ * to look). The people themselves live on the Faces tab,
  * which deliberately reports no draft at all — its edits are immediate API
  * calls — so the tuning cannot move there without breaking that invariant.
  */
@@ -93,7 +93,7 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
   const [motionGate, setMotionGate] = useState<boolean>(
     pending.detection?.motion_gate ?? settings.detection.motion_gate ?? true,
   );
-  // Face / plate recognition. A backend predating the feature omits the block
+  // Face recognition. A backend predating the feature omits the block
   // entirely, and `hasRecognition` is what keeps that case honest: the card is
   // hidden AND the slice is left out of the draft. Reporting a default-filled
   // `recognition` against a saved `undefined` would read as an edit forever and
@@ -110,11 +110,7 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
     pass_interval_seconds: 0.6,
     face_on_vehicles: false,
     identify_quality: 0.45,
-    plate_hires: true,
     face_hires: true,
-    plate_detector: true,
-    plate_region: 'us' as 'us' | 'any',
-    plate_replay: true,
     face_replay: true,
     ...(savedRecognition ?? {}),
     ...(pending.recognition ?? {}),
@@ -147,11 +143,7 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
     if (v)
       setRecognition({
         ...v,
-        plate_hires: v.plate_hires ?? true,
         face_hires: v.face_hires ?? true,
-        plate_detector: v.plate_detector ?? true,
-        plate_region: v.plate_region ?? 'us',
-        plate_replay: v.plate_replay ?? true,
         face_replay: v.face_replay ?? true,
       });
   });
@@ -472,14 +464,13 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
 
       {hasRecognition && (
         <section className="card">
-          <h2>Faces &amp; plates</h2>
+          <h2>Face recognition</h2>
           <p className="muted small">
-            Reads faces and vehicle plates on top of ordinary detection, and names the
-            person or vehicle in the alert when it recognizes one. Off by default: it
-            downloads two further models (~41&nbsp;MB) and keeps cropped face images on the
-            server so you can enroll people from real sightings afterwards. People and
-            vehicles are enrolled in the Vigilume iOS app, under Settings →&nbsp;Faces
-            &amp;&nbsp;Plates.
+            Reads faces on top of ordinary detection, and names the person in the alert
+            when it recognizes them. Off by default: it downloads two further models
+            (~41&nbsp;MB) and keeps cropped face images on the server so you can enroll
+            people from real sightings afterwards. People are enrolled under the Faces
+            tab, or in the Vigilume iOS app.
           </p>
           <div className="form-stack">
             <label className="row-label">
@@ -488,7 +479,7 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
                 checked={recognition.enabled}
                 onChange={(e) => setRecognition({ ...recognition, enabled: e.target.checked })}
               />
-              Recognize faces and license plates
+              Recognize faces
             </label>
             {recognition.enabled && (
               <>
@@ -504,12 +495,12 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
                     }
                   >
                     <option value="all">Everyone, named where recognized</option>
-                    <option value="unknown_only">Only people and vehicles I have not enrolled</option>
+                    <option value="unknown_only">Only people I have not enrolled</option>
                   </select>
                   <span className="control-hint">
                     {recognition.notify_mode === 'unknown_only'
-                      ? 'Enrolled people and vehicles arrive silently. Anyone else still alerts — including a face nobody could identify, which is the case most worth hearing about.'
-                      : 'Every alert still sends; a recognized person or vehicle is named in it.'}
+                      ? 'Enrolled people arrive silently. Anyone else still alerts — including a face nobody could identify, which is the case most worth hearing about.'
+                      : 'Every alert still sends; a recognized person is named in it.'}
                   </span>
                 </label>
                 <label>
@@ -564,7 +555,7 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
                   </span>
                 </label>
                 <label>
-                  Shots collected per face or vehicle
+                  Shots collected per face
                   <input
                     type="number"
                     min={1}
@@ -641,8 +632,8 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
                 </label>
                 <span className="control-hint">
                   The driver through the windscreen. Off by default: on a road-facing
-                  camera most windscreens are glare, and a plate identifies a car better
-                  than a face does. It earns its keep on a driveway or at a gate.
+                  camera most windscreens are glare. It earns its keep on a driveway or at
+                  a gate. With it on, vehicle alerts also wait briefly for a name.
                 </span>
                 <label className="row-label">
                   <input
@@ -658,86 +649,10 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
                   On the small copy detection watches, a face at the door is a few dozen
                   pixels wide, which is too little to tell people apart reliably. With
                   this on, a person being tracked also gets a full-resolution snapshot
-                  from the camera about once a second (shared with plate reading), and the
+                  from the camera about once a second, and the
                   face is read from that. Only cameras with face recognition on are asked,
                   only while someone is there, and it stops once they are recognized.
                   Needs an Amcrest or Dahua camera.
-                </span>
-                <label className="row-label">
-                  <input
-                    type="checkbox"
-                    checked={recognition.plate_hires ?? true}
-                    onChange={(e) =>
-                      setRecognition({ ...recognition, plate_hires: e.target.checked })
-                    }
-                  />
-                  Read plates from full-resolution snapshots
-                </label>
-                <span className="control-hint">
-                  Detection watches a small copy of each camera (about 704&times;480), where
-                  a plate is usually too few pixels wide to read unless the car is right
-                  at the lens. With this on, a vehicle being tracked also gets a
-                  full-resolution snapshot from the camera about once a second, and the
-                  plate is read from that. Only cameras with plate reading on are asked,
-                  only while a vehicle is there, and it stops once the plate is read.
-                  Needs an Amcrest or Dahua camera.
-                </span>
-                <label className="row-label">
-                  <input
-                    type="checkbox"
-                    checked={recognition.plate_detector ?? true}
-                    onChange={(e) =>
-                      setRecognition({ ...recognition, plate_detector: e.target.checked })
-                    }
-                  />
-                  Find plates with the plate detector
-                </label>
-                <span className="control-hint">
-                  A small model trained to find license plates, then two readers that vote
-                  on every character. Much more reliable on real footage than the older
-                  shape-based search, which is used when this is off. The detector&rsquo;s
-                  weights are published under MIT but were trained with the GPL-3.0 YOLOv9
-                  code — turn this off if that matters for how you use Vigilume.
-                </span>
-                <label>
-                  License plates are from
-                  <select
-                    value={recognition.plate_region ?? 'us'}
-                    onChange={(e) =>
-                      setRecognition({
-                        ...recognition,
-                        plate_region: e.target.value === 'any' ? 'any' : 'us',
-                      })
-                    }
-                  >
-                    <option value="us">the United States</option>
-                    <option value="any">anywhere (read as-is)</option>
-                  </select>
-                  <span className="control-hint">
-                    US standard plates leave out the letters O, I and Q because they look
-                    like 0 and 1, so in US mode those are read as digits. On 222 real US
-                    plates that took exact reads from 89% to 93%, and cut plates stored
-                    with a wrong character from 14 to 9.
-                  </span>
-                </label>
-                <label className="row-label">
-                  <input
-                    type="checkbox"
-                    checked={recognition.plate_replay ?? true}
-                    onChange={(e) =>
-                      setRecognition({ ...recognition, plate_replay: e.target.checked })
-                    }
-                  />
-                  Read plates from the recording too
-                </label>
-                <span className="control-hint">
-                  A fast car usually gets one or two live looks, and by the time detection
-                  has confirmed it the best moment has often passed. With this on, about a
-                  second after a vehicle is first seen, the camera&rsquo;s own recording is
-                  read at full resolution from two seconds <em>before</em> it was detected,
-                  ten frames a second &mdash; again every second or so while it is in view, and
-                  once more just after it leaves. Every frame is a read, and the plate is
-                  decided by a vote over all of them. Needs the camera to be recording.
                 </span>
                 <label className="row-label">
                   <input
@@ -750,11 +665,11 @@ export default function DetectionTab({ settings, onDraftChange, pending }: TabPr
                   Read faces from the recording too
                 </label>
                 <span className="control-hint">
-                  The same for people: a face is often only turned to the camera for a
-                  moment, and often before detection has caught up. The recording around the
-                  person, from two seconds before they were detected, is read ten frames a
-                  second, and the best face of all of them is the one recognized. Needs the
-                  camera to be recording.
+                  A face is often only turned to the camera for a moment, and often before
+                  detection has caught up. With this on, the camera&rsquo;s own recording
+                  around the person is read at full resolution from two seconds{' '}
+                  <em>before</em> they were detected, ten frames a second, and the best face
+                  of all of them is the one recognized. Needs the camera to be recording.
                 </span>
                 <label>
                   Crop quality needed to identify: {Math.round(recognition.identify_quality * 100)}%

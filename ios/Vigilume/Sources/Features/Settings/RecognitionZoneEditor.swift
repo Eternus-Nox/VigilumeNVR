@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Draw the region of a camera where faces (or plates) are worth recognizing,
+/// Draw the region of a camera where faces are worth recognizing,
 /// over a heatmap of where they have actually been legible.
 ///
 /// WHY THE HEATMAP IS THE POINT
@@ -29,8 +29,6 @@ import SwiftUI
 /// a colour-free path to a sensible region.
 struct RecognitionZoneEditor: View {
     let camera: Camera
-    /// "face" | "plate".
-    let kind: String
     var onSaved: () async -> Void
 
     @EnvironmentObject private var session: SessionModel
@@ -55,11 +53,13 @@ struct RecognitionZoneEditor: View {
         }
     }
 
-    private var isFace: Bool { kind == "face" }
-    private var title: String { isFace ? "Face Zone" : "Plate Zone" }
+    /// The heatmap's kind on the server. Faces are the only kind left now that
+    /// plate reading is gone.
+    private let kind = "face"
+    private let title = "Face Zone"
 
     private var existing: [IncludeZone] {
-        (isFace ? camera.faceZones : camera.plateZones) ?? []
+        camera.faceZones ?? []
     }
 
     var body: some View {
@@ -97,7 +97,7 @@ struct RecognitionZoneEditor: View {
             case .error(let message):
                 Text(message)
             case .confirmClearMap:
-                Text("Forget where \(isFace ? "faces" : "plates") have been seen on this camera. Do this after moving or re-aiming it, when the old view's history no longer describes what it sees.")
+                Text("Forget where faces have been seen on this camera. Do this after moving or re-aiming it, when the old view's history no longer describes what it sees.")
             }
         }
         .task { await load() }
@@ -177,7 +177,7 @@ struct RecognitionZoneEditor: View {
                     HeatmapLegend(samples: heatmap.samples)
                 } else if !loading {
                     Label {
-                        Text("No sightings recorded yet. Leave recognition running for a while and a map of where \(isFace ? "faces" : "plates") are actually readable will build up here.")
+                        Text("No sightings recorded yet. Leave recognition running for a while and a map of where faces are actually readable will build up here.")
                             .font(.caption)
                             .foregroundStyle(Theme.textSecondary)
                     } icon: {
@@ -231,12 +231,12 @@ struct RecognitionZoneEditor: View {
 
     private var instructions: String {
         if points.isEmpty {
-            return "Tap to place corners around the area where \(isFace ? "a face" : "a plate") is readable. Leave it empty to search the whole frame — correct, just slower. Drag a corner to adjust it."
+            return "Tap to place corners around the area where a face is readable. Leave it empty to search the whole frame — correct, just slower. Drag a corner to adjust it."
         }
         if points.count < 3 {
             return "A zone needs at least three corners."
         }
-        return "Drag any corner to adjust. Saving replaces this camera's \(isFace ? "face" : "plate") zone."
+        return "Drag any corner to adjust. Saving replaces this camera's face zone."
     }
 
     // MARK: Actions
@@ -262,14 +262,10 @@ struct RecognitionZoneEditor: View {
         defer { saving = false }
         let zone = points.isEmpty
             ? []
-            : [IncludeZone(name: isFace ? "face" : "plate",
+            : [IncludeZone(name: "face",
                            points: points.map { [Double($0.x), Double($0.y)] })]
         do {
-            _ = try await api.updateCameraZones(
-                camera: camera,
-                faceZones: isFace ? zone : nil,
-                plateZones: isFace ? nil : zone
-            )
+            _ = try await api.updateCameraZones(camera: camera, faceZones: zone)
             await onSaved()
             dismiss()
         } catch {

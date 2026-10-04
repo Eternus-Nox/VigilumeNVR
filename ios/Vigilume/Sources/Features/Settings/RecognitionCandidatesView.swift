@@ -1,10 +1,10 @@
 import SwiftUI
 
-/// Unknown Faces / Unread Plates — the picker you enroll FROM.
+/// Unknown Faces — the picker you enroll FROM.
 ///
 /// This is the screen that answers "which image should we use". The server has
 /// already done the part a person cannot do by eye at thumbnail size: for every
-/// tracked face or plate it kept several shots spread across the sighting and
+/// tracked face it kept several shots spread across the sighting and
 /// scored each for LEGIBILITY — sharpness, size, exposure, and pose — which is
 /// a different question from the detector's "is something there". A big,
 /// centred, motion-blurred face scores very well on the second and is useless
@@ -15,7 +15,8 @@ import SwiftUI
 /// through frames, and the one thing they are asked to judge is the thing only
 /// a person can: whether this is actually who they think it is.
 struct RecognitionCandidatesView: View {
-    /// "face" | "plate".
+    /// The candidate kind on the server; always "face" since plate reading was
+    /// removed.
     let kind: String
     let profiles: [RecognitionProfile]
     var onChange: () async -> Void
@@ -35,18 +36,15 @@ struct RecognitionCandidatesView: View {
     @State private var reviewing: RecognitionCandidate?
     @State private var toast: String?
 
-    private var isFace: Bool { kind == "face" }
     private let columns = [GridItem(.adaptive(minimum: 104), spacing: 10)]
 
     var body: some View {
         ScrollView {
             if candidates.isEmpty && !loading {
                 ContentUnavailableView(
-                    isFace ? "No unknown faces" : "No unread plates",
+                    "No unknown faces",
                     systemImage: "person.crop.square.badge.camera",
-                    description: Text(isFace
-                        ? "Faces that don't match anyone enrolled show up here so you can add them."
-                        : "Plates that don't match a vehicle show up here.")
+                    description: Text("Faces that don't match anyone enrolled show up here so you can add them.")
                 )
                 .padding(.top, 60)
             } else {
@@ -59,7 +57,7 @@ struct RecognitionCandidatesView: View {
             }
         }
         .background(Theme.bg)
-        .navigationTitle(isFace ? "Unknown Faces" : "Unread Plates")
+        .navigationTitle("Unknown Faces")
         .navigationBarTitleDisplayMode(.inline)
         .overlay {
             if loading && candidates.isEmpty { ProgressView().tint(Theme.accent) }
@@ -78,8 +76,7 @@ struct RecognitionCandidatesView: View {
                     Button(role: .destructive) {
                         confirmingClear = true
                     } label: {
-                        Label(isFace ? "Clear all unknown faces" : "Clear all unread plates",
-                              systemImage: "trash")
+                        Label("Clear all unknown faces", systemImage: "trash")
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
@@ -87,7 +84,7 @@ struct RecognitionCandidatesView: View {
             }
         }
         .confirmationDialog(
-            isFace ? "Clear every unknown face?" : "Clear every unread plate?",
+            "Clear every unknown face?",
             isPresented: $confirmingClear,
             titleVisibility: .visible
         ) {
@@ -181,12 +178,6 @@ struct RecognitionCandidatesView: View {
             QualityBar(quality: candidate.quality)
                 .frame(width: 104)
 
-            if !candidate.plate.isEmpty {
-                Text(candidate.plate)
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(Theme.textPrimary)
-                    .lineLimit(1)
-            }
             Text(candidate.camera)
                 .font(.caption2)
                 .foregroundStyle(Theme.textSecondary)
@@ -275,9 +266,7 @@ struct RecognitionCandidatesView: View {
         NavigationStack {
             List {
                 if profiles.isEmpty {
-                    Text(isFace
-                         ? "No people yet — add one on the previous screen first."
-                         : "No vehicles yet — add one on the previous screen first.")
+                    Text("No people yet — add one on the previous screen first.")
                         .foregroundStyle(Theme.textSecondary)
                         .listRowBackground(Theme.surface)
                 }

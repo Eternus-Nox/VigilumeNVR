@@ -6,10 +6,9 @@ WHY
 The live looks are late by construction. Detection runs on the ~704x480
 substream at a few frames a second and confirms a track over three frames;
 a full-resolution snapshot is asked for after that and arrives a few hundred
-milliseconds later. A car crossing the view in a second and a half, or a
-person walking briskly past, has often turned or gone by the time the first
-look lands — which is why plates were being read when a car backed slowly out
-of the driveway, and missed when one drove in.
+milliseconds later. A person walking briskly past has often turned or gone by
+the time the first look lands — and the moment they faced the camera was
+usually before detection had confirmed them at all.
 
 The recorder has been writing the camera's full-resolution stream to disk the
 whole time, including the seconds before anything was detected. So, starting
@@ -19,15 +18,14 @@ BURST_FPS, cropped to where the object was, and reads every frame. It repeats
 every BURST_EVERY_S while the object is in view, and once more TAIL_DELAY_S
 after its last sighting for the seconds as it left. Every frame is a look: a
 second of burst is ten looks at full resolution, where the live path gets one.
-The answer is then decided from all of them — plates by the per-character vote,
-faces from their best few shots together.
+The answer is then decided from the best of them.
 
 REC_LAG_S is how far behind real time the recording on disk is assumed to be
 (go2rtc relay + the muxer's interleaving + write buffering). A burst never
 reads past it, and records how far it actually got from the frames that came
 back, so an underestimate just leaves the rest to the next burst.
 
-State per track lives in `BurstState`; the passes own the reading. Nothing
+State per track lives in `BurstState`; the face pass owns the reading. Nothing
 here does I/O.
 """
 from __future__ import annotations
@@ -72,7 +70,7 @@ MAX_BURST_WINDOW_S = 4.0
 MIN_FINAL_SPAN_S = 0.2
 
 #: How far a recorded frame's time may be from the detect stream's clock. The
-#: segment start is exact to milliseconds (platereplay.segment_starts); the two
+#: segment start is exact to milliseconds (recording_replay.segment_starts); the two
 #: streams' paths through go2rtc differ by a few hundred.
 TIME_TOLERANCE_S = 0.35
 

@@ -2,7 +2,7 @@
 
 THE QUESTION THIS ANSWERS
 =========================
-The ROI editor asks the operator to draw a region where faces (or plates) are
+The ROI editor asks the operator to draw a region where faces are
 worth spending a recognition pass on. Left to intuition, almost everyone draws
 the region where people WALK — which is the obvious guess and frequently the
 wrong one. Whether a face is legible depends on range, lens, mounting height
@@ -11,7 +11,7 @@ region that matters is where something READABLE has actually come from.
 
 So each camera accumulates a coarse grid with two numbers per cell:
 
-    count        how many times a face/plate was centred here
+    count        how many times a face was centred here
     quality_sum  the sum of their bestshot quality scores
 
 `count` alone is a footfall map. `quality_sum / count` is the part that says

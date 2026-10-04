@@ -96,26 +96,20 @@ def recognition_banner(recognitions: Optional[Sequence[Any]]) -> str:
     if not recognitions:
         return ""
     names: list[str] = []
-    plates: list[str] = []
     unknown_face = False
     for r in recognitions:
         if not isinstance(r, dict):
             continue
         name = str(r.get("name") or "").strip()
-        plate = str(r.get("plate") or "").strip()
         known = r.get("profile_id") is not None
         if known and name:
             if name not in names:
                 names.append(name)
-        elif plate:
-            if plate not in plates:
-                plates.append(plate)
         elif str(r.get("kind")) == "face":
             unknown_face = True
-    parts = names + plates
-    if not parts and unknown_face:
+    if not names and unknown_face:
         return "Unknown face"
-    return ", ".join(parts)
+    return ", ".join(names)
 
 
 def _draw_banner(image: np.ndarray, text: str) -> np.ndarray:

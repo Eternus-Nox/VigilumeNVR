@@ -32,10 +32,7 @@ struct RecognitionBadge: View {
     private var isKnown: Bool { recognition.known && !recognition.name.isEmpty }
 
     private var icon: String {
-        if recognition.isFace {
-            return isKnown ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.questionmark"
-        }
-        return isKnown ? "car.circle.fill" : "car.circle"
+        isKnown ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.questionmark"
     }
 
     private var tint: Color { isKnown ? Theme.success : Theme.warning }
@@ -53,9 +50,6 @@ struct RecognitionBadge: View {
                 Text(text)
                     .font((compact ? Font.caption2 : Font.caption).weight(.semibold))
                     .lineLimit(1)
-                    // Plates are strings of ambiguous glyphs; a monospaced face
-                    // is what makes 0 vs O legible at this size.
-                    .monospaced(!recognition.plate.isEmpty && !isKnown)
             }
         }
         .foregroundStyle(tint)
@@ -65,7 +59,7 @@ struct RecognitionBadge: View {
         .accessibilityLabel(
             isKnown
                 ? "Recognized \(recognition.displayText)"
-                : (recognition.isFace ? "Unrecognized face" : "Plate \(recognition.displayText)")
+                : "Unrecognized face"
         )
     }
 }

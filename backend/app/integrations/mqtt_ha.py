@@ -622,11 +622,11 @@ class MqttPublisher:
         *,
         kind: str,
         name: str,
-        plate: str,
         known: bool,
         score: float = 0.0,
     ) -> None:
-        """A face or plate was read. Publishes WHO, plus the detail as attributes.
+        """A face was recognized (or was not). Publishes WHO, plus the detail as
+        attributes.
 
         Called the moment recognition decides, not when the row is stored —
         storage happens at track end, long after the person has walked away,
@@ -641,18 +641,12 @@ class MqttPublisher:
         if not self._cfg.runnable:
             return
         base = self._cfg.base_topic
-        if known and name:
-            state = name
-        elif plate:
-            state = plate
-        else:
-            state = "Unknown"
+        state = name if (known and name) else "Unknown"
         self._set_state(recognized_state_topic(base, camera), state)
         self._set_state(recognized_attributes_topic(base, camera), json.dumps({
             "kind": kind,
             "known": bool(known),
             "name": name,
-            "plate": plate,
             "score": round(float(score), 4),
             "at": time.time(),
         }))
@@ -680,7 +674,6 @@ class MqttPublisher:
                 {
                     "kind": r.get("kind"),
                     "name": r.get("name") or "",
-                    "plate": r.get("plate") or "",
                     "known": bool(r.get("known")),
                 }
                 for r in (row.get("recognitions") or [])

@@ -678,7 +678,7 @@ struct SettingsHomeView: View {
             NavigationLink {
                 RecognitionProfilesView()
             } label: {
-                Label("Faces & Plates", systemImage: "person.crop.rectangle.stack.fill")
+                Label("Faces", systemImage: "person.crop.rectangle.stack.fill")
                     .foregroundStyle(Theme.textPrimary)
             }
             NavigationLink {

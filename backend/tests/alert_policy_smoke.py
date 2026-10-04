@@ -32,11 +32,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.events_pipeline import EventsPipeline  # noqa: E402
 from app.native.recognition import (  # noqa: E402
-    ALERT_MODES, Gallery, normalize_alert_mode,
+    ALERT_MODES, Gallery, normalize_alert_mode, to_blob,
 )
 
 _failures: list[str] = []
@@ -78,12 +80,12 @@ def gate(recognitions, *, notify_mode="all", label="person"):
 
 def known(name, mode="default", pid=1):
     return {"kind": "face", "name": name, "profile_id": pid, "alert_mode": mode,
-            "plate": "", "score": 0.9}
+            "score": 0.9}
 
 
 def stranger():
     return {"kind": "face", "name": "", "profile_id": None, "alert_mode": "default",
-            "plate": "", "score": 0.2}
+            "score": 0.2}
 
 
 def normalize_checks() -> None:
@@ -173,34 +175,35 @@ def gate_checks() -> None:
 def gallery_checks() -> None:
     """The policy must survive the trip from a DB row to a Match.
 
-    Exercised through `match_plate` rather than by reading gallery internals:
-    plates need no embedding, so this is the one matcher that can be driven
-    end to end offline — and it is the real path, so it would catch the
+    Exercised through `match_face` with hand-built vectors rather than by
+    reading gallery internals: it is the real path, so it would catch the
     carry-through being dropped anywhere along it.
     """
     print("\nthe policy rides the match, not a database lookup")
+    enrolled = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    stranger = np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32)
 
     def gallery(mode):
-        rows = [{"id": 7, "kind": "vehicle", "name": "Van", "enabled": 1,
+        rows = [{"id": 7, "kind": "person", "name": "Postie", "enabled": 1,
                  "threshold": None, "alert_mode": mode}]
-        samples = [{"id": 1, "profile_id": 7, "plate": "7ABC123",
-                    "embedding": None, "dim": 0, "model_key": ""}]
-        return Gallery.build(rows, samples, model_key="")
+        samples = [{"id": 1, "profile_id": 7, "embedding": to_blob(enrolled),
+                    "dim": 4, "model_key": "m1"}]
+        return Gallery.build(rows, samples, model_key="m1")
 
-    m = gallery("mute").match_plate("7ABC123")
+    m = gallery("mute").match_face(enrolled)
     check(m.matched and m.alert_mode == "mute",
-          f"a matched plate carries its profile's policy out to the pipeline "
+          f"a matched face carries its profile's policy out to the pipeline "
           f"(got {m.alert_mode!r}) — no database lookup on the alert path")
 
-    m = gallery("nonsense").match_plate("7ABC123")
+    m = gallery("nonsense").match_face(enrolled)
     check(m.alert_mode == "default",
           f"a nonsense stored value is normalized AT LOAD, so an unknown "
           f"policy can never reach the gate (got {m.alert_mode!r})")
 
-    m = gallery("mute").match_plate("ZZZ9999")
+    m = gallery("mute").match_face(stranger)
     check(not m.matched and m.alert_mode == "default",
-          "an UNMATCHED read carries 'default' — this is what stops an unknown "
-          "vehicle inheriting an enrolled one's mute")
+          "an UNMATCHED face carries 'default' — this is what stops a stranger "
+          "inheriting an enrolled person's mute")
 
 
 def main() -> int:

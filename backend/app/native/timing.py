@@ -120,15 +120,12 @@ class Timings:
         self.face_detect = Stage("face_detect")
         self.face_align = Stage("face_align")
         self.face_embed = Stage("face_embed")
-        self.plate_localize = Stage("plate_localize")
-        self.plate_ocr = Stage("plate_ocr")
 
     def report(self) -> dict[str, Any]:
         """Stages that have actually run, for /api/recognition/status."""
         out: dict[str, Any] = {}
         for stage in (
             self.face_detect, self.face_align, self.face_embed,
-            self.plate_localize, self.plate_ocr,
         ):
             snap = stage.snapshot()
             if snap is not None:

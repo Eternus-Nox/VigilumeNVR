@@ -1,7 +1,7 @@
 """Main-stream encode profiles: what Vigilume asks a camera's MAIN stream to be.
 
 The main stream is what the 24/7 recorder stores, what the recorded bursts
-decode for face and plate reads, what a full-resolution snapshot is cut from,
+decode for face reads, what a full-resolution snapshot is cut from,
 and what fullscreen live view climbs to. Its settings decide most of the box's
 decode work and disk use, and the cameras ship with the heaviest ones they
 have (4K/5 MP H.265 on a 2-4 s keyframe interval). A PROFILE says what to

@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cv2  # noqa: E402
 
 from app.native.facepass import FacePass  # noqa: E402
-from app.native.platesnap import SnapshotSource  # noqa: E402
+from app.native.snapshots import SnapshotSource  # noqa: E402
 from app.native.recognizer import FaceRecognizer  # noqa: E402
 from facepass_smoke import Cam, Obs, load_face_image, make_db  # noqa: E402
 

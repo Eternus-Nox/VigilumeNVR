@@ -188,11 +188,11 @@ async def main() -> int:
     rep = accel.report(FakeDetector("cuda"), face_device="cuda")
     check(rep["face_detect"]["device"] == "cuda" and rep["face_embed"]["device"] == "cuda",
           "the device report shows faces on the GPU when they are")
-    rep = accel.report(FakeDetector("cuda"), face_device="cpu", plate_detector_device="cuda")
+    rep = accel.report(FakeDetector("cuda"), face_device="cpu")
     check(rep["face_detect"]["device"] == "cpu" and "without CUDA" in rep["face_detect"]["why"],
           "and explains a CPU face stage")
-    check(rep["plate_localize"]["device"] == "cuda",
-          "the plate detector's own device is reported, not 'classical CV'")
+    check(not any(k.startswith("plate") for k in rep),
+          "and no plate stages are reported — plate reading was removed")
 
     print("\n6. recognition waits for the detector, and follows it when it moves")
     # At boot the detector warms up in the background; models loaded before it
@@ -218,22 +218,6 @@ async def main() -> int:
     await waiter.load()
     check(waiter._built_for == ("cuda", "onnx") and not waiter.stale_device(),
           "a rebuild follows it, once")
-
-    from app.native.plates import PlateReader
-
-    plate_late = FakeDetector("")
-    reader = PlateReader(models_dir, detector=plate_late)
-    accel.SETTLE_TIMEOUT_S, saved = 0.3, accel.SETTLE_TIMEOUT_S
-    try:
-        t0 = asyncio.get_running_loop().time()
-        ok = await reader.load()
-        waited = asyncio.get_running_loop().time() - t0
-    finally:
-        accel.SETTLE_TIMEOUT_S = saved
-    check(ok and 0.25 <= waited < 5.0,
-          f"a detector that never resolves does not hold plates back for long ({waited:.2f} s)")
-    plate_late.device = "cpu"
-    check(reader.stale_device(), "and when it does resolve, the plate models are marked to follow")
 
     print()
     if _failures:

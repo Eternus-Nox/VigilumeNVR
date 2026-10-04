@@ -143,7 +143,7 @@ export default function SettingsSearch({ isAdmin, onGo }: Props) {
                   <span className="settings-search-label">{entry.label}</span>
                   <span className="settings-search-where">
                     {entry.tab === 'faces'
-                      ? 'Faces & plates'
+                      ? 'Faces'
                       : entry.tab.charAt(0).toUpperCase() + entry.tab.slice(1)}{' '}
                     › {entry.card}
                   </span>

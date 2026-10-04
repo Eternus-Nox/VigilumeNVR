@@ -20,7 +20,7 @@ whole feature.
 WHY CORAL IS ALWAYS CPU HERE, AND WHY THAT IS NOT A GAP
 -------------------------------------------------------
 An Edge TPU executes int8-quantized graphs compiled by the Edge TPU compiler.
-YuNet, SFace and the plate OCR are float ONNX models from the permissive tier —
+YuNet and SFace are float ONNX models from the permissive tier —
 there is no Edge-TPU build of any of them, and quantizing a face embedding to
 int8 without re-validating it against real enrollments is how you get a gallery
 that silently matches the wrong people.
@@ -32,8 +32,7 @@ to infer it from a number that never changes.
 
 WHAT CAN ACTUALLY MOVE
 ----------------------
-Every model stage: the plate detector and both plate readers, and — when the
-detector is on CUDA — YuNet and SFace too. The pip OpenCV wheel is built
+When the detector is on CUDA: YuNet and SFace. The pip OpenCV wheel is built
 WITHOUT CUDA, so on a GPU box the face models run on onnxruntime instead of
 `cv2.FaceDetectorYN` / `cv2.FaceRecognizerSF` (native/recognizer.py ports
 YuNet's decode and feeds SFace OpenCV's exact blob; measured identical). On a
@@ -227,9 +226,7 @@ def make_session(
 def report(
     detector: Any,
     *,
-    plate_ocr_device: Optional[str] = None,
     face_device: Optional[str] = None,
-    plate_detector_device: Optional[str] = None,
 ) -> dict[str, Any]:
     """Per-stage device report for /api/recognition/status.
 
@@ -239,8 +236,7 @@ def report(
     point of passing them rather than recomputing. `face_device` is the face
     recognizer's ("cuda" when YuNet and SFace run on onnxruntime's CUDA
     provider; "cpu" when they run on OpenCV); None when the face models are not
-    loaded. `plate_detector_device` is None when plates are found by the
-    classical localizer.
+    loaded.
     """
     accel = resolve(detector)
     device, kind = detector_device(detector)
@@ -254,20 +250,8 @@ def report(
             "and the GPU path (onnxruntime) is only used when the detector is on "
             "CUDA: " + accel.reason
         )
-    if plate_detector_device:
-        localize = {"device": plate_detector_device,
-                    "why": "the learned plate detector, " + accel.reason}
-    else:
-        localize = {"device": "cpu",
-                    "why": "classical CV (Sobel + morphology), not a model — the "
-                           "plate detector is not loaded"}
     return {
         "follows_detector": {"device": device or "unknown", "kind": kind or "unknown"},
         "face_detect": {"device": face_dev, "why": face_why},
         "face_embed": {"device": face_dev, "why": face_why},
-        "plate_localize": localize,
-        "plate_ocr": {
-            "device": plate_ocr_device or accel.device,
-            "why": accel.reason,
-        },
     }

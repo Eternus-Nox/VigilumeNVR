@@ -81,9 +81,8 @@ def after(label: str = "person", camera: str = "front") -> dict:
     return {"label": label, "camera": camera, "id": "native.1"}
 
 
-KNOWN = {"kind": "face", "name": "Adam", "profile_id": 7, "plate": "", "score": 0.9}
-UNKNOWN = {"kind": "face", "name": "", "profile_id": None, "plate": "", "score": 0.2}
-PLATE = {"kind": "plate", "name": "", "profile_id": None, "plate": "7ABC123", "score": 0.0}
+KNOWN = {"kind": "face", "name": "Adam", "profile_id": 7, "score": 0.9}
+UNKNOWN = {"kind": "face", "name": "", "profile_id": None, "score": 0.2}
 
 
 def gate_checks() -> None:
@@ -116,7 +115,14 @@ def gate_checks() -> None:
     send, _ = p._recognition_gate(after(label="dog"), state(age_s=0.0))
     check(send is True, "a dog alert is not held for a face that will never come")
     send, _ = p._recognition_gate(after(label="car"), state(age_s=0.0))
-    check(send is False, "...but a car IS held, because plates are read from it")
+    check(send is True,
+          "...and neither is a car: plates are no longer read, so there is "
+          "nothing to wait for")
+    pv = pipeline_with(enabled=True, notify_grace_seconds=10, face_on_vehicles=True)
+    send, _ = pv._recognition_gate(after(label="car"), state(age_s=0.0))
+    check(send is False,
+          "...unless faces are read through windscreens, when a car IS held "
+          "for the driver's face")
 
     print("\nmode 'all' — a known subject is NAMED")
     p = pipeline_with(enabled=True, notify_mode="all")
@@ -185,18 +191,6 @@ def note_checks() -> None:
     check(p._spawned == [],
           "...but does not re-notify — that would be a second alert for one event")
 
-    p._spawned.clear()
-    st3 = state()
-    st3["last_after"] = after(label="car")
-    p._active["native.3"] = st3
-    p.note_recognition("native.3", "plate", plate="7ABC123")
-    check(st3["recognitions"][0]["plate"] == "7ABC123",
-          "an UNMATCHED plate is still recorded — it belongs in the alert even "
-          "when the vehicle is not enrolled")
-    check(st3["recognitions"][0]["known"] is False
-          if "known" in st3["recognitions"][0] else True,
-          "...and is not claimed as a known vehicle")
-
 
 def events_join_checks() -> None:
     """Recognition must never be able to take down the events list.
@@ -252,10 +246,9 @@ class FakeMqtt:
     def __init__(self):
         self.published = []
 
-    async def publish_recognition(self, camera, *, kind, name, plate, known, score=0.0):
+    async def publish_recognition(self, camera, *, kind, name, known, score=0.0):
         self.published.append(
-            {"camera": camera, "kind": kind, "name": name,
-             "plate": plate, "known": known, "score": score}
+            {"camera": camera, "kind": kind, "name": name, "known": known, "score": score}
         )
 
 
@@ -332,8 +325,8 @@ def wording_checks() -> None:
     ):
         check(place_phrase(friendly) == want, f"{friendly!r} -> {want!r} (got {place_phrase(friendly)!r})")
     check(named_title(["Adam"], "Front Door") == "Adam is at the front door", "one person: 'is'")
-    check(named_title(["the car"], "Driveway") == "The car is in the driveway",
-          "a vehicle profile's own name leads, capitalised")
+    check(named_title(["the gardener"], "Driveway") == "The gardener is in the driveway",
+          "a profile name in lower case leads, capitalised")
     check(named_title(["Adam", "Sarah", "adam"], "Back Yard", still=True)
           == "Adam and Sarah are still in the back yard",
           "two names: 'are', duplicates dropped, 'still' for a dwell")
@@ -383,11 +376,13 @@ def named_alert_checks() -> None:
 
     p = named_pipeline()
     live(p, "native.b", "drive", "car", age_s=0.0)
-    p.note_recognition("native.b", "plate", name="the car", profile_id=3, plate="7ABC123")
-    check([s["title"] for s in p.sent] == ["The car is in the driveway"],
-          f"an enrolled vehicle is named by its profile (got {[s['title'] for s in p.sent]})")
-    check(p.sent and p.sent[0]["body"] == "Recognized the car — plate 7ABC123",
-          "...with the plate in the body")
+    check([s["title"] for s in p.sent] == [],
+          "a car does not alert from live() alone — the alert path runs on update")
+    p._run(p._maybe_notify_object("native.b", p._active["native.b"]["last_after"],
+                                  p._active["native.b"]))
+    check(len(p.sent) == 1 and "Adam" not in p.sent[0]["title"],
+          f"a car alerts at once, unnamed — no plate is waited for "
+          f"(got {[s['title'] for s in p.sent]})")
 
     print("\na name matched AFTER the alert went out is put on that alert")
     p = named_pipeline()
@@ -413,8 +408,8 @@ def named_alert_checks() -> None:
     p._run(p._maybe_notify_object("native.d", st["last_after"], st))
     p.note_recognition("native.d", "face", name="Adam", profile_id=7, alert_mode="mute")
     check(len(p.sent) == 1, "a MUTED profile is not named on the alert")
-    p.note_recognition("native.d", "plate", plate="7ABC123")
-    check(len(p.sent) == 1, "an unmatched plate is not a name")
+    p.note_recognition("native.d", "face", name="", profile_id=None, score=0.2)
+    check(len(p.sent) == 1, "an unmatched face is not a name")
 
     p = named_pipeline(notify_mode="unknown_only")
     st = live(p, "native.e", "front_door", "person", age_s=5.0)

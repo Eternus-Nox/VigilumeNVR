@@ -1,8 +1,8 @@
-"""Recognition core — the gallery, the matcher, and multi-frame plate voting.
+"""Recognition core — the gallery and the matcher.
 
 NO MODEL RUNS HERE, deliberately, for the same reason bestshot.py runs none:
-everything in this module is arithmetic over vectors and strings that some
-model produced elsewhere. That keeps the part of recognition most likely to be
+everything in this module is arithmetic over vectors that some model
+produced elsewhere. That keeps the part of recognition most likely to be
 WRONG — thresholds, tie-breaks, how several disagreeing reads are reconciled —
 testable against fixtures, with no weights downloaded and no GPU.
 
@@ -11,7 +11,9 @@ WHAT A PROFILE IS
 A profile is a named identity with several enrolled SAMPLES:
 
     person  -> N face embeddings, each a unit vector from one enrolled crop
-    vehicle -> N plate strings
+
+(Vehicle profiles enrolled by plate are still in older databases; licence
+plate reading was removed, so they are never matched and the API hides them.)
 
 Recognition is a nearest-neighbour lookup, not a classifier. This matters, and
 it is the thing most people expect to be otherwise: there is no training step,
@@ -52,7 +54,6 @@ UNKNOWN, which is both true and actionable.
 from __future__ import annotations
 
 import logging
-import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional, Sequence
@@ -93,33 +94,6 @@ SUGGEST_FACE_COSINE = 0.52
 #: becomes a page of thumbnails nobody looks at properly, which is the failure
 #: mode that gets a stranger accepted into a profile.
 SUGGEST_LIMIT = 24
-
-#: Plate strings are compared after normalization; this is the edit distance
-#: within which two normalized plates are called the same vehicle. 1 covers the
-#: single-character misread that survives voting; 2 starts matching genuinely
-#: different plates in a small gallery.
-PLATE_MAX_DISTANCE = 1
-
-#: Characters an OCR confuses by glyph shape. Folded ONLY for comparison — the
-#: read is always stored raw, because showing an operator a plate we quietly
-#: rewrote is how you lose their trust in the whole feature.
-_PLATE_CONFUSIONS = str.maketrans({"O": "0", "I": "1", "Q": "0", "S": "5", "Z": "2", "B": "8"})
-
-_PLATE_STRIP = re.compile(r"[^A-Z0-9]")
-
-#: United States plates: letter O, I and Q are left off standard-issue serials
-#: in most states precisely because they read as 0 and 1, and US plate readers
-#: conventionally treat them as those digits. Unlike `_PLATE_CONFUSIONS` this
-#: IS applied to the stored read (in "us" region mode only), because it is not
-#: a guess about a smudged glyph — it is the plate's own alphabet. Measured on
-#: 222 real US plates (OpenALPR's benchmark): exact reads 89% -> 93%, and wrong
-#: plates confidently stored 14 -> 9, mostly O/0 splits between the readers
-#: that made the vote look unsure or pick the wrong one.
-_US_PLATE_ALPHABET = str.maketrans({"O": "0", "I": "1", "Q": "0"})
-
-#: Region modes for `recognition.plate_region`.
-PLATE_REGIONS = ("us", "any")
-
 
 # ---------------------------------------------------------------------------
 # Embedding plumbing
@@ -174,158 +148,6 @@ def cosine(a: np.ndarray, b: np.ndarray) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Plate strings
-# ---------------------------------------------------------------------------
-
-
-def normalize_plate(text: str) -> str:
-    """Uppercase, strip non-alphanumerics. The form stored and indexed."""
-    return _PLATE_STRIP.sub("", (text or "").upper())
-
-
-def regional_plate(text: str, region: str) -> str:
-    """Normalize a read for the plates this box actually sees.
-
-    "us" maps O->0, I->1, Q->0 (see _US_PLATE_ALPHABET); anything else only
-    normalizes. Unknown regions read as "any" — never as a mapping nobody chose.
-    """
-    plate = normalize_plate(text)
-    return plate.translate(_US_PLATE_ALPHABET) if region == "us" else plate
-
-
-def fold_plate(text: str) -> str:
-    """Normalized AND glyph-folded, for comparison only (see _PLATE_CONFUSIONS)."""
-    return normalize_plate(text).translate(_PLATE_CONFUSIONS)
-
-
-def plate_distance(a: str, b: str) -> int:
-    """Levenshtein distance between two folded plates.
-
-    Full edit distance rather than positional mismatch count, because the
-    common OCR errors are an inserted or dropped character as often as a
-    substituted one, and a positional compare calls "ABC123" vs "AB C123" a
-    total mismatch.
-    """
-    s, t = fold_plate(a), fold_plate(b)
-    if s == t:
-        return 0
-    if not s:
-        return len(t)
-    if not t:
-        return len(s)
-    prev = list(range(len(t) + 1))
-    for i, cs in enumerate(s, 1):
-        cur = [i]
-        for j, ct in enumerate(t, 1):
-            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (cs != ct)))
-        prev = cur
-    return prev[-1]
-
-
-@dataclass(frozen=True)
-class PlateRead:
-    """One OCR pass over one crop."""
-
-    text: str
-    #: The OCR's own confidence in this string, 0..1.
-    confidence: float = 1.0
-    #: bestshot.Quality.total for the crop it was read from, 0..1.
-    quality: float = 1.0
-    #: The reader's confidence in EACH character, when it reported them. Lets
-    #: the vote weigh a doubtful character by its own doubt rather than by the
-    #: read's average — two readers that disagree on one letter are usually
-    #: sure of every other one, and differ in how sure they are of that one.
-    char_conf: tuple[float, ...] = ()
-
-    @property
-    def weight(self) -> float:
-        """How much this read counts in a vote.
-
-        Confidence and quality multiply because they fail independently: a
-        confident read of a smeared crop and a hesitant read of a sharp one are
-        both weak evidence, and neither should outvote a read that is good on
-        both axes.
-        """
-        return max(0.0, float(self.confidence)) * max(0.0, float(self.quality))
-
-
-@dataclass(frozen=True)
-class PlateVote:
-    text: str
-    confidence: float
-    reads: int
-    #: Per-position agreement, so the UI can grey out the character the frames
-    #: disagreed on instead of presenting a uniform-looking string.
-    agreement: tuple[float, ...]
-
-
-def vote_plate(reads: Sequence[PlateRead]) -> Optional[PlateVote]:
-    """Reconcile several OCR reads of the same plate into one answer.
-
-    THIS IS THE "several small models looking for the same indicator" idea,
-    done where it actually pays. Running N different OCR networks over one
-    frame mostly buys N correlated errors — they all fail on the same motion
-    blur. Running ONE OCR over N frames of the same plate, taken from
-    different instants by bestshot.BestShotBuffer, gives genuinely independent
-    errors, and a per-character weighted vote then recovers the true string
-    from reads where no single frame got it entirely right.
-
-    Length is decided first, by weight, because voting per position across
-    strings of different lengths aligns the wrong characters. Reads of the
-    losing length are discarded rather than padded: a 6-character read of a
-    7-character plate has one character missing SOMEWHERE, and guessing where
-    corrupts every position after it.
-    """
-    usable = [r for r in reads if normalize_plate(r.text) and r.weight > 0]
-    if not usable:
-        return None
-
-    by_length: dict[int, float] = defaultdict(float)
-    for r in usable:
-        # A read's say in the LENGTH is only as strong as its weakest
-        # character: a reader that tacks a doubtful extra character on the end
-        # (seen: 7ABC1233 with the last '3' at 0.60) must not tie a read that
-        # is sure of every character it gave.
-        doubt = min(r.char_conf) if r.char_conf else 1.0
-        by_length[len(normalize_plate(r.text))] += r.weight * max(0.0, doubt)
-    best_len = max(by_length, key=lambda k: (by_length[k], k))
-
-    cohort = [r for r in usable if len(normalize_plate(r.text)) == best_len]
-    total_weight = sum(r.weight for r in cohort)
-    if total_weight <= 0:
-        return None
-
-    chars: list[str] = []
-    agreement: list[float] = []
-    for pos in range(best_len):
-        tally: dict[str, float] = defaultdict(float)
-        for r in cohort:
-            text = normalize_plate(r.text)
-            w = r.weight
-            if len(r.char_conf) == len(text):
-                w *= max(0.0, float(r.char_conf[pos]))
-            tally[text[pos]] += w
-        position_total = sum(tally.values())
-        if position_total <= 0:
-            return None
-        winner = max(tally, key=lambda c: (tally[c], c))
-        chars.append(winner)
-        agreement.append(tally[winner] / position_total)
-
-    text = "".join(chars)
-    # Overall confidence is the WEAKEST position, not the mean: a plate with
-    # one coin-flip character is one wrong character, and averaging that away
-    # would report 0.9 on a string we cannot actually stand behind.
-    confidence = min(agreement) if agreement else 0.0
-    return PlateVote(
-        text=text,
-        confidence=float(confidence),
-        reads=len(cohort),
-        agreement=tuple(agreement),
-    )
-
-
-# ---------------------------------------------------------------------------
 # The gallery
 # ---------------------------------------------------------------------------
 
@@ -335,7 +157,6 @@ class Sample:
     sample_id: int
     profile_id: int
     vector: Optional[np.ndarray] = None
-    plate: str = ""
 
 
 #: What a sighting of one profile does to notifications. Closed on purpose:
@@ -449,23 +270,19 @@ class Gallery:
             prof = by_id.get(int(r["profile_id"]))
             if prof is None:
                 continue
-            plate = normalize_plate(str(r.get("plate") or ""))
-            vector = None
-            if r.get("embedding") is not None:
-                if str(r.get("model_key") or "") != model_key:
-                    skipped += 1
-                    continue
-                vector = from_blob(r["embedding"], int(r.get("dim") or 0))
-                if vector is None:
-                    continue
-            if vector is None and not plate:
+            if r.get("embedding") is None:
+                continue  # a plate sample from before plates were removed
+            if str(r.get("model_key") or "") != model_key:
+                skipped += 1
+                continue
+            vector = from_blob(r["embedding"], int(r.get("dim") or 0))
+            if vector is None:
                 continue
             prof.samples.append(
                 Sample(
                     sample_id=int(r["id"]),
                     profile_id=prof.profile_id,
                     vector=vector,
-                    plate=plate,
                 )
             )
         if skipped:
@@ -513,33 +330,6 @@ class Gallery:
                 f"too close to call ({top.name} vs {scored[1][1].name})",
             )
         return Match(top.profile_id, top.name, top_score, margin, "matched", top.alert_mode)
-
-    def match_plate(self, text: str) -> Match:
-        """Nearest enrolled vehicle by folded edit distance."""
-        plate = normalize_plate(text)
-        if not plate:
-            return Match(None, "", 0.0, 0.0, "empty read")
-
-        best: Optional[tuple[int, Profile]] = None
-        for prof in self._profiles:
-            if prof.kind != "vehicle":
-                continue
-            for s in prof.samples:
-                if not s.plate:
-                    continue
-                d = plate_distance(plate, s.plate)
-                if best is None or d < best[0]:
-                    best = (d, prof)
-        if best is None:
-            return Match(None, "", 0.0, 0.0, "no enrolled plates")
-
-        distance, prof = best
-        # Score reported as a similarity so callers can treat faces and plates
-        # uniformly: exact = 1.0, one edit on a 7-char plate ~= 0.86.
-        score = max(0.0, 1.0 - distance / max(len(plate), 1))
-        if distance > PLATE_MAX_DISTANCE:
-            return Match(None, "", score, 0.0, f"nearest is {distance} edits away")
-        return Match(prof.profile_id, prof.name, score, 0.0, "matched", prof.alert_mode)
 
     # -- introspection --------------------------------------------------
 

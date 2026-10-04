@@ -28,8 +28,7 @@ import SwiftUI
 /// completely. That is why this is one confirming tap and not a warning.
 struct CandidateReviewSheet: View {
     let candidate: RecognitionCandidate
-    /// Already filtered to the kind that matches this candidate — a face
-    /// cannot join a vehicle.
+    /// The people this face can be added to.
     let profiles: [RecognitionProfile]
     var onEnroll: (RecognitionProfile) async -> Void
     var onDelete: () async -> Void
@@ -38,8 +37,6 @@ struct CandidateReviewSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var working = false
-
-    private var isFace: Bool { candidate.kind == "face" }
 
     var body: some View {
         NavigationStack {
@@ -53,7 +50,7 @@ struct CandidateReviewSheet: View {
                 .padding(16)
             }
             .background(Theme.bg)
-            .navigationTitle(isFace ? "Who is this?" : "Which vehicle?")
+            .navigationTitle("Who is this?")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -169,7 +166,7 @@ struct CandidateReviewSheet: View {
             .clipShape(RoundedRectangle(cornerRadius: 10))
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(isFace ? "The part that gets enrolled" : cropCaption)
+                Text("The part that gets enrolled")
                     .font(.footnote)
                     .foregroundStyle(Theme.textPrimary)
                 QualityBar(quality: candidate.quality)
@@ -177,10 +174,6 @@ struct CandidateReviewSheet: View {
             }
             Spacer(minLength: 0)
         }
-    }
-
-    private var cropCaption: String {
-        candidate.plate.isEmpty ? "No plate text was read" : "Read as \(candidate.plate)"
     }
 
     // MARK: Facts
@@ -216,14 +209,12 @@ struct CandidateReviewSheet: View {
 
     private var addTo: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(isFace ? "Add to a person" : "Add to a vehicle")
+            Text("Add to a person")
                 .font(.headline)
                 .foregroundStyle(Theme.textPrimary)
 
             if profiles.isEmpty {
-                Text(isFace
-                     ? "No people yet — add one on the previous screen first."
-                     : "No vehicles yet — add one on the previous screen first.")
+                Text("No people yet — add one on the previous screen first.")
                     .font(.footnote)
                     .foregroundStyle(Theme.textSecondary)
             } else {

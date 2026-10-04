@@ -334,7 +334,7 @@ WSDL tree as package data; imported lazily so the app boots without a camera rea
 ### Main-stream encode profiles (`settings.streams.main`, `cameras.main_stream`, schema v30)
 
 The main stream is what the recorder stores, what recorded bursts decode for
-face and plate reads, what full-resolution snapshots are cut from, and what
+face reads, what full-resolution snapshots are cut from, and what
 fullscreen live view climbs to. Vigilume can now set it on the camera itself
 (`amcrest/encode.py`, `amcrest/stream_profiles.py`). A profile is
 `{resolution, codec, keyframe_s, bitrate_kbps}`; `"keep"` / null leaves that
@@ -343,8 +343,8 @@ changes until someone asks.
 
 * **All cameras + per-camera override.** `settings.streams.main` is the
   profile every camera follows; `cameras.main_stream` (JSON, NULL = follow)
-  pins one camera's own — the plate camera at the end of the drive keeps 4K
-  while the rest run 1080p. Same inherit contract as `dwell_seconds`.
+  pins one camera's own — the doorbell camera that has to recognise faces
+  from a distance keeps 4K while the rest run 1080p. Same inherit contract as `dwell_seconds`.
 * **Resolution is a ceiling** (`720p`/`1080p`/`1440p`/`4k`, or `max`): each
   camera's largest offered size at or under it, from
   `encode.cgi?action=getConfigCaps`, keeping the current picture shape when a
@@ -1246,7 +1246,22 @@ Settings → System → **What's running** shows all of it in one card.
 WebSocket:
 - `WS /api/ws?token=` — server pushes `{type:"event_new"|"event_update"|"event_end"|"doorbell", event:{...}}`, `{type:"camera_status", ...}`, and `{type:"model_status", key, tier, state, progress_pct, active, loaded}` for live UI updates.
 
-### Recognition — faces & plates (`/api/recognition`, schema v27)
+### Recognition — faces (`/api/recognition`, schema v27)
+
+**Licence plate reading was removed.** The plate pipeline (`native/plates.py`,
+`native/platepass.py`), its settings (`recognition.plate_hires`,
+`plate_detector`, `plate_region`, `plate_replay` — stripped from a stored
+settings document on load), the `POST /api/recognition/profiles/{id}/plate`
+route and vehicle profiles are gone. The database is left as it was: the
+`plate` columns, `cameras.plate_zones` / `plate_recognition`, and any vehicle
+profiles, plate samples, plate candidates and plate rows on events stay in
+their tables, unread. The API hides them — profiles list `kind = 'person'`
+only, candidates `kind = 'face'` only, event `recognitions[]` faces only — and
+`POST /api/recognition/profiles` with `kind: "vehicle"` is a 422 that says why.
+A `plate` key is still sent (always `""`) on samples, candidates and
+recognitions, because the shipped iOS app decodes it as required; newer
+clients ignore it. A car alert is no longer held waiting for a recognition
+unless `recognition.face_on_vehicles` is on.
 
 **ADMIN-ONLY, INCLUDING THE READS.** This is the one router that departs from
 "a viewer may read, an admin may write", and the reason is content rather than
@@ -1265,13 +1280,12 @@ stored per sample and mismatched samples are dropped from the gallery rather tha
 scored.
 
 - `GET /api/recognition/status` → `{model_key, ready, profiles:{kind:n}, candidates:{kind:n}, stale_samples, defaults:{face_threshold, min_margin}}`. `stale_samples` > 0 means some profiles have silently stopped matching after a model change and need re-enrolling.
-- `GET /api/recognition/profiles[?kind=person|vehicle]` → profiles with `sample_count` and `usable_sample_count` (samples the ACTIVE model can still compare).
+- `GET /api/recognition/profiles[?kind=person]` → profiles with `sample_count` and `usable_sample_count` (samples the ACTIVE model can still compare).
 - `POST /api/recognition/profiles` `{kind, name, notes?, enabled?, threshold?, alert_mode?}` → 201. Duplicate `(kind, name)` → 409. `threshold` outside 0..1 → 422 (refused, not clamped).
 - `GET /api/recognition/profiles/{id}` → profile + its `samples[]`.
 - `PUT /api/recognition/profiles/{id}` — partial. An **omitted** `threshold` means "leave it alone"; an explicit **null** clears the per-profile override back to the server default. An empty patch → 400.
 - `DELETE /api/recognition/profiles/{id}` → 204, and deletes its samples AND their reference images from disk.
-- `POST /api/recognition/profiles/{id}/plate` `{plate}` → 201. Vehicle profiles only (person → 400); the plate is normalized (uppercase, non-alphanumerics stripped).
-- `POST /api/recognition/profiles/{id}/enroll` `{candidate_ids:[...]}` → `{enrolled, sample_ids}`. **Atomic** across the batch, kind-checked (a face candidate into a vehicle profile → 400), and it **MOVES** each crop from the rolling candidate directory into the durable profile directory — copying would leave enrolled references in the directory the retention purge walks.
+- `POST /api/recognition/profiles/{id}/enroll` `{candidate_ids:[...]}` → `{enrolled, sample_ids}`. **Atomic** across the batch, kind-checked (a leftover plate candidate → 400), and it **MOVES** each crop from the rolling candidate directory into the durable profile directory — copying would leave enrolled references in the directory the retention purge walks.
 - `GET /api/recognition/profiles/{id}/similar[?limit=]` → `{profile_id, threshold, candidates[]}` — unmatched crops that look like this profile, each with a `similarity`, best first. **A read: it applies nothing.** `POST .../enroll` also returns `similar[]` + `similar_threshold`, so the offer lands at the moment the operator is thinking about that person.
 - `DELETE /api/recognition/samples/{id}` → 204 (+ unlinks its image).
 
@@ -1333,15 +1347,16 @@ does for video) fails wherever the LAN address resolves to something else — a
 same-numbered subnet at a café answers the reachability probe — and the symptom
 is rows that load beside images that never do.
 
-Camera fields `face_zones` / `plate_zones` (normalized polygons, same shape as
-`include_zones`) mark where a face or plate is actually legible. Unlike
-`include_zones` they do **not** filter detection; `[]` means the whole frame.
+Camera field `face_zones` (normalized polygons, same shape as
+`include_zones`) marks where a face is actually legible. Unlike
+`include_zones` it does **not** filter detection; `[]` means the whole frame.
+(`plate_zones` is accepted from an older client and ignored.)
 
-#### Which cameras run a pass — and the object each pass needs
+#### Which cameras run the face pass — and the object it needs
 
-`PUT /api/cameras/{name}/recognition` `{face?, plate?}` → `{name,
-face_recognition, plate_recognition, added_objects[], detect_objects[]}`.
-Omitted = leave alone; an empty body → 400. Both columns default to **1**
+`PUT /api/cameras/{name}/recognition` `{face?}` → `{name, face_recognition,
+added_objects[], detect_objects[]}`. Omitted = leave alone; an empty body →
+400 (a `plate` key from an older client is ignored). The column defaults to **1**
 (schema v24), so adding them changed nothing on an existing box: the operator
 turns cameras OFF rather than finding recognition silently stopped.
 
@@ -1359,25 +1374,21 @@ else (`obs = [o for o in observations if o.label in wanted]`), then narrows to
 objects confirmed over `MIN_HITS` frames, and *that* is what reaches the
 passes. So the three gates are, in order:
 
-1. a usable label is in the camera's `detect_objects` — `person` for faces
-   (plus the vehicle labels when `recognition.face_on_vehicles` is on), any of
-   car/truck/bus/motorcycle/motorbike/van for plates;
-2. the object is **confirmed** — a plate read off one-frame flicker belongs to
-   no vehicle;
+1. a usable label is in the camera's `detect_objects` — `person` (plus the
+   vehicle labels when `recognition.face_on_vehicles` is on);
+2. the object is **confirmed** — a face read off one-frame flicker belongs to
+   nobody;
 3. the per-camera switch is on.
 
 Gates 1 and 3 are independent, and a camera failing only gate 1 produces no
 error and no log line: the pass correctly concludes there was nothing to look
-at, which is indistinguishable from "no cars came past". Since nobody enables
-plate reading and means "but ignore cars", **turning a switch ON also adds the
-prerequisite** (`db.set_camera_recognition`): `person` for faces, `car` for
-plates. One label per pass, not the pass's whole accepted set — six new object
-classes, each raising its own events and notifications, is a far bigger change
-than the box that was ticked.
+at, which is indistinguishable from "nobody came past". Since nobody enables
+face recognition and means "but ignore people", **turning the switch ON also
+adds the prerequisite** (`db.set_camera_recognition`): `person`.
 
 It is **additive and one-way**. Turning a switch back OFF never removes a
 label: detection is its own feature, configured for events, notifications and
-recording, and silently dropping `car` from a driveway camera would break
+recording, and silently dropping `person` from a porch camera would break
 something the operator never touched. An empty `detect_objects` ("record only,
 detect nothing") is treated the same way — two explicit choices conflict there
 and the newer one wins. Whatever was added comes back as `added_objects` so
@@ -1396,20 +1407,15 @@ outright rather than being carried over the line by a high sharpness term.
 Retained shots must be `MIN_GAP_S` apart, so the buffer holds several distinct
 moments instead of five copies of one stride.
 
-#### "Add the ones that look like this" — suggested for faces, automatic for plates
+#### "Add the ones that look like this" — suggested, never applied
 
 Enrolling one shot should not mean finding that person's every other sighting by
 eye in a list sorted by legibility. Nobody does that, so profiles stay thin, and
 thin profiles are the ones that miss. So an enrollment offers the crops that
 resemble it.
 
-The two kinds are **not equally decidable**, and treating them alike would be a
-real bug:
-
-| | question | answer | so |
-|---|---|---|---|
-| plate | is this the same plate? | EXACT — normalized + glyph-folded, within `PLATE_MAX_DISTANCE` | absorbed automatically |
-| face | is this the same face? | a SCORE | offered, never applied |
+"Is this the same face?" is a SCORE, so a suggestion is offered and never
+applied.
 
 A wrong **match** mislabels one event and is corrected by looking at that event.
 A wrong **enrollment** corrupts the gallery: that profile matches a stranger from
@@ -1424,16 +1430,6 @@ means exactly "this would now be recognized as Adam". A centroid would be
 measurably worse and in the wrong direction: averaging unit vectors from two
 poses lands near neither (0.75 vs 0.49 on the `similar_smoke` fixture), so it
 would miss the very shots this exists to find.
-
-Absorbing a plate **deletes** the duplicate candidate rather than enrolling it. A
-second copy of an exact string matches exactly what one copy matches, so it is
-noise rather than evidence — unlike a face, where each sample is a different
-pose in a continuous space and more genuinely helps.
-
-Multi-frame plate voting (`native/recognition.py:vote_plate`) reconciles several
-OCR reads of one plate by weighted per-character vote, deciding string LENGTH
-first (aligning a 6-char read against a 7-char plate corrupts every position
-after the gap). Overall confidence is the weakest character, not the mean.
 
 #### Face pipeline (`native/recognizer.py`, `native/facepass.py`)
 
@@ -1503,9 +1499,9 @@ there is one hardware decision on the box rather than two that can disagree:
 
 | detector | recognition |
 |---|---|
-| CUDA | CUDA for every model: face detect + embed (onnxruntime), plate detector, both plate readers |
+| CUDA | CUDA for face detect + embed (onnxruntime) |
 | CPU | CPU |
-| Coral | **CPU** — an Edge TPU runs int8 graphs compiled for it, and YuNet / SFace / the plate OCR are float ONNX with no Edge TPU build |
+| Coral | **CPU** — an Edge TPU runs int8 graphs compiled for it, and YuNet / SFace are float ONNX with no Edge TPU build |
 
 It follows the RESOLVED device, never `settings.detection.backend`. Those differ
 exactly when it matters: `backend="gpu"` on a box whose CUDA did not come up
@@ -1516,10 +1512,10 @@ maintenance tick, where the exception costs the whole feature.
 session cannot be created (missing cuDNN, driver mismatch, a card D-FINE has
 filled), and reports what ORT actually **bound** rather than what was requested.
 
-**Boot order.** The detector warms up in the background, and the face and plate
-passes load on their first maintenance tick — usually before the detector has
-a device. They used to follow "unknown" onto the CPU and stay there for the
-whole run, so on a GPU box the plate models could sit on the CPU from boot.
+**Boot order.** The detector warms up in the background, and the face pass
+loads on its first maintenance tick — usually before the detector has a
+device. It used to follow "unknown" onto the CPU and stay there for the whole
+run, so on a GPU box the face models could sit on the CPU from boot.
 Now a load first waits (`accel.settle`, at most `SETTLE_TIMEOUT_S` = 60 s) for
 the detector to report a device, and each tick checks `stale_device()`: if the
 detector has resolved somewhere other than where the models were built (it
@@ -1534,8 +1530,8 @@ is simply "GPU when there is one". An onnxruntime session that could only bind
 the CPU is dropped back to OpenCV. `alignCrop` is geometry and stays on the
 CPU. `GET /api/recognition/status` reports each stage's device as the live
 session bound it — `devices.face_detect` / `face_embed` from the recognizer
-(`face.runtime`, `face.device` in the face status too), `devices.plate_localize`
-from the plate detector's own session — with the reason, and `timings` per
+(`face.runtime`, `face.device` in the face status too) — with the reason, and
+`timings` per
 stage as a rolling mean/p95/max measured on that box (a stage that never ran is
 ABSENT, not zero).
 
@@ -1550,12 +1546,6 @@ Measured on CPU (the GPU path is the same graphs):
 | YuNet face detect | OpenCV DNN | ~4 ms on a person crop, ~9 ms on 512x512 |
 | `alignCrop` | pure geometry | <0.1 ms |
 | SFace embed 112x112 | OpenCV DNN | ~9-13 ms, **once per track** |
-| plate detector 384 | onnxruntime | ~18-39 ms |
-| plate OCR 128x64 | onnxruntime | ~2.9 ms per reader |
-
-The 640-px plate detector from the same publisher was measured against the
-384 on the 222 US photos and is NOT used: 215 vs 218 found on vehicle crops,
-more false boxes, twice the CPU time.
 
 #### Why a face may not reach "unknown faces"
 
@@ -1581,48 +1571,42 @@ how `face_on_vehicles` is verified rather than assumed — see below.
 pass would accept a car and no car was ever offered. The filter lives in ONE
 place — `FacePass.labels`, driven by the setting — and the engine asks.
 
-#### Recorded bursts: looking back from before detection (`recognition.plate_replay`, `recognition.face_replay`)
+#### Recorded bursts: looking back from before detection (`recognition.face_replay`)
 
 Detection runs on the substream at a few frames a second and confirms a track
 over three frames; a snapshot is asked for after that and lands a few hundred
-ms later. A car crossing the view in 1.5 s, or someone walking briskly past,
-has often turned or gone by the first look — plates were read when a car
-backed slowly out of the driveway and missed when one drove in. The recorder
+ms later. Someone walking briskly past has often turned or gone by the first
+look. The recorder
 has had the camera's full-resolution stream on disk the whole time, including
 the seconds BEFORE anything was detected.
 
-So (`native/burst.py`) both passes read the recording in bursts while the
-object is still in view: the first 1.0 s after a track is first seen, from
+So (`native/burst.py`) the face pass reads the recording in bursts while the
+person is still in view: the first 1.0 s after a track is first seen, from
 **2.0 s before that first sighting** (`PRE_ROLL_S`) up to now minus
 `REC_LAG_S` (0.8 s — what is safely on disk); then again whenever 2.0 s more is
 available (`BURST_EVERY_S`; every burst also decodes from the keyframe before
 its window, up to a GOP thrown away, so fewer longer bursts cost less); then a final one 1.8 s after the last sighting, to 0.7 s past it.
 Each burst decodes at 10 fps (`BURST_FPS`), cropped to where the object was
 (`native/trackpath.py`: interpolated between detect frames, extrapolated up to
-1 s before the first sighting along its motion), and every frame is read:
-
-* plates — each frame cropped around the vehicle at THAT moment (±0.35 s for
-  clock slop), the plate detector run on the crop, a plate accepted only if
-  its centre is on that vehicle, both readers into the vote. Per-frame crops
-  rather than one crop of the whole path: the detector letterboxes to 384 px,
-  and a crossing car's path spans most of the frame;
-* faces — each frame cropped around the person, YuNet on the crop, a face
-  accepted only if its centre is in the upper 65% of THEIR box at that moment,
-  aligned and scored into the track's best-shot buffer; identification from the
-  best shot as before.
+1 s before the first sighting along its motion), and every frame is read: each
+frame cropped around the person at THAT moment (±0.35 s for clock slop), YuNet
+on the crop, a face accepted only if its centre is in the upper 65% of THEIR
+box at that moment, aligned and scored into the track's best-shot buffer;
+identification from the best shot as before.
 
 At most 4 bursts per track (`MAX_BURSTS`, the final included), none once
-settled (plates: ≥3 reads at ≥0.9; faces: identified from a shot of quality
-≥0.7), one decode at a time across cameras, and a burst that finds no recording
-at all stops further ones for that track. A plate's after-the-track read now covers only what the
-bursts did not. The point is TIMING: the answer is in hand while the object is
-still in view, so the alert can carry the name or plate instead of it landing
-a minute after the car has gone. Status: `plates.cameras.{name}.early_reads`
-(reads from frames before the first sighting) and `face.bursts`
-`{bursts, frames, faces, early_faces}`, `face.bursts_enabled`.
-`tests/burst_smoke.py`: a plate legible only before the car is detected (read
-from frames before the first sighting) and a face turned to the camera only before the person is
-detected are both read, during the track.
+settled (identified from a shot of quality ≥0.7), one decode at a time across
+cameras, and a burst that finds no recording at all stops further ones for
+that track. The point is TIMING: the answer is in hand while the person is
+still in view, so the alert can carry the name instead of it landing a minute
+after they have gone. Status: `face.bursts` `{bursts, frames, faces,
+early_faces}` (`early_faces`: from frames before the first sighting),
+`face.bursts_enabled`, and the recording reader's own `face.replay`
+`{available, gpu_decode, decodes: {cuda, cpu}, requests, shared}`.
+`tests/burst_smoke.py`: a face turned to the camera only before the person is
+detected is read, during the track. The decode tries the GPU first (NVDEC) and
+falls back to the CPU per decode; after 3 GPU decodes in a row that produce
+nothing it stops trying the GPU.
 
 **Faces are still decided from the single best shot.** Combining the best three
 was measured on degraded copies of real faces: averaging raised the match rate
@@ -1634,7 +1618,7 @@ cost correct names (91% → 83%) without removing a wrong one.
 cuts a segment when the next keyframe arrives, so the previous segment's last
 write (mtime) is the new one's start to the millisecond — measured on a
 real-time stream copy, the name was early by 0.37-0.87 s and the mtime exact
-(`platereplay.segment_starts`; the name is used across a recorder gap). And each
+(`recording_replay.segment_starts`; the name is used across a recorder gap). And each
 segment's share of a window is decoded from that file with `-ss` before its
 input: seeking the concat demuxer — the previous approach — was measured to
 land on the NEXT keyframe, so frames came back up to a GOP later than labelled
@@ -1643,8 +1627,9 @@ frame within one source frame of its label, across a segment boundary too. A
 segment still being written decodes cleanly except its last frame, which a live
 burst drops.
 
-**Doing less of it** (measured by a 30 s bench of one camera with a car and a
-person in view, both passes bursting; CPU seconds of ffmpeg + of the process):
+**Doing less of it** (measured, before plate reading was removed, by a 30 s
+bench of one camera with a car and a person in view, both passes bursting; CPU
+seconds of ffmpeg + of the process):
 
 | main stream | before | after |
 |---|---|---|
@@ -1653,22 +1638,20 @@ person in view, both passes bursting; CPU seconds of ffmpeg + of the process):
 
 * **Raw frames on a pipe.** A burst's frames come back as raw BGR on ffmpeg's
   stdout instead of JPEG files written and re-read; crops are capped at
-  `MAX_CROP_SIDE` (1920 px) on the long side, which is still more than either
-  reader's input. A camera's frame size is probed once and cached
+  `MAX_CROP_SIDE` (1920 px) on the long side, which is still more than the
+  face detector's input. A camera's frame size is probed once and cached
   (`DIMS_TTL_S`, 600 s; re-probed when a decode comes back empty).
 * **One decode, many readers.** Requests go through one queue
   (`RecordingReplay._work`). The worker waits `COALESCE_WAIT_S` (60 ms) and
   folds every request for the same camera and fps whose window is within
-  `COALESCE_GAP_S` (1 s) of it — a plate burst and a face burst of the same
+  `COALESCE_GAP_S` (1 s) of it — bursts for two people in view at the same
   moment, say — into ONE decode of the union window, each with its own crop
   (`crops_graph`: split → crop → scale → pad → vstack; the rows are split back
   apart). `status()` reports `requests` and `shared`.
-* **Early exits.** A plate burst reads its frames coarse-to-fine (every other
-  frame, then the rest) and stops once the vote is settled (`SETTLED_READS` 3
-  at `SETTLED_CONFIDENCE` 0.9); a face burst stops at the first shot of quality
+* **Early exits.** A face burst stops at the first shot of quality
   `BURST_ENOUGH_QUALITY` (0.85). A settled track skips the per-detect-frame
   pass entirely, and while bursts cover a track, the full-resolution snapshot
-  looks are capped at `HIRES_WITH_BURSTS` (2) instead of 8 (plates) / 6 (faces).
+  looks are capped at `HIRES_WITH_BURSTS` (2) instead of 6.
 
 **The OpenCV face objects are locked.** `cv2.FaceDetectorYN` / `FaceRecognizerSF`
 are not thread-safe (OpenCV 5's graph engine asserts when two threads run one
@@ -1686,9 +1669,9 @@ real match across days, light and angle has to survive on.
 
 With `recognition.face_hires` (bool, default **true**), a tracked person on a
 camera with face recognition on also gets a full-resolution look
-(`FacePass._look_hires`): a snapshot from the SAME `SnapshotSource` the plate
-pass uses (one request serves every person and vehicle on that camera within
-0.35 s), the person found in it by `platesnap.locate`, and the face detected,
+(`FacePass._look_hires`): a snapshot from the shared `SnapshotSource`
+(`native/snapshots.py`; one request serves every person on that camera within
+0.35 s), the person found in it by `snapshots.locate`, and the face detected,
 aligned and scored from the real pixels. The shot joins the track's best-shot
 buffer, where a sharp face simply outscores a tiny one, and identification
 runs as usual (serialized per track with the detect-frame pass). If the
@@ -1699,120 +1682,21 @@ second, at most 6 per track, none once identified from a shot of quality
 ≥ 0.7. Background task: the frame loop never waits on a camera, and a track
 that ends mid-look writes its answer up to 3 s later. `face.hires` on
 `/api/recognition/status` counts `requested / frames / faces / lost / no_face`,
-and `face.hires_enabled` reports the switch, read live.
+and `face.hires_enabled` reports the switch, read live. `face.snapshots.{camera}`
+is each camera's snapshot health — `{ok, failed, last_error, resolution,
+latency_ms, backing_off_s, no_gain}`; `no_gain` is set when the camera's
+snapshot is no larger than the detect frame, and the text says which camera
+setting to raise.
 `tests/face_hires_smoke.py`: a face 86 px in the camera's picture and too small
 to find on the detect frame is read and stored at quality 0.90 only with the
 looks on.
 
-#### Plates: full-resolution snapshots (`recognition.plate_hires`)
-
-The plate pass used to read only the DETECT frame — the substream scaled to
-704x480. A plate there is usually 35-55 px wide and the plate scorer reads
-nothing under 64 (`PLATE_MIN_PX`), so plates were read only with a car almost
-at the lens. Faces survived the same frame because a face near the camera is
-larger than a plate is.
-
-With `recognition.plate_hires` (bool, default **true**), a tracked vehicle on a
-camera with plate reading on also triggers a full-resolution look
-(`native/platesnap.py`): the camera's own `snapshot.cgi` (Amcrest/Dahua), the
-vehicle found in it by template matching against the detect-frame crop (the
-snapshot arrives a few hundred ms late and the car has moved), and the plate
-cut from the real pixels. Bounded: at most one look per vehicle per second,
-at most 8 per vehicle, none once the vote is settled (≥3 reads at ≥0.9), one
-snapshot shared by every vehicle on the camera, and a camera that fails 3
-times in a row is left alone for 5 minutes. It runs as a background task: the
-detection loop never waits on a camera, and a track that ends mid-look votes
-up to 3 s later instead of stalling the frame. The switch is read live.
-
-**Finding and reading the plate (`recognition.plate_detector`, default true).**
-A learned plate detector (`yolo-v9-t-384-license-plates-end2end`, 7.8 MB,
-~18 ms CPU; MIT-published weights trained with the GPL-3.0 YOLOv9 code — hence
-the switch) finds the plate, in the vehicle crop and directly in the
-full-resolution snapshot around the vehicle (tight crop first, wider if
-nothing is found), so the snapshot no longer depends on re-finding the car.
-Each crop is read by TWO readers (`cct_xs_v2_global` and `cct_s_v2_global`),
-and the vote weighs every character by that reader's confidence in it, and a
-read's say in the plate's LENGTH by its weakest character. On a real
-photograph (tests/plate_real_smoke.py) the classical localizer lost the plate
-at half size while the detector found it; the two readers disagreed under
-motion blur and the vote picked the right one. With the switch off, or if the
-extra models cannot be downloaded, the classical localizer and one reader are
-used as before. `plates.reader` on `/api/recognition/status` reports
-`{localizer: "detector"|"classic", readers, extras_error}`.
-
-**US plates (`recognition.plate_region`, "us" default | "any").** Measured on
-OpenALPR's US benchmark (222 real photos, used for evaluation only — it is
-AGPL and is not in this repo): the plate detector found 98% of plates on a
-vehicle crop and 100% in the whole frame (classical localizer: 69%); the two
-readers with the per-character vote read 89% exactly (classical + one reader:
-62%). Most misses were O/0 and I/1, which US standard plates avoid, so "us"
-stores reads with O->0, I->1, Q->0: 93% exact, and wrong plates confidently
-stored fell from 14 to 9. The vote floor (`MIN_VOTE_CONFIDENCE`) is 0.7, up
-from 0.6: 200 right / 5 wrong stored instead of 203 / 9, single frame.
-
-**Reading the recording back (`recognition.plate_replay`, default true).**
-(Now also the switch for plate bursts — see "Recorded bursts" above; this is
-the original after-the-track read, which now covers only what bursts did not.)
-Offline the readers are right ~90% of the time on a clean look; live, a plate
-was read about one pass in three. The gap is the number of looks: a passing
-car gets one or two late snapshots. When a vehicle's track ends without a
-settled vote, `native/platereplay.py` decodes the recorded full-resolution
-footage for exactly the seconds it was in view (±0.7 s, at most 15 s),
-cropped to its path, at 6 fps, and every frame's plate — only one on the
-vehicle's own position at that moment, so a parked neighbour's is never read —
-is read by both readers into the vote. One replay at a time; never on the
-frame loop; no recording or no ffmpeg means no replay. The plate lands on the
-event when the track is concluded (about a minute after the car leaves).
-`plates.cameras.{name}` adds `replays`, `replay_frames`, `replay_reads`.
-With an NVIDIA GPU in the container the replay decodes on NVDEC first
-(`-hwaccel cuda`, frames back in system memory for the crop) — up to 15 s of
-4K H.265 is the most CPU this pass ever spends — and falls back to the CPU
-decode; after 3 GPU decodes in a row that produce nothing it stops trying the
-GPU. `plates.replay` reports `{available, gpu_decode, decodes: {cuda, cpu}}`.
-
-Two fixes from simulating the live path on the 222 US photos: `bestshot.Shot`
-is compared by identity (its generated `__eq__` compared crop arrays and
-raised, aborting the whole full-resolution look); and once a camera has
-served a usable snapshot, the detect frame is no longer read (846 of 1,425
-reads had come from it, diluting sharp reads). A camera's "snapshot no bigger
-than detection" state now expires after 5 minutes instead of lasting until
-restart.
-
-**A plate zone is a fast lane.** On a camera with a plate zone drawn, every
-tracked vehicle in the zone is read from the first frame it is tracked —
-before the three-frame confirmation and the stationary filter, which decide
-what deserves an EVENT and cost half a second or more. In the zone the detect
-frame is searched every frame and a full-resolution look goes out every 0.5 s
-(1 s elsewhere). A plate read on a car that never opened an event (parked in
-the box, or through it faster than an event confirms) is kept as a candidate
-but writes no `event_recognitions` row. Without a zone, the pass reads
-confirmed, moving vehicles anywhere at the ordinary cadence, as before.
-
-Two scorer/localizer fixes ship with it, because full-resolution crops exposed
-both: the localizer works at fixed widths (480 and 560 px, unioned) since its
-kernels are fixed-pixel, and `PLATE_ASPECT_MAX` is 5.0 (was 4.0) because the
-localizer's reconstructed strip for a square-on US plate lands at 3-4.2:1 and
-the veto was discarding reads the OCR had made with full confidence.
-
-`GET /api/recognition/status` → `plates` gains:
-
-- `hires` — whether full-resolution looks are on;
-- `cameras.{name}` — stage counters since boot: `passes`, `regions`,
-  `too_small`, `reads`, `rejected_reads`, `hires_requested`, `hires_frames`,
-  `hires_lost` (vehicle not found again in the snapshot), `hires_reads`,
-  `votes_stored`, `votes_discarded`, `last_plate`, `last_plate_at`,
-  `median_strip_px` (detect-frame strips). The first counter that stays at 0
-  while the one before it climbs is where plates are being lost;
-- `snapshots.{name}` — `{ok, failed, last_error, resolution, latency_ms,
-  backing_off_s, no_gain}`. `no_gain` is set when the camera's snapshot is no
-  larger than the detect frame; it is not asked again and the text says which
-  camera setting to raise.
-
 #### Recognition on events and alerts
 
 `GET /api/events` and `GET /api/events/{id}` carry `recognitions[]`:
-`{kind, profile_id, name, plate, score, quality, known}`. `known: false` means a
-face or plate was READ and matched nobody enrolled — an answer, not a missing
+`{kind, profile_id, name, plate, score, quality, known}` (`kind` is always
+`"face"` and `plate` always `""`; see the removal note above). `known: false`
+means a face was READ and matched nobody enrolled — an answer, not a missing
 one, and the row an unknown-subject alert is built from. Empty (never absent) on
 a box that never enabled recognition. One indexed query per page, not per row.
 
@@ -1871,9 +1755,7 @@ Rules that are easy to get backwards and are pinned in
 
 **Named alerts** (`app/notify/wording.py`). A recognized subject's alert reads
 as a sentence: title `"{names} is/are {place}"` — "Adam is at the front door",
-"The car is in the driveway" (a vehicle profile's own name), "Adam and Sarah are
-in the back yard" — body `"Recognized {names}"` plus ` — plate {plate}` when a
-plate was read. Names are every non-muted known profile on the event, the
+"Adam and Sarah are in the back yard" — body `"Recognized {names}"`. Names are every non-muted known profile on the event, the
 gate's choice (a watchlisted profile) first. The place comes from the camera's
 friendly name: an ordinary place name gets an article, lower case and its
 preposition (`in` the driveway/yard/garage…, `on` the porch/patio/deck…, `at`
@@ -1889,66 +1771,17 @@ re-sent named, with the **same tag** (web push replaces by tag, APNs by
 collapse id = event id), so the phone updates it instead of stacking a second.
 Only for a name the alert did not already carry; never for a muted profile; in
 `unknown_only` only for a watchlisted one; not when notifications are off.
-Plates read from the recording after the car has gone land after the event has
-ended, so they name the event row, not the alert.
 
 Recognitions reach the pipeline **live** via `note_recognition`, called by the
-passes the moment they identify — not when they store, which happens at track
+face pass the moment it identifies — not when it stores, which happens at track
 end, long after the subject has walked away. The hook is wired from
-`set_pipeline` **and** both pass setters because main.py's ordering calls
+`set_pipeline` **and** the pass setter because main.py's ordering calls
 `set_pipeline` first, and wiring in only one place left every alert unnamed with
 nothing on screen to show for it.
 
-#### Plate pipeline (`native/plates.py`, `native/platepass.py`)
-
-**NO LEARNED PLATE DETECTOR SHIPS, deliberately.** Every accurate license-plate
-detector available descends from a GPL-3.0 (YOLOv9) or AGPL-3.0 (Ultralytics)
-training codebase; AGPL in particular would oblige VigilumeNVR to offer its own
-source to anyone using it over a network. So plates are localized *without* a
-dedicated model:
-
-    D-FINE already found the vehicle  ->  crop its lower 55%
-    classical CV (blackhat/tophat + Sobel-x + morphological close + contours)
-      proposes plate-shaped strips
-    a permissively-licensed OCR reads each strip
-    multi-frame voting reconciles the reads
-
-This is the pre-deep-learning ANPR pipeline and it is honest about the trade: it
-reads a plate on a driveway well and one across the street badly. Only
-`plates.candidate_regions` would need replacing if the licence position changes
-— everything downstream takes boxes.
-
-**Why a crude localizer is acceptable.** The OCR discriminates on its own: fed
-noise the pinned model returns an EMPTY string at zero confidence rather than
-inventing characters (pinned in `plates_smoke`). So the localizer can be
-GENEROUS — propose four regions per vehicle and let OCR confidence, the
-aspect-ratio veto and voting discard the duds. A precise localizer would need
-the model we are deliberately not shipping; an *inclusive* one does not.
-
-The localizer bounds the plate's **text row** (~5–7:1), not its border (~2:1).
-Filtering those with the whole-plate aspect band silently rejected a clean,
-legible plate during development — hence the wide band plus `_expand_to_plate`,
-which grows a text row back to plate proportions before OCR (which was trained
-on plates, not bare text rows).
-
-OCR model: `cct_xs_v2_global` from fast-plate-ocr (**MIT**, 3.3 MB, a Keras-
-trained Compact Convolutional Transformer — nothing in its lineage touches
-YOLO). 128x64 RGB uint8 in, 10 slots x 37 classes out, covering Latin-alphabet
-regions including the United States. Pinned + SHA-256 verified, re-verified on
-load.
-
-Unlike the face pass, which embeds once per track, `PlatePass` OCRs **every
-retained shot** (≤ `KEEP_SHOTS`) and votes — several independent looks beating
-one good one is the entire accuracy argument, and 3.3 MB over a 128x64 input
-makes five reads per vehicle negligible. A vote whose weakest character falls
-below `MIN_VOTE_CONFIDENCE` is **discarded, not recorded**: a wrong plate on an
-event is worse than no plate. Plate candidates dedupe by the plate STRING
-rather than by similarity — two reads of the same plate are the same vehicle by
-definition.
-
 #### Recognition heatmap (`native/heatmap.py`, schema v23)
 
-- `GET /api/recognition/heatmap/{camera}?kind=face|plate` → `{cols, rows, counts[], quality[], samples, peak, updated_at, suggested_zone}`. Two flat grids of `cols * rows`: `counts` normalized 0..1 against the busiest cell, `quality` the MEAN bestshot score in that cell.
+- `GET /api/recognition/heatmap/{camera}?kind=face` → `{cols, rows, counts[], quality[], samples, peak, updated_at, suggested_zone}`. Two flat grids of `cols * rows`: `counts` normalized 0..1 against the busiest cell, `quality` the MEAN bestshot score in that cell.
 - `DELETE /api/recognition/heatmap/{camera}[?kind=]` → 204. For a camera that has been moved or re-aimed, where the old view's history is now a lie.
 
 **Why both numbers.** Asked to draw a face zone on a still frame, almost everyone
@@ -1980,9 +1813,9 @@ crop's origin (`recognizer.crop_with_origin`) before it can be placed on the
 frame. Getting that wrong does not fail; it paints a plausible map of the wrong
 places, which is why a position outside 0..1 is DROPPED rather than clamped.
 
-`cameras.face_zones` / `plate_zones` are edited on iOS via Settings › Cameras ›
-(camera) › Recognition areas, which draws the heatmap over a live snapshot.
-`PUT /api/cameras/{name}` accepts either list; omitted keeps stored, `[]` clears
+`cameras.face_zones` is edited on iOS via Settings › Cameras › (camera) ›
+Recognition area, which draws the heatmap over a live snapshot.
+`PUT /api/cameras/{name}` accepts it; omitted keeps stored, `[]` clears
 (back to whole frame). Unlike `include_zones`, an empty or degenerate recognition
 ROI is harmless — it means "search the whole frame", not "match nothing".
 
@@ -1993,8 +1826,8 @@ good for rather than by what was easy:
 
 | surface | iOS | web |
 |---|---|---|
-| enable / alert mode / hold / retention | Settings › Faces & Plates | Settings › **Recording** › Faces & plates |
-| enroll people & vehicles, review unknown faces | Settings › Faces & Plates | Settings › **Faces & plates** |
+| enable / alert mode / hold / retention | Settings › Faces | Settings › **Detection** › Face recognition |
+| enroll people, review unknown faces | Settings › Faces | Settings › **Faces** |
 | draw recognition ROIs over the heatmap | yes | no |
 | recognized name on an event | list + detail | card chip + detail |
 

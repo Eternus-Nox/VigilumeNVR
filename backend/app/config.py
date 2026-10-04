@@ -294,7 +294,7 @@ DEFAULT_CAMERA_TIMEZONE = (
 # audio classifier (roadmap item); settings_store silently strips persisted
 # copies from old /data volumes.
 DEFAULT_SETTINGS: dict = {
-    # Face / plate recognition. OFF by default, deliberately: it downloads two
+    # Face recognition. OFF by default, deliberately: it downloads two
     # more models, it keeps biometric imagery, and in some jurisdictions running
     # it at all is a decision the operator has to make knowingly. A camera
     # system that quietly started recognizing faces on upgrade would be making
@@ -318,7 +318,7 @@ DEFAULT_SETTINGS: dict = {
         "notify_grace_seconds": 4,
         # Which recognized subjects are worth an alert:
         #   "all"          — always alert; a known subject is NAMED in it.
-        #   "unknown_only" — stay silent for enrolled people and vehicles, and
+        #   "unknown_only" — stay silent for enrolled people, and
         #                    alert for everyone else. This is the setting that
         #                    stops your own household setting the phone off
         #                    every evening, and it is why an alert that could
@@ -326,7 +326,7 @@ DEFAULT_SETTINGS: dict = {
         #                    and I could not tell who" is the case you most want
         #                    to hear about.
         "notify_mode": "all",
-        # How many distinct shots of one face/vehicle are collected before the
+        # How many distinct shots of one face are collected before the
         # best is chosen, and the minimum gap between two of them.
         #
         # These two are the real defence against a WRONG NAME. A false match
@@ -337,7 +337,7 @@ DEFAULT_SETTINGS: dict = {
         # one stride, which is one look, not five.
         #
         # Paid only by cameras with recognition switched on (cameras.
-        # face_recognition / plate_recognition), which is why per-camera
+        # face_recognition), which is why per-camera
         # selection and these two numbers are one feature and not two.
         "shots_per_track": 5,
         "shot_min_gap_seconds": 0.4,
@@ -347,7 +347,7 @@ DEFAULT_SETTINGS: dict = {
         "pass_interval_seconds": 0.6,
         # Look for a face on VEHICLES as well as people — the driver through the
         # windscreen. Off by default: on a busy road it is a real cost for a crop
-        # that is usually glare, and a plate identifies a car better anyway. It
+        # that is usually glare. It
         # earns its keep on a driveway or at a gate.
         "face_on_vehicles": False,
         # Quality a crop must reach before it is worth embedding. Lowering it is
@@ -355,35 +355,15 @@ DEFAULT_SETTINGS: dict = {
         # which is exactly where a wrong name comes from. Exposed so an operator
         # missing people entirely can make that trade knowingly.
         "identify_quality": 0.45,
-        # Read plates from a full-resolution snapshot of the camera, not only
-        # from the detect stream. The detect stream is scaled to ~704x480,
-        # where a plate is usually too few pixels wide to read at all; while a
-        # vehicle is tracked this asks the camera for about one snapshot a
-        # second (native/platesnap.py). Only cameras with plate reading on pay
-        # it, and only while a vehicle is actually there.
-        "plate_hires": True,
-        # Same for FACES: while a person is tracked on a camera with face
-        # recognition on, about one full-resolution snapshot a second (shared
-        # with the plate reader's), and the face is found and aligned from
+        # Read faces from a full-resolution snapshot of the camera, not only the
+        # detect stream: while a person is tracked on a camera with face
+        # recognition on, about one snapshot a second, and the face is found and aligned from
         # that. A face 35 px wide on the detect stream is ~130-200 px there
         # (native/facepass.py). Stops once the person is identified.
         "face_hires": True,
-        # Find plates with the learned plate detector (native/plates.py) rather
-        # than the classical localizer. Far more reliable on real footage; its
-        # weights are MIT-published but were trained with the GPL-3.0 YOLOv9
-        # codebase, which is why it can be switched off.
-        "plate_detector": True,
-        # Which plates this system sees. "us": letter O/I/Q are read as 0/1/0,
-        # because US standard plates leave them out for exactly that reason
-        # (native/recognition.py). "any": reads are kept as the readers gave them.
-        "plate_region": "us",
-        # Read plates from the RECORDING too (native/burst.py): short bursts
-        # of full-resolution frames while the vehicle is in view, starting
-        # from two seconds BEFORE it was detected, and once more after it
-        # leaves if the plate is still unsure. Needs the camera to be recording.
-        "plate_replay": True,
-        # The same for faces: bursts of the recording around a person while
-        # they are in view, from just before they were detected.
+        # Read faces from the RECORDING too (native/burst.py): bursts of
+        # full-resolution frames around a person while they are in view, from
+        # just before they were detected. Needs the camera to be recording.
         "face_replay": True,
     },
     "notifications": {

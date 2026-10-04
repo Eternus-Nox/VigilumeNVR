@@ -206,7 +206,6 @@ ADMIN_ROUTES = [
     ("GET", "/api/recognition/profiles/999999", None),
     ("PUT", "/api/recognition/profiles/999999", {"name": "nope"}),
     ("DELETE", "/api/recognition/profiles/999999", None),
-    ("POST", "/api/recognition/profiles/999999/plate", {"plate": "ABC123"}),
     ("POST", "/api/recognition/profiles/999999/enroll", {"candidate_ids": [1]}),
     ("DELETE", "/api/recognition/samples/999999", None),
     ("GET", "/api/recognition/candidates", None),

@@ -326,14 +326,13 @@ export interface Camera {
    */
   notify_on_cross?: boolean;
   /**
-   * WHETHER this camera runs face / plate recognition, as opposed to
-   * `face_zones` / `plate_zones` which say WHERE it looks. The zones cannot
-   * express "off" — [] means whole frame — so these are what keep a
-   * recognition pass off the ten cameras that watch a driveway at 30 m.
-   * Absent on an older backend; treat a missing value as ON.
+   * WHETHER this camera runs face recognition, as opposed to `face_zones`
+   * which says WHERE it looks. The zones cannot express "off" — [] means
+   * whole frame — so this is what keeps a recognition pass off the ten
+   * cameras that watch a driveway at 30 m. Absent on an older backend; treat
+   * a missing value as ON.
    */
   face_recognition?: boolean;
-  plate_recognition?: boolean;
   /**
    * Per-camera override for `detection.ignore_stationary`.
    *
@@ -428,9 +427,8 @@ export interface CameraInput {
   cross_lines?: CrossLine[];
   /** Alert only on a line crossing; omitted = keep server value. */
   notify_on_cross?: boolean;
-  /** Run face / plate recognition here; omitted = keep server value. */
+  /** Run face recognition here; omitted = keep server value. */
   face_recognition?: boolean;
-  plate_recognition?: boolean;
   /** Optional per-camera engine toggles; omitted = keep server value. */
   detect_enabled?: boolean;
   record_enabled?: boolean;
@@ -534,18 +532,16 @@ export interface ProbeResult {
 }
 
 /**
- * One thing recognition read on an event: a face matched to a person, a plate
- * read off a vehicle, or either having matched NOBODY.
+ * One face recognition read on an event: matched to a person, or to NOBODY.
  *
  * `known: false` is an ANSWER, not a missing one — a face was read and nobody
  * enrolled matches it, which is the row an unknown-subject alert is built from.
  */
 export interface EventRecognition {
-  /** "face" | "plate". */
+  /** Always "face" (licence plate reading was removed). */
   kind: string;
   profile_id: number | null;
   name: string;
-  plate: string;
   score: number;
   quality: number;
   known: boolean;
@@ -553,8 +549,8 @@ export interface EventRecognition {
 
 /**
  * The one recognition worth a single line: a named person first (the most
- * informative thing an event can say), then a plate, then an explicit unknown.
- * `null` when recognition read nothing.
+ * informative thing an event can say), then an explicit unknown. `null` when
+ * recognition read nothing.
  */
 export function headlineRecognition(
   recognitions: EventRecognition[] | undefined,
@@ -562,7 +558,6 @@ export function headlineRecognition(
   if (!recognitions || recognitions.length === 0) return null;
   return (
     recognitions.find((r) => r.known && r.name) ??
-    recognitions.find((r) => r.plate) ??
     recognitions[0]
   );
 }
@@ -570,29 +565,25 @@ export function headlineRecognition(
 /** Label for a recognition row. Never empty, so callers need no fallback. */
 export function recognitionLabel(r: EventRecognition): string {
   if (r.known && r.name) return r.name;
-  if (r.plate) return r.plate;
-  return r.kind === 'face' ? 'Unknown face' : 'Unread plate';
+  return 'Unknown face';
 }
 
 /**
  * The part of the label worth PRINTING, or null when there is none.
  *
- * A name and a plate number are information — "Unknown face" is not. Spelling
- * out the absence of an answer costs a whole chip's width on a thumbnail to say
- * nothing, so those render icon-only and the wording moves to the accessible
- * label. Note an unmatched PLATE still returns its digits: it was read, nobody
- * is enrolled for it, and the number is exactly what the operator wants.
+ * A name is information — "Unknown face" is not. Spelling out the absence of
+ * an answer costs a whole chip's width on a thumbnail to say nothing, so those
+ * render icon-only and the wording moves to the accessible label.
  */
 export function recognitionText(r: EventRecognition): string | null {
   if (r.known && r.name) return r.name;
-  if (r.plate) return r.plate;
   return null;
 }
 
-/** A profile names a PERSON or a VEHICLE. The API says "person"/"vehicle". */
-export type ProfileKind = 'person' | 'vehicle';
-/** A candidate crop is a FACE or a PLATE — the sighting, not the identity. */
-export type CandidateKind = 'face' | 'plate';
+/** A profile names a PERSON. (Vehicle profiles went with plate reading.) */
+export type ProfileKind = 'person';
+/** A candidate crop is a FACE — the sighting, not the identity. */
+export type CandidateKind = 'face';
 
 /**
  * An enrolled identity. There is NO TRAINING STEP: a profile is a
@@ -633,11 +624,10 @@ export interface RecognitionProfile {
   updated_at: number;
 }
 
-/** One enrolled reference: a face embedding, or a vehicle's plate string. */
+/** One enrolled reference: a face embedding and its crop. */
 export interface RecognitionSample {
   id: number;
   profile_id: number;
-  plate: string;
   /** Which model produced the embedding. Embeddings only compare within one. */
   model_key: string;
   quality: number;
@@ -660,7 +650,6 @@ export interface RecognitionCandidate {
   event_fid: string;
   /** That event's numeric id, or null once the event has been purged. */
   event_id: number | null;
-  plate: string;
   quality: number;
   /** Best similarity against the gallery at capture time, and to whom. */
   best_score: number;
@@ -746,55 +735,23 @@ export interface RecognitionStatus {
      * and how many of those faces were from BEFORE the person was detected.
      */
     bursts?: { bursts: number; frames: number; faces: number; early_faces: number };
+    /** Per-camera health of the full-resolution snapshots the looks use. */
+    snapshots?: Record<string, SnapshotHealth>;
+    /** The recording reader behind the bursts. */
+    replay?: {
+      available: boolean;
+      gpu_decode: boolean;
+      decodes: Record<string, number>;
+      requests?: number;
+      shared?: number;
+    } | null;
     /** What runs the face models: "onnxruntime" (GPU) or "opencv" (CPU). */
     runtime?: string;
     device?: string;
   };
-  /**
-   * The plate pass's own accounting, per camera since boot. Each counter is a
-   * stage a plate has to get through; the first that stays at 0 while the one
-   * before it climbs is where plates are being lost. Absent on an older
-   * backend.
-   */
-  plates?: {
-    live_tracks?: number;
-    ready?: boolean;
-    vehicles?: number;
-    /** Whether full-resolution snapshot looks are on. */
-    hires?: boolean;
-    /** How plates are found ("detector" | "classic") and by how many readers. */
-    reader?: { localizer?: string; readers?: number; extras_error?: string };
-    cameras?: Record<string, PlateCameraStats>;
-    snapshots?: Record<string, PlateSnapshotHealth>;
-  } | null;
 }
 
-export interface PlateCameraStats {
-  passes: number;
-  regions: number;
-  too_small: number;
-  reads: number;
-  rejected_reads: number;
-  hires_requested: number;
-  hires_frames: number;
-  /** The vehicle could not be found again in the snapshot (it had moved on). */
-  hires_lost: number;
-  hires_reads: number;
-  /** Times the recording was read back for a vehicle, frames decoded, reads. */
-  replays?: number;
-  replay_frames?: number;
-  replay_reads?: number;
-  /** Plate reads from recorded frames taken BEFORE the vehicle was detected. */
-  early_reads?: number;
-  votes_stored: number;
-  votes_discarded: number;
-  last_plate: string;
-  last_plate_at: number;
-  /** Median width of plate-shaped strips on the DETECT frame; 64 is the floor. */
-  median_strip_px: number;
-}
-
-export interface PlateSnapshotHealth {
+export interface SnapshotHealth {
   ok: number;
   failed: number;
   last_error: string;
@@ -964,7 +921,7 @@ export interface AppSettings {
     clip_delay_s: number;
   };
   /**
-   * Face / plate recognition. OFF by default: it downloads two more models and
+   * Face recognition. OFF by default: it downloads two more models and
    * retains biometric imagery. Optional here because a backend predating the
    * feature omits the block entirely.
    */
@@ -973,19 +930,19 @@ export interface AppSettings {
     /** Biometric retention for unmatched crops, in days. 0 keeps NOTHING. */
     candidate_retention_days: number;
     /**
-     * How long a person/vehicle alert is HELD while recognition decides who it
+     * How long a person alert is HELD while recognition decides who it
      * is — recognition finishes a few frames after the event opens, so an alert
      * sent immediately can never name anyone. 0 disables the hold.
      */
     notify_grace_seconds: number;
     /**
      * "all" names a recognized subject in the alert; "unknown_only" stays
-     * silent for enrolled people and vehicles — the setting that stops your own
+     * silent for enrolled people — the setting that stops your own
      * household setting the phone off every evening.
      */
     notify_mode: 'all' | 'unknown_only';
     /**
-     * How many distinct shots of one face/vehicle are collected before the best
+     * How many distinct shots of one face are collected before the best
      * is chosen, and the minimum gap between two of them. These are the real
      * defence against a WRONG name: a false match comes from scoring a marginal
      * crop, and the cure is having a better crop available. The gap matters as
@@ -1001,36 +958,16 @@ export interface AppSettings {
     /** Crop quality required before an embedding is computed. Lower is riskier. */
     identify_quality: number;
     /**
-     * Read plates from a full-resolution camera snapshot as well as the detect
-     * stream. The detect stream is ~704x480, where a plate is usually too small
-     * to read; while a vehicle is tracked this asks the camera for about one
-     * snapshot a second. Optional: absent on a backend predating it.
-     */
-    plate_hires?: boolean;
-    /**
      * Read faces from a full-resolution camera snapshot as well as the detect
      * stream, about once a second while a person is tracked. Optional: absent
      * on a backend predating it.
      */
     face_hires?: boolean;
     /**
-     * Find plates with the learned plate detector rather than the classical
-     * localizer. Far more reliable on real footage. Optional: absent on a
-     * backend predating it.
+     * Read faces from the recording too: short bursts of full-resolution
+     * frames while the person is in view (from two seconds before they were
+     * detected), and after they leave. Optional: absent on an older backend.
      */
-    plate_detector?: boolean;
-    /**
-     * Which plates this system sees. "us" reads letter O/I/Q as 0/1/0, since
-     * US standard plates leave them out; "any" keeps reads as given.
-     */
-    plate_region?: 'us' | 'any';
-    /**
-     * Read plates from the recording too: short bursts of full-resolution
-     * frames while the vehicle is in view (from two seconds before it was
-     * detected), and after it leaves. Optional: absent on an older backend.
-     */
-    plate_replay?: boolean;
-    /** The same for faces. Optional: absent on an older backend. */
     face_replay?: boolean;
   };
   detection: {
@@ -1953,16 +1890,15 @@ export const api = {
       { method: 'PUT', body: JSON.stringify({ ignore_stationary: ignoreStationary }) },
     ),
 
-  setCameraRecognition: (name: string, body: { face?: boolean; plate?: boolean }) =>
+  setCameraRecognition: (name: string, body: { face?: boolean }) =>
     request<{
       name: string;
       face_recognition: boolean;
-      plate_recognition: boolean;
       /**
-       * Objects this click ALSO turned on, because the passes are fed from
-       * confirmed detections: faces need `person`, plates need `car`, and
-       * without them the pass runs and is handed nothing. Usually empty. Never
-       * populated on the way OFF — detection is not taken back.
+       * Objects this click ALSO turned on, because the pass is fed from
+       * confirmed detections: faces need `person`, and without it the pass
+       * runs and is handed nothing. Usually empty. Never populated on the way
+       * OFF — detection is not taken back.
        */
       added_objects: string[];
       detect_objects: string[];
@@ -2257,7 +2193,7 @@ export const api = {
   patchSettings: (patch: SettingsPatch) =>
     request<AppSettings>('/api/settings', { method: 'PATCH', body: JSON.stringify(patch) }),
 
-  // Recognition (faces & plates)
+  // Recognition (faces)
   //
   // ADMIN-ONLY INCLUDING THE READS — the one router that departs from "a viewer
   // may read, an admin may write". What is gated is the content, not the
@@ -2304,18 +2240,6 @@ export const api = {
     }),
   deleteRecognitionProfile: (id: number) =>
     request<void>(`/api/recognition/profiles/${id}`, { method: 'DELETE' }),
-  /** Vehicles only — enroll by typing the plate, no sighting needed. */
-  /**
-   * Vehicles only. Unread-plate sightings that ARE this plate are absorbed
-   * automatically — unlike faces, 'same plate' has an exact answer, so a
-   * duplicate carries no new information and only buries the plates still
-   * worth reviewing. `absorbed_candidates` counts them.
-   */
-  addRecognitionPlate: (id: number, plate: string) =>
-    request<RecognitionSample & { absorbed_candidates?: number }>(`/api/recognition/profiles/${id}/plate`, {
-      method: 'POST',
-      body: JSON.stringify({ plate }),
-    }),
   /**
    * Enroll candidates into a profile. ATOMIC across the batch and kind-checked
    * server-side, and it MOVES each crop out of the rolling candidate store into

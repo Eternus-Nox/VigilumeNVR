@@ -188,13 +188,12 @@ struct Camera: Decodable, Identifiable, Sendable, Hashable {
     let includeZones: [IncludeZone]?
     /// Boundaries whose crossings are counted. Absent -> nil == none.
     let crossLines: [CrossLine]?
-    /// Recognition regions of interest. Same polygon shape as `includeZones`
-    /// but the OPPOSITE consequence: these never filter detection, they only
-    /// mark where a face or plate is legible enough to be worth a recognition
-    /// pass. nil/[] == search the whole frame, which is correct and merely
-    /// slower — so unlike an include zone, an empty one cannot blind anything.
+    /// Recognition region of interest. Same polygon shape as `includeZones`
+    /// but the OPPOSITE consequence: it never filters detection, it only marks
+    /// where a face is legible enough to be worth a recognition pass. nil/[] ==
+    /// search the whole frame, which is correct and merely slower — so unlike
+    /// an include zone, an empty one cannot blind anything.
     let faceZones: [IncludeZone]?
-    let plateZones: [IncludeZone]?
     /// Only notify once something crosses one of this camera's lines. Gates the
     /// ALERT only — the event, its clip and its snapshot are recorded either
     /// way — and the backend ignores it entirely when no lines are drawn, so it
@@ -290,10 +289,9 @@ struct CameraUpdatePayload: Encodable, Sendable {
     /// with < 3 points, or a line whose ends coincide, is dropped server-side.
     var includeZones: [IncludeZone]?
     var crossLines: [CrossLine]?
-    /// Recognition ROIs. nil keeps the stored value, an explicit [] clears them
+    /// Recognition ROI. nil keeps the stored value, an explicit [] clears it
     /// (back to searching the whole frame).
     var faceZones: [IncludeZone]?
-    var plateZones: [IncludeZone]?
     /// Alert only on a line crossing; nil = keep stored.
     var notifyOnCross: Bool?
     var detectFps: Int?
@@ -345,44 +343,38 @@ struct LabelsResponse: Decodable, Sendable {
 
 // MARK: - Events
 
-/// One thing recognition read on an event: a face matched to a person, a plate
-/// read off a vehicle, or either of those having matched NOBODY.
+/// One face recognition read on an event: matched to a person, or to NOBODY.
 ///
-/// `known == false` with a non-empty `plate` is the useful unmatched case —
-/// the plate was read clearly, it just belongs to no enrolled vehicle. For a
-/// face, unknown means exactly that: a face was read and nobody enrolled
-/// matches it, which is the row a security alert is built from.
+/// Unknown means exactly that: a face was read and nobody enrolled matches
+/// it, which is the row a security alert is built from. (The server still
+/// sends an always-empty `plate` key from before plate reading was removed;
+/// it is not modelled, and the decoder ignores it.)
 struct EventRecognition: Codable, Sendable, Hashable, Identifiable {
-    /// "face" | "plate".
+    /// Always "face".
     let kind: String
     let profileId: Int?
     let name: String
-    let plate: String
     let score: Double
     let quality: Double
     let known: Bool
 
-    var id: String { "\(kind)|\(profileId ?? -1)|\(plate)|\(score)" }
+    var id: String { "\(kind)|\(profileId ?? -1)|\(score)" }
     var isFace: Bool { kind == "face" }
 
     /// What to put on a row. Never empty, so a caller does not have to decide
     /// what an unlabelled recognition means.
     var displayText: String {
         if known && !name.isEmpty { return name }
-        if !plate.isEmpty { return plate }
-        return isFace ? "Unknown face" : "Unread plate"
+        return "Unknown face"
     }
 
     /// The part of `displayText` worth PRINTING, or nil when there is none.
     ///
-    /// A name and a plate number are information; "Unknown face" is not — it
-    /// spends a badge's width on a thumbnail to say nothing, so that case shows
-    /// the icon alone and the wording moves to the accessibility label. An
-    /// unmatched PLATE still returns its digits: it was read, nobody is
-    /// enrolled for it, and the number is exactly what the operator wants.
+    /// A name is information; "Unknown face" is not — it spends a badge's
+    /// width on a thumbnail to say nothing, so that case shows the icon alone
+    /// and the wording moves to the accessibility label.
     var printableText: String? {
         if known && !name.isEmpty { return name }
-        if !plate.isEmpty { return plate }
         return nil
     }
 }
@@ -409,12 +401,11 @@ struct Event: Decodable, Identifiable, Sendable, Equatable {
     let recognitions: [EventRecognition]?
 
     /// The one recognition worth a row in a list: a named person first (that is
-    /// the most informative thing an event can say), then a plate, then an
-    /// explicit unknown. nil when recognition read nothing at all.
+    /// the most informative thing an event can say), then an explicit unknown.
+    /// nil when recognition read nothing at all.
     var headlineRecognition: EventRecognition? {
         guard let recognitions, !recognitions.isEmpty else { return nil }
         return recognitions.first(where: { $0.known && !$0.name.isEmpty })
-            ?? recognitions.first(where: { !$0.plate.isEmpty })
             ?? recognitions.first
     }
 
@@ -475,12 +466,11 @@ struct EventDetail: Decodable, Identifiable, Sendable {
         Event.resolveLabels(primary: label, labels: labels)
     }
 
-    /// Same precedence as Event.headlineRecognition: a named person, then a
-    /// plate, then an explicit unknown.
+    /// Same precedence as Event.headlineRecognition: a named person, then an
+    /// explicit unknown.
     var headlineRecognition: EventRecognition? {
         guard let recognitions, !recognitions.isEmpty else { return nil }
         return recognitions.first(where: { $0.known && !$0.name.isEmpty })
-            ?? recognitions.first(where: { !$0.plate.isEmpty })
             ?? recognitions.first
     }
 }
@@ -504,15 +494,14 @@ struct Suppression: Codable, Identifiable, Sendable {
     let createdAt: Double
 }
 
-// MARK: - Recognition (faces & plates)
+// MARK: - Recognition (faces)
 
-/// A named identity the operator curates: a person recognized by face, or a
-/// vehicle known by its plate. Created by hand only — nothing on the server
-/// invents a profile, because an identity you cannot correct is worse than
-/// none.
+/// A named person the operator curates, recognized by face. Created by hand
+/// only — nothing on the server invents a profile, because an identity you
+/// cannot correct is worse than none.
 struct RecognitionProfile: Codable, Identifiable, Sendable {
     let id: Int
-    /// "person" | "vehicle".
+    /// Always "person" (vehicle profiles went with plate reading).
     let kind: String
     let name: String
     let notes: String
@@ -539,7 +528,6 @@ struct RecognitionProfile: Codable, Identifiable, Sendable {
 struct RecognitionSample: Codable, Identifiable, Sendable {
     let id: Int
     let profileId: Int
-    let plate: String
     let modelKey: String
     let quality: Double
     let sourceFid: String
@@ -567,11 +555,10 @@ struct RecognitionProfileDetail: Codable, Sendable {
 /// picker is built from.
 struct RecognitionCandidate: Codable, Identifiable, Sendable {
     let id: Int
-    /// "face" | "plate".
+    /// Always "face".
     let kind: String
     let camera: String
     let eventFid: String
-    let plate: String
     /// Legibility 0..1 from the server's best-shot scoring — NOT detector
     /// confidence. Sharpness, size, exposure and pose, i.e. whether the detail
     /// can actually be read.
@@ -1217,7 +1204,7 @@ struct SettingsDocument: Decodable, Sendable {
         init() { autoSync = true; timezone = "" }
     }
 
-    /// Face / plate recognition. Absent on a backend predating it -> defaults
+    /// Face recognition. Absent on a backend predating it -> defaults
     /// (off), so the screen renders and simply offers to turn it on.
     struct Recognition: Decodable, Sendable {
         var enabled: Bool

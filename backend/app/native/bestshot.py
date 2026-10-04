@@ -65,10 +65,9 @@ import numpy as np
 # so they can be tuned against real footage instead of hunted through the code.
 # ---------------------------------------------------------------------------
 
-#: How many ranked shots to retain per track, per kind. Five is enough to give
-#: an operator a real choice at enrollment and to let multi-frame plate voting
-#: (see recognition.vote_plate) outvote a single misread, without holding a
-#: meaningful amount of image memory per tracked object.
+#: How many ranked shots to retain per track. Five is enough to give an
+#: operator a real choice at enrollment without holding a meaningful amount of
+#: image memory per tracked object.
 KEEP_SHOTS = 5
 
 #: Minimum spacing between two RETAINED shots. Below this they are near-
@@ -148,8 +147,7 @@ def clamp_setting(value: Any, default: float, lo: float, hi: float) -> float:
 def shot_params(cfg: Any) -> tuple[int, float]:
     """(shots, min gap) from a `settings.recognition` dict, clamped.
 
-    Shared by both passes so one malformed settings document cannot give faces
-    and plates different buffer shapes. Every failure mode — missing key, None,
+    Every failure mode — missing key, None,
     a string, a number out of range — falls back to the shipped default rather
     than raising: this is called from a maintenance tick, and an exception there
     would take recognition down over a typo in a settings field.
@@ -173,39 +171,15 @@ FACE_TARGET_PX = 112
 #: layer consumes; upscaling invents detail and the embedding drifts. Scored 0.
 FACE_MIN_PX = 40
 
-#: Plate OCR needs horizontal pixels per character far more than it needs
-#: height: ~100 px across a US plate is the usual floor for a clean read.
-PLATE_TARGET_PX = 160
-PLATE_MIN_PX = 64
-
-#: North American plates are 12x6 inches — 2.0:1. Perspective on a driveway
-#: camera legitimately squeezes that, so the acceptable band is wide; outside
-#: it the "plate" is either not a plate or is being read at an angle no OCR
-#: will survive.
-#:
-#: The upper edge was 4.0 and is 5.0. What this scores is not the plate but
-#: the localizer's RECONSTRUCTION of it: the text row (5-7:1 on a US plate,
-#: see plates.py) grown by the character-height fraction, which lands at
-#: 3-4.2:1 for a plate seen square on. A camera mounted above a driveway
-#: foreshortens the plate vertically on top of that. At 4.0 the veto was
-#: throwing away strips the OCR had read with full confidence — on 144
-#: synthetic plates it rejected 34 correct reads, most of them at 4.0-4.4:1.
-PLATE_ASPECT_IDEAL = 2.0
-PLATE_ASPECT_MIN = 1.3
-PLATE_ASPECT_MAX = 5.0
-
 #: Variance-of-Laplacian reference. The sharpness term is a saturating curve
 #: rather than a threshold, so there is no cliff: `1 - exp(-var/REF)` reaches
 #: ~0.63 at REF and ~0.86 at 2xREF. Calibrated on 112 px face crops off a
-#: 704x480 detect stream; plates get a higher reference because their
-#: high-contrast glyph edges produce more Laplacian energy for the same
-#: perceived sharpness.
+#: 704x480 detect stream.
 SHARPNESS_REF_FACE = 120.0
-SHARPNESS_REF_PLATE = 260.0
 
 #: Fraction of pixels at the very ends of the range before exposure is called
-#: clipped. IR illuminators blow out a close face and headlights blow out a
-#: plate, and in both cases the detail is gone, not merely dim.
+#: clipped. An IR illuminator blows out a close face, and the detail is gone,
+#: not merely dim.
 CLIP_FRACTION_BAD = 0.08
 
 
@@ -215,7 +189,7 @@ class Quality:
 
     `total` is the weighted blend in 0..1. The components are kept because
     "0.31" tells an operator nothing, while "sharp enough, but only 44 px
-    across" tells them to move the camera or draw a tighter plate zone.
+    across" tells them to move the camera or draw a tighter face zone.
     """
 
     total: float
@@ -236,7 +210,7 @@ class Shot:
     eq=False: shots are compared by IDENTITY. The generated __eq__ compared
     every field, including the crop's numpy array, and `shot in dropped`
     raised "operands could not be broadcast" (or "truth value is ambiguous")
-    — aborting the whole full-resolution plate look it happened in.
+    — aborting the whole full-resolution look it happened in.
     """
 
     crop: np.ndarray
@@ -359,37 +333,14 @@ def _face_geometry(
     return score, "square on"
 
 
-def _plate_geometry(w: float, h: float) -> tuple[float, str]:
-    """How close the crop is to a plate seen face-on.
-
-    A plate read at a steep angle is a plate the OCR will hallucinate
-    characters into, and its projected aspect ratio is the cheapest available
-    signal for that. The band is wide because a driveway camera never sees a
-    plate perfectly square on and should not be told it has failed.
-    """
-    if h <= 0:
-        return 0.0, "degenerate box"
-    aspect = w / h
-    if aspect < PLATE_ASPECT_MIN:
-        return 0.0, f"too square ({aspect:.1f}:1) — steep angle"
-    if aspect > PLATE_ASPECT_MAX:
-        return 0.0, f"too wide ({aspect:.1f}:1) — steep angle"
-    # Triangular falloff either side of ideal, normalized by the distance to
-    # whichever band edge lies on that side.
-    edge = PLATE_ASPECT_MAX if aspect > PLATE_ASPECT_IDEAL else PLATE_ASPECT_MIN
-    score = 1.0 - abs(aspect - PLATE_ASPECT_IDEAL) / abs(edge - PLATE_ASPECT_IDEAL)
-    return max(0.0, score), "face on" if score > 0.6 else "angled"
-
-
 def _blend(parts: dict[str, float], weights: dict[str, float]) -> float:
     """Weighted blend, with DISQUALIFIERS applied as a veto rather than a
     deduction.
 
     Some components are not "worse", they are "no". A face below the embedding
-    model's input size carries less information than the network consumes, and
-    a crop whose aspect ratio is nowhere near a plate is not a plate seen at a
-    bad angle — it is something else. Left as weighted terms, either one gets
-    carried over the usability line by a high sharpness score: a razor-sharp
+    model's input size carries less information than the network consumes.
+    Left as a weighted term it gets carried over the usability line by a high
+    sharpness score: a razor-sharp
     24 px face blended to 0.65, which would have put an unreadable crop at the
     top of the enrollment list.
 
@@ -454,64 +405,11 @@ def _face_reason(
     return "good"
 
 
-def score_plate(crop_bgr: np.ndarray) -> Quality:
-    """Legibility of a plate crop for OCR.
-
-    Weighted harder toward sharpness and horizontal resolution than the face
-    score is, because OCR fails character-by-character on exactly those two and
-    is comparatively tolerant of odd exposure (plates are retroreflective and
-    high contrast by design).
-    """
-    if crop_bgr is None or crop_bgr.size == 0:
-        return Quality(0.0, 0.0, 0.0, 0.0, 0.0, "empty crop")
-    h, w = crop_bgr.shape[:2]
-    gray = _gray(crop_bgr)
-
-    sharp = _sharpness(gray, SHARPNESS_REF_PLATE)
-    # WIDTH, not min(w, h): OCR needs pixels per character along the string.
-    res = _resolution(float(w), PLATE_TARGET_PX, PLATE_MIN_PX)
-    expo = _exposure(gray)
-    geo, geo_reason = _plate_geometry(float(w), float(h))
-
-    total = _blend(
-        # `veto` carries the geometry term for plates: an aspect ratio outside
-        # the band means this is not a plate seen face-on, and OCR on it
-        # produces invented characters rather than a poor read.
-        {"sharp": sharp, "res": res, "expo": expo, "geo": geo, "veto": geo},
-        {"sharp": 0.45, "res": 0.30, "geo": 0.15, "expo": 0.10},
-    )
-    return Quality(
-        total=total,
-        sharpness=sharp,
-        resolution=res,
-        exposure=expo,
-        geometry=geo,
-        reason=_plate_reason(sharp, res, expo, geo_reason, w),
-    )
-
-
-def _plate_reason(
-    sharp: float, res: float, expo: float, geo_reason: str, px: int
-) -> str:
-    if res <= 0.0:
-        return f"too small — {px} px wide"
-    if geo_reason.startswith(("too square", "too wide", "degenerate")):
-        return geo_reason
-    if sharp < 0.35:
-        return "soft — motion blur"
-    if expo < 0.4:
-        return "clipped — headlight glare or deep shadow"
-    if res < 0.5:
-        return f"usable but small — {px} px wide"
-    return "good"
-
-
 def score(kind: str, crop_bgr: np.ndarray, **kw) -> Quality:
-    """Dispatch on kind, so callers can stay generic over faces and plates."""
+    """Dispatch on kind (faces are the only kind left since plates were
+    removed; kept so callers stay generic)."""
     if kind == "face":
         return score_face(crop_bgr, landmarks=kw.get("landmarks"))
-    if kind == "plate":
-        return score_plate(crop_bgr)
     raise ValueError(f"unknown crop kind {kind!r}")
 
 

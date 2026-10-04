@@ -1,4 +1,4 @@
-"""Recognition profiles: people and vehicles, their enrolled samples, and the
+"""Recognition profiles: the people enrolled, their samples, and the
 rolling candidate list they are enrolled FROM.
 
 ADMIN-ONLY, ALL OF IT — including the reads.
@@ -59,8 +59,7 @@ from ..native.timing import TIMINGS
 from ..native.heatmap import COLS, ROWS, suggest_zone
 from ..native.recognition import (
     ALERT_MODES, FACE_THRESHOLD, MIN_MARGIN, SUGGEST_FACE_COSINE, SUGGEST_LIMIT,
-    PLATE_MAX_DISTANCE, cosine, from_blob, normalize, normalize_alert_mode,
-    normalize_plate, plate_distance,
+    cosine, from_blob, normalize, normalize_alert_mode,
 )
 
 log = logging.getLogger(__name__)
@@ -92,9 +91,10 @@ router = APIRouter(
 #: it would silently re-break the iOS grid. `image_auth_smoke.py` asserts it.
 media_router = APIRouter(prefix="/api/recognition", tags=["recognition"])
 
-#: The two kinds of identity a profile can carry. Deliberately closed: a third
-#: kind is a schema change plus a matcher, not a new string.
-KINDS = ("person", "vehicle")
+#: The kinds of identity a profile can carry. Licence plate reading was
+#: removed, so "vehicle" is gone: vehicle profiles in an older database are
+#: kept (nothing is deleted) but never listed, matched or created.
+KINDS = ("person",)
 
 MAX_NAME = 64
 MAX_NOTES = 500
@@ -128,6 +128,9 @@ class ProfileCreate(BaseModel):
     @field_validator("kind")
     @classmethod
     def _kind(cls, v: str) -> str:
+        if v == "vehicle":
+            raise ValueError("licence plate recognition was removed — only person "
+                             "profiles can be created")
         if v not in KINDS:
             raise ValueError(f"kind must be one of {KINDS}")
         return v
@@ -162,20 +165,6 @@ class ProfileUpdate(BaseModel):
 
     _name = field_validator("name")(ProfileCreate._name.__func__)  # type: ignore[attr-defined]
     _threshold = field_validator("threshold")(ProfileCreate._threshold.__func__)  # type: ignore[attr-defined]
-
-
-class PlateSample(BaseModel):
-    """Enroll a vehicle by typing its plate — no sighting required."""
-
-    plate: str = Field(min_length=1, max_length=16)
-
-    @field_validator("plate")
-    @classmethod
-    def _plate(cls, v: str) -> str:
-        cleaned = normalize_plate(v)
-        if not cleaned:
-            raise ValueError("plate must contain letters or digits")
-        return cleaned
 
 
 class EnrollRequest(BaseModel):
@@ -224,6 +213,8 @@ def _sample_out(row: Any) -> dict[str, Any]:
     return {
         "id": row["id"],
         "profile_id": row["profile_id"],
+        # Always "" now that plate reading is gone; kept because the
+        # installed iOS app decodes it as a required field.
         "plate": row["plate"],
         "model_key": row["model_key"],
         "quality": row["quality"],
@@ -251,6 +242,8 @@ def _candidate_out(row: Any, event_id: Optional[int] = None) -> dict[str, Any]:
         "camera": row["camera"],
         "event_fid": row["event_fid"],
         "event_id": event_id,
+        # Always "" now that plate reading is gone; kept because the
+        # installed iOS app decodes it as a required field.
         "plate": row["plate"],
         "quality": row["quality"],
         "best_score": row["best_score"],
@@ -322,21 +315,18 @@ async def list_profiles(
 ) -> list[dict[str, Any]]:
     db = request.app.state.db
     active = _active_model_key(request)
-    sql = "SELECT * FROM profiles"
+    if kind and kind not in KINDS:
+        # "vehicle" included: plate reading was removed, so there are none to list.
+        return []
+    sql = "SELECT * FROM profiles WHERE kind = 'person' ORDER BY name COLLATE NOCASE"
     params: list[Any] = []
-    if kind:
-        if kind not in KINDS:
-            raise HTTPException(status_code=400, detail=f"kind must be one of {KINDS}")
-        sql += " WHERE kind = ?"
-        params.append(kind)
-    sql += " ORDER BY kind, name COLLATE NOCASE"
     rows = await (await db.conn.execute(sql, params)).fetchall()
 
     out: list[dict[str, Any]] = []
     for r in rows:
         cur = await db.conn.execute(
             "SELECT COUNT(*) AS n, "
-            "SUM(CASE WHEN plate != '' OR model_key = ? THEN 1 ELSE 0 END) AS usable "
+            "SUM(CASE WHEN model_key = ? THEN 1 ELSE 0 END) AS usable "
             "FROM profile_samples WHERE profile_id = ?",
             (active, r["id"]),
         )
@@ -382,7 +372,7 @@ async def get_profile(profile_id: int, request: Request) -> dict[str, Any]:
             (profile_id,),
         )
     ).fetchall()
-    usable = sum(1 for s in samples if s["plate"] or s["model_key"] == active)
+    usable = sum(1 for s in samples if s["model_key"] == active)
     return {
         **_profile_out(row, len(samples), usable),
         "samples": [_sample_out(s) for s in samples],
@@ -445,38 +435,6 @@ async def delete_profile(profile_id: int, request: Request) -> Response:
 # ---------------------------------------------------------------------------
 # Samples
 # ---------------------------------------------------------------------------
-
-
-@router.post("/profiles/{profile_id}/plate", status_code=201)
-async def add_plate_sample(
-    profile_id: int, body: PlateSample, request: Request
-) -> dict[str, Any]:
-    db = request.app.state.db
-    row = await _require_profile(db, profile_id)
-    if row["kind"] != "vehicle":
-        raise HTTPException(status_code=400, detail="Only a vehicle profile carries a plate")
-    cur = await db.conn.execute(
-        "INSERT INTO profile_samples (profile_id, embedding, dim, plate, model_key, "
-        "image_path, quality, source_fid, created_at) "
-        "VALUES (?, NULL, 0, ?, '', '', 1.0, '', ?)",
-        (profile_id, body.plate, time.time()),
-    )
-    await db.conn.execute(
-        "UPDATE profiles SET updated_at = ? WHERE id = ?", (time.time(), profile_id)
-    )
-    # Any unread-plate sighting that IS this plate is now answered. Removing
-    # them is what stops the review list filling with the same car you just
-    # named. See _absorb_matching_plates on why this is safe to do without
-    # asking, where the face equivalent is not.
-    absorbed = await _absorb_matching_plates(
-        db, request.app.state.config.candidate_crops_dir, profile_id, body.plate
-    )
-    await db.conn.commit()
-    await _reload_gallery(request)
-    sample = await (
-        await db.conn.execute("SELECT * FROM profile_samples WHERE id = ?", (cur.lastrowid,))
-    ).fetchone()
-    return {**_sample_out(sample), "absorbed_candidates": absorbed}
 
 
 @router.post("/profiles/{profile_id}/enroll", status_code=201)
@@ -577,55 +535,6 @@ async def enroll_candidates(
 
 
 
-async def _absorb_matching_plates(
-    db: Any, crops_dir: Path, profile_id: int, plate: str
-) -> int:
-    """Delete unread-plate candidates that ARE this plate. Returns how many.
-
-    AUTOMATIC, unlike the face suggestion, and the difference is not a
-    preference — it is that the two questions are not equally decidable.
-
-    "Is this the same plate?" has an exact answer: after normalization and
-    glyph folding, two reads of 7ABC123 are the same vehicle by definition.
-    "Is this the same face?" is a score, and a score can be wrong in a way that
-    silently attaches a stranger to someone's name.
-
-    So a candidate within PLATE_MAX_DISTANCE of a plate the operator has just
-    typed carries no new information — it is a duplicate of a fact already
-    established — and leaving it in the unread list is noise that buries the
-    plates still worth reviewing. The rows are REMOVED rather than enrolled:
-    the plate string is already a sample, and a second identical string adds
-    nothing to match against.
-    """
-    try:
-        rows = await (
-            await db.conn.execute(
-                "SELECT id, plate, image_path FROM recognition_candidates "
-                "WHERE kind = 'plate' AND plate != ''"
-            )
-        ).fetchall()
-    except Exception:
-        log.exception("could not scan plate candidates for %s", plate)
-        return 0
-    doomed = [
-        r for r in rows if plate_distance(r["plate"], plate) <= PLATE_MAX_DISTANCE
-    ]
-    if not doomed:
-        return 0
-    for r in doomed:
-        _unlink(crops_dir, r["image_path"])
-    placeholders = ",".join("?" * len(doomed))
-    await db.conn.execute(
-        f"DELETE FROM recognition_candidates WHERE id IN ({placeholders})",
-        [r["id"] for r in doomed],
-    )
-    log.info(
-        "absorbed %d unread-plate candidate(s) matching %s into profile %d",
-        len(doomed), plate, profile_id,
-    )
-    return len(doomed)
-
-
 async def _similar_candidates(
     db: Any, profile: Any, *, active_model: str, limit: int = SUGGEST_LIMIT
 ) -> list[dict[str, Any]]:
@@ -641,7 +550,7 @@ async def _similar_candidates(
     subtly different notion of similar that could disagree with the matcher and
     leave an operator unable to tell which was lying.
 
-    Returns [] for a vehicle, for a profile with no usable samples, and when
+    Returns [] for a non-person profile, for one with no usable samples, and when
     recognition has no model loaded — none of which is an error, and all of
     which would otherwise be an exception on an ordinary enrollment.
     """
@@ -773,11 +682,12 @@ async def list_candidates(
     most recent one. Recency is still available to the client via created_at.
     """
     db = request.app.state.db
-    sql = "SELECT * FROM recognition_candidates WHERE 1=1"
+    # Faces only: plate reading was removed, and unread plates left from
+    # before age out of the rolling store on their own.
+    if kind and kind != "face":
+        return []
+    sql = "SELECT * FROM recognition_candidates WHERE kind = 'face'"
     params: list[Any] = []
-    if kind:
-        sql += " AND kind = ?"
-        params.append(kind)
     if camera:
         sql += " AND camera = ?"
         params.append(camera)
@@ -928,8 +838,8 @@ async def recognition_heatmap(
     empty when there is not yet enough evidence to say anything, which the UI
     shows as "watch for a while first".
     """
-    if kind not in ("face", "plate"):
-        raise HTTPException(status_code=400, detail="kind must be 'face' or 'plate'")
+    if kind != "face":
+        raise HTTPException(status_code=400, detail="kind must be 'face'")
     heat = _heatmap(request)
     if heat is None:
         return {
@@ -966,11 +876,14 @@ async def recognition_status(request: Request) -> dict[str, Any]:
     db = request.app.state.db
     active = _active_model_key(request)
     counts = await (
-        await db.conn.execute("SELECT kind, COUNT(*) AS n FROM profiles GROUP BY kind")
+        await db.conn.execute(
+            "SELECT kind, COUNT(*) AS n FROM profiles WHERE kind = 'person' GROUP BY kind"
+        )
     ).fetchall()
     cand = await (
         await db.conn.execute(
-            "SELECT kind, COUNT(*) AS n FROM recognition_candidates GROUP BY kind"
+            "SELECT kind, COUNT(*) AS n FROM recognition_candidates WHERE kind = 'face' "
+            "GROUP BY kind"
         )
     ).fetchall()
     stale = await (
@@ -982,15 +895,14 @@ async def recognition_status(request: Request) -> dict[str, Any]:
     ).fetchone()
     engine = getattr(request.app.state, "engine", None)
     face = getattr(engine, "_face", None) if engine is not None else None
-    plates = getattr(engine, "_plates", None) if engine is not None else None
     return {
         "model_key": active,
         "ready": bool(active),
         # WHERE recognition runs, so "is my GPU being used?" is answerable from
         # the app instead of by reading source. Every model stage follows the
-        # detector (native/accel.py): on a CUDA box the face models, the plate
-        # detector and both plate readers run on the GPU; on a CPU box they run
-        # on the CPU, where the face models use OpenCV (as fast or faster there).
+        # detector (native/accel.py): on a CUDA box the face models run on the
+        # GPU; on a CPU box they run on the CPU, where they use OpenCV (as fast
+        # or faster there).
         #
         # `devices` names each stage's silicon AND why, as the live sessions
         # actually bound it — asking for CUDA and silently getting CPU must not
@@ -999,15 +911,10 @@ async def recognition_status(request: Request) -> dict[str, Any]:
         # that runs instantly and must not look the same.
         "devices": accel.report(
             getattr(request.app.state, "detector", None),
-            plate_ocr_device=getattr(getattr(plates, "_reader", None), "device", None),
             face_device=_face_device(face),
-            plate_detector_device=(
-                getattr(getattr(plates, "_reader", None), "devices", {}) or {}
-            ).get("plate_detector"),
         ),
         "timings": TIMINGS.report(),
         "face": face.status() if hasattr(face, "status") else None,
-        "plates": plates.status() if hasattr(plates, "status") else None,
         "profiles": {r["kind"]: r["n"] for r in counts},
         "candidates": {r["kind"]: r["n"] for r in cand},
         # Samples that can no longer be compared because the embedding model

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Best-shot selection, the profile gallery, and multi-frame plate voting.
+"""Best-shot selection and the profile gallery.
 
 These two modules were written so that the part of recognition most likely to
 be WRONG can be tested with no model weights and no GPU: thresholds, tie-breaks,
@@ -16,8 +16,6 @@ What gets the most attention, because it would be quietly dangerous:
    mismatched samples rather than score them.
 3. TIME DIVERSITY. The shot buffer must not fill with five copies of one
    instant — that is the failure that makes "pick your best photo" useless.
-4. PLATE VOTING across reads of different lengths, where naive per-position
-   voting aligns the wrong characters.
 
 Offline-runnable.
 """
@@ -37,21 +35,14 @@ from app.native.bestshot import (  # noqa: E402
     BestShotBuffer,
     Quality,
     score_face,
-    score_plate,
 )
 from app.native.recognition import (  # noqa: E402
     FACE_THRESHOLD,
     Gallery,
-    PlateRead,
     cosine,
-    fold_plate,
     from_blob,
     normalize,
-    normalize_plate,
-    plate_distance,
-    regional_plate,
     to_blob,
-    vote_plate,
 )
 
 _failures: list[str] = []
@@ -161,22 +152,6 @@ def quality_checks() -> None:
         "a short landmark list degrades to neutral rather than indexing off the end",
     )
 
-    print("\nPlate crop scoring")
-    plate_ok = score_plate(sharp_crop(200, 100))
-    plate_square = score_plate(sharp_crop(100, 100))
-    plate_narrow = score_plate(sharp_crop(500, 100))
-    check(plate_ok.geometry > 0.9, "a 2:1 crop is the ideal plate aspect")
-    check(plate_square.geometry == 0.0, "a 1:1 crop is not a plate seen face-on")
-    check(plate_narrow.geometry == 0.0, "a 5:1 crop is too oblique to read")
-    check("too square" in plate_square.reason, f"and says so ({plate_square.reason!r})")
-    check(
-        score_plate(sharp_crop(40, 20)).resolution == 0.0,
-        "a 40 px-wide plate is below the OCR floor",
-    )
-    check(
-        score_plate(sharp_crop(200, 100)).total > score_plate(blurred_crop(200, 100)).total,
-        "sharpness dominates the plate score, as OCR requires",
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -260,10 +235,10 @@ def buffer_checks() -> None:
     check(buf.best(5, "face") is None, "...and leaves no slot behind")
 
     buf.offer(tracker_id=6, kind="face", crop_bgr=sharp_crop(), box=box, frame_time=0.0)
-    buf.offer(tracker_id=6, kind="plate", crop_bgr=sharp_crop(200, 100), box=box, frame_time=0.0)
+    buf.offer(tracker_id=8, kind="face", crop_bgr=sharp_crop(), box=box, frame_time=0.0)
     check(
-        len(buf.shots(6, "face")) == 1 and len(buf.shots(6, "plate")) == 1,
-        "faces and plates on ONE track are kept in separate slots",
+        len(buf.shots(6, "face")) == 1 and len(buf.shots(8, "face")) == 1,
+        "faces on two tracks are kept in separate slots",
     )
 
     print("\nBest-shot buffer: the crop is copied, not referenced")
@@ -338,9 +313,9 @@ def gallery_checks() -> None:
     ]
     sample_rows = [
         {"id": 1, "profile_id": 1, "embedding": to_blob(adam), "dim": 4,
-         "model_key": "m1", "plate": ""},
+         "model_key": "m1"},
         {"id": 2, "profile_id": 2, "embedding": to_blob(sam), "dim": 4,
-         "model_key": "m1", "plate": ""},
+         "model_key": "m1"},
     ]
     g = Gallery.build(prof_rows, sample_rows, model_key="m1")
     check(len(g) == 2, "two enrolled people build a gallery of two")
@@ -362,9 +337,9 @@ def gallery_checks() -> None:
         [{"id": 1, "kind": "person", "name": "Adam", "enabled": 1, "threshold": None}],
         [
             {"id": 1, "profile_id": 1, "embedding": to_blob(pose_a), "dim": 4,
-             "model_key": "m1", "plate": ""},
+             "model_key": "m1"},
             {"id": 2, "profile_id": 1, "embedding": to_blob(pose_b), "dim": 4,
-             "model_key": "m1", "plate": ""},
+             "model_key": "m1"},
         ],
         model_key="m1",
     )
@@ -388,9 +363,9 @@ def gallery_checks() -> None:
         ],
         [
             {"id": 1, "profile_id": 1, "embedding": to_blob(twin_a), "dim": 4,
-             "model_key": "m1", "plate": ""},
+             "model_key": "m1"},
             {"id": 2, "profile_id": 2, "embedding": to_blob(twin_b), "dim": 4,
-             "model_key": "m1", "plate": ""},
+             "model_key": "m1"},
         ],
         model_key="m1",
     )
@@ -415,9 +390,9 @@ def gallery_checks() -> None:
         prof_rows,
         sample_rows + [
             {"id": 3, "profile_id": 1, "embedding": b"\x00\x01", "dim": 4,
-             "model_key": "m1", "plate": ""},
+             "model_key": "m1"},
             {"id": 4, "profile_id": 99, "embedding": to_blob(adam), "dim": 4,
-             "model_key": "m1", "plate": ""},
+             "model_key": "m1"},
         ],
         model_key="m1",
     )
@@ -460,145 +435,18 @@ def gallery_checks() -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# Plates
-# ---------------------------------------------------------------------------
-
-
-def plate_checks() -> None:
-    print("\nPlate normalization")
-    check(normalize_plate(" 7abc-123 ") == "7ABC123", "case, spaces and dashes are stripped")
-    check(normalize_plate("") == "", "an empty read normalizes to empty")
-    check(fold_plate("AB0123") == fold_plate("ABO123"), "O and 0 fold together for comparison")
-    check(fold_plate("1I5S") == "1155", "I/1 and S/5 fold too")
-    check(
-        normalize_plate("ABO123") == "ABO123",
-        "...but normalize_plate NEVER rewrites the glyph — the raw read is preserved",
-    )
-
-    check(plate_distance("ABC123", "ABC123") == 0, "identical plates are 0 apart")
-    check(plate_distance("ABC123", "ABC124") == 1, "one substitution is 1")
-    check(plate_distance("ABC123", "ABC12") == 1, "one deletion is also 1")
-    check(plate_distance("ABC123", "XYZ789") == 6, "a different plate is far")
-    check(plate_distance("ABO123", "AB0123") == 0, "folding makes an O/0 misread free")
-    check(plate_distance("", "ABC") == 3, "an empty read is len() away, not an error")
-
-    print("\nPlate voting across frames")
-    # Three reads, each wrong in a different position. No single frame is
-    # right; the vote recovers ABC123.
-    reads = [
-        PlateRead("ABC173", confidence=0.9, quality=0.8),
-        PlateRead("ABC123", confidence=0.8, quality=0.9),
-        PlateRead("A8C123", confidence=0.9, quality=0.9),
-    ]
-    v = vote_plate(reads)
-    check(v is not None and v.text == "ABC123", "per-character vote recovers the true plate")
-    check(v.reads == 3, "all three reads were in the winning cohort")
-    check(len(v.agreement) == 6, "agreement is reported per character")
-    check(
-        min(v.agreement) < 1.0 and max(v.agreement) == 1.0,
-        "positions that disagreed are visibly weaker than the ones that did not",
-    )
-    check(
-        abs(v.confidence - min(v.agreement)) < 1e-9,
-        "overall confidence is the WEAKEST character, not the mean",
-    )
-
-    print("\nPlate voting: length is decided before position")
-    # A truncated read must not drag every later position out of alignment.
-    v = vote_plate([
-        PlateRead("ABC123", confidence=0.9, quality=0.9),
-        PlateRead("ABC123", confidence=0.9, quality=0.9),
-        PlateRead("BC123", confidence=0.9, quality=0.9),   # dropped leading char
-    ])
-    check(v is not None and v.text == "ABC123", "a short read loses the length vote")
-    check(v.reads == 2, "...and is excluded from the cohort rather than padded")
-
-    print("\nPlate voting: weighting")
-    # One high-quality read against two poor ones that agree with each other.
-    v = vote_plate([
-        PlateRead("ABC123", confidence=0.99, quality=0.99),
-        PlateRead("ABC124", confidence=0.30, quality=0.30),
-        PlateRead("ABC124", confidence=0.30, quality=0.30),
-    ])
-    check(
-        v is not None and v.text == "ABC123",
-        "one sharp confident read outweighs two weak ones that agree",
-    )
-    check(
-        vote_plate([PlateRead("ABC123", confidence=0.0, quality=1.0)]) is None,
-        "a zero-confidence read carries no weight and yields no vote",
-    )
-    check(vote_plate([]) is None, "no reads yields no vote")
-    check(vote_plate([PlateRead("", 1.0, 1.0)]) is None, "an empty read yields no vote")
-
-    print("\nGallery: plate matching")
-    g = Gallery.build(
-        [{"id": 1, "kind": "vehicle", "name": "Adam's truck", "enabled": 1, "threshold": None}],
-        [{"id": 1, "profile_id": 1, "embedding": None, "dim": 0,
-          "model_key": "", "plate": "ABC123"}],
-        model_key="m1",
-    )
-    check(g.match_plate("ABC123").matched, "an exact plate matches")
-    check(g.match_plate("ABC123").score == 1.0, "...at a similarity of 1.0")
-    check(g.match_plate("ABC124").matched, "a one-character misread still matches")
-    check(g.match_plate("ABO123").matched, "an O/0 misread matches via folding")
-    check(not g.match_plate("XYZ789").matched, "a different plate does not match")
-    check(not g.match_plate("").matched, "an empty read matches nothing")
-    check(
-        g.match_plate("AB9924").reason.endswith("edits away"),
-        "a near miss explains how far off it was",
-    )
-    check(
-        g.counts() == {"vehicle": 1},
-        "counts() reports the gallery by kind",
-    )
-    # A vehicle profile must not be reachable through the face matcher, and
-    # vice versa: they are different spaces with different thresholds.
-    check(
-        not g.match_face(unit(1, 0, 0, 0)).matched,
-        "a vehicle profile is invisible to face matching",
-    )
-
-
-def region_checks() -> None:
-    print("\nUS plates: O, I and Q are read as 0, 1 and 0")
-    check(regional_plate("hl okty1", "us") == "HL0KTY1",
-          "a US read 'HLOKTY1' is stored as HL0KTY1 — US standard plates leave "
-          "the letter O off because it reads as zero")
-    check(regional_plate("CJIP5G", "us") == "CJ1P5G" and regional_plate("SHQR7X", "us") == "SH0R7X",
-          "I becomes 1 and Q becomes 0")
-    check(regional_plate("CJBP4V", "us") == "CJBP4V",
-          "and nothing else is touched: B and 8 are both real US plate characters")
-    check(regional_plate("HLOKTY1", "any") == "HLOKTY1",
-          "in 'any' mode reads are kept as the readers gave them")
-    check(regional_plate("HLOKTY1", "martian") == "HLOKTY1",
-          "an unknown region means no mapping, never a mapping nobody chose")
-
-    print("\nwhy it matters to the vote")
-    split = [PlateRead("HLOKTY1", 0.95, 1.0, (0.99, 0.99, 0.55, 0.99, 0.99, 0.99, 0.99)),
-             PlateRead("HL0KTY1", 0.97, 1.0, (0.99, 0.99, 0.62, 0.99, 0.99, 0.99, 0.99))]
-    raw = vote_plate(split)
-    us = vote_plate([PlateRead(regional_plate(r.text, "us"), r.confidence, r.quality, r.char_conf)
-                     for r in split])
-    check(raw is not None and raw.confidence < 0.6,
-          f"two readers splitting O/0 leave the raw vote a coin flip ({raw.confidence:.2f})")
-    check(us is not None and us.text == "HL0KTY1" and us.confidence == 1.0,
-          "read the US way they agree, and the plate is stored")
-
-
 def overflow_checks() -> None:
     print("\na full buffer drops the new shot without comparing images")
     # Regression: Shot's generated __eq__ compared every field, crop arrays
     # included, so `shot in dropped` raised on a full buffer and aborted the
-    # full-resolution plate look it happened in.
+    # full-resolution look it happened in.
     buf = BestShotBuffer(keep=2, min_gap_s=0.1)
     rng = np.random.default_rng(3)
     kept = []
     for i, (w, q) in enumerate(((120, 0.9), (90, 0.8), (60, 0.3), (140, 0.85))):
         crop = rng.integers(0, 255, (w // 2, w, 3), dtype=np.uint8)
         try:
-            kept.append(buf.offer(tracker_id=1, kind="plate", crop_bgr=crop,
+            kept.append(buf.offer(tracker_id=1, kind="face", crop_bgr=crop,
                                   box=(0, 0, w, w // 2), frame_time=float(i),
                                   quality=Quality(q, q, q, q, q, "t")))
         except Exception as exc:  # noqa: BLE001
@@ -606,18 +454,16 @@ def overflow_checks() -> None:
     check(not any(isinstance(k, Exception) for k in kept),
           f"offering past capacity with crops of different sizes never raises ({kept})")
     check(kept[2] is None, "the worst shot, offered to a full buffer, is dropped")
-    check([round(s.quality.total, 2) for s in buf.shots(1, "plate")] == [0.9, 0.85],
+    check([round(s.quality.total, 2) for s in buf.shots(1, "face")] == [0.9, 0.85],
           "and the buffer keeps the best two")
 
 
 def main() -> int:
     overflow_checks()
-    region_checks()
     quality_checks()
     buffer_checks()
     embedding_checks()
     gallery_checks()
-    plate_checks()
 
     print()
     if _failures:

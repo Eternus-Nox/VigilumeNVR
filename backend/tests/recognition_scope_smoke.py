@@ -19,9 +19,9 @@ client can write badly. They are read on a MAINTENANCE TICK, so a raise there
 takes recognition down — every malformed shape must degrade to the shipped
 default instead.
 
-Switching a pass ON also has to turn on the object it reads from — the passes
-are fed from confirmed DETECTIONS, so plate reading on a camera that does not
-detect vehicles finds nothing and returns, silently and correctly. Turning it
+Switching the face pass ON also has to turn on the object it reads from — the
+pass is fed from confirmed DETECTIONS, so face recognition on a camera that does
+not detect people finds nothing and returns, silently and correctly. Turning it
 back off must NOT take the object away again.
 
 Offline-runnable; no models and no network. The prerequisite checks use a real
@@ -86,7 +86,7 @@ def label_checks() -> None:
     check("person" in FACE_LABELS, "a person always does")
     check(not any(v in FACE_LABELS for v in VEHICLE_FACE_LABELS),
           "a vehicle does NOT by default — on a road-facing camera most "
-          "windscreens are glare, and a plate identifies a car better")
+          "windscreens are glare, so a face through one is rarely legible")
     check("car" in VEHICLE_FACE_LABELS and "truck" in VEHICLE_FACE_LABELS,
           "cars and trucks are the opt-in set (the driver through the glass)")
     check(not set(FACE_LABELS) & set(VEHICLE_FACE_LABELS),
@@ -100,7 +100,6 @@ class FakeCam:
     def __init__(self, **kw):
         self.row = {"name": kw.pop("name", "front")}
         self.face_zones = []
-        self.plate_zones = []
         for k, v in kw.items():
             setattr(self, k, v)
 
@@ -114,18 +113,10 @@ def gate_checks() -> None:
     def face_on(cam) -> bool:
         return bool(getattr(cam, "face_recognition", True))
 
-    def plate_on(cam) -> bool:
-        return bool(getattr(cam, "plate_recognition", True))
-
-    check(face_on(FakeCam()) and plate_on(FakeCam()),
-          "a camera with NO switches set recognizes — the default is ON, so "
-          "adding these columns changes nothing for an existing box")
+    check(face_on(FakeCam()),
+          "a camera with NO switch set recognizes — the default is ON, so "
+          "adding the column changes nothing for an existing box")
     check(not face_on(FakeCam(face_recognition=False)), "face off is honoured")
-    check(not plate_on(FakeCam(plate_recognition=False)), "plate off is honoured")
-    check(face_on(FakeCam(plate_recognition=False)),
-          "the two are INDEPENDENT — a driveway camera can read plates while "
-          "never being asked for a face")
-    check(plate_on(FakeCam(face_recognition=False)), "...and the reverse")
 
 
 def settings_model_checks() -> None:
@@ -222,15 +213,15 @@ async def prereq_checks() -> None:
     """Switching a pass ON turns on the object it reads from.
 
     Recognition never sees a frame directly — it is fed the engine's CONFIRMED
-    detections, which `detect_objects` filters first. So plate reading on a
-    camera that does not detect vehicles finds nothing and returns, silently
-    and correctly, which is indistinguishable from "no cars came past". Nobody
-    ticks plate reading and means "but ignore cars", so the prerequisite is
-    added rather than left as a trap.
+    detections, which `detect_objects` filters first. So face recognition on a
+    camera that does not detect people finds nothing and returns, silently
+    and correctly, which is indistinguishable from "nobody came past". Nobody
+    ticks face recognition and means "but ignore people", so the prerequisite
+    is added rather than left as a trap.
 
     The other half matters just as much: turning a pass back OFF must not take
     the object away again. Detection is its own feature, configured for events
-    and notifications, and quietly removing `car` from a driveway camera would
+    and notifications, and quietly removing `person` from a porch camera would
     break something the operator never touched.
     """
     import tempfile
@@ -255,13 +246,6 @@ async def prereq_checks() -> None:
     async def objects_of(name: str) -> list[str]:
         return (await db.get_camera(name)).get("detect_objects") or []
 
-    await make("drive", ["person"])
-    added = await db.set_camera_recognition("drive", plate=True)
-    check(added == ["car"],
-          f"plate reading on a person-only camera reports adding car (got {added})")
-    check(await objects_of("drive") == ["person", "car"],
-          "...and appends it, keeping what was already there")
-
     await make("porch", ["dog", "cat"])
     added = await db.set_camera_recognition("porch", face=True)
     check(added == ["person"], f"face recognition adds person (got {added})")
@@ -273,35 +257,28 @@ async def prereq_checks() -> None:
           "a second click adds nothing and reports nothing — the label is "
           "already there, so there is nothing to tell anyone about")
 
-    # Only ONE label per pass. The plate pass reads six (car/truck/bus/...),
-    # but turning on six object classes — each of which also raises events and
-    # notifications — is a much bigger change than the box that was ticked.
     await make("gate", [])
-    added = await db.set_camera_recognition("gate", plate=True)
-    check(added == ["car"],
-          f"one label per pass, not the pass's whole accepted set (got {added})")
-
-    await make("both", [])
-    added = await db.set_camera_recognition("both", face=True, plate=True)
-    check(added == ["person", "car"],
-          f"both switches in one call add both prerequisites (got {added})")
+    added = await db.set_camera_recognition("gate", face=True)
+    check(added == ["person"],
+          f"an empty object list gains person — the newer, explicit choice wins "
+          f"(got {added})")
 
     print("\n...and turning it OFF leaves detection alone")
     await make("side", ["person", "car"])
-    added = await db.set_camera_recognition("side", face=False, plate=False)
-    check(added == [], "switching both off adds nothing")
+    added = await db.set_camera_recognition("side", face=False)
+    check(added == [], "switching it off adds nothing")
     check(await objects_of("side") == ["person", "car"],
           "and removes nothing — detection is its own feature, configured for "
           "events and recording, not a thing recognition may take back")
     cam = await db.get_camera("side")
-    check(not cam["face_recognition"] and not cam["plate_recognition"],
-          "...while the switches themselves did go off")
+    check(not cam["face_recognition"],
+          "...while the switch itself did go off")
 
     print("\nthe column is only rewritten when it actually changes")
     await make("quiet", ["person", "car"])
-    added = await db.set_camera_recognition("quiet", face=True, plate=True)
+    added = await db.set_camera_recognition("quiet", face=True)
     check(added == [],
-          "a camera already detecting both needs no change, so detect_objects "
+          "a camera already detecting people needs no change, so detect_objects "
           "is left out of the UPDATE entirely rather than rewritten with its "
           "own value over a concurrent edit to the object picker")
 
