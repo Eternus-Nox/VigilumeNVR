@@ -196,8 +196,17 @@ audio) meant the fullscreen view — unmuted from the moment it opens — could
 never leave a frozen main. Now every stats sample (2 s) checks
 `framesDecoded`: no new frame for `stallWindow` (5 s) while playing triggers a
 make-before-break recovery — the high rung drops to the substream even while
-unmuted, any other view reconnects its own rung, and a recovery candidate that
+unmuted, a two-rung view reconnects its own rung, and a recovery candidate that
 never paints ends in a fresh attach (which falls back to HLS like any other).
+A grid tile restarts in place instead: make-before-break opens a second
+session and decoder beside the frozen one, which on a grid doubles exactly the
+load that can starve a tile in the first place.
+
+**HLS is not a dead end.** A view on the HLS fallback that is not playing tries
+WebRTC again every `whepRetryInterval` (10 s), from the small rung. Before
+this, a view that missed its first 4.5 s — a camera restarting its encoder, a
+dozen tiles negotiating at once — fell to HLS, and if HLS could not start
+either it sat on the poster image for as long as it was open.
 A main that freezes within `stallRetireWithin` (30 s) of being climbed to is
 not climbed again on that attach (the "SD (compat)" badge shows; its HD button
 retries). Cameras send frames at a fixed rate whatever the scene, so a still

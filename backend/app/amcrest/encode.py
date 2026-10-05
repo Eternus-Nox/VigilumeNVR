@@ -433,6 +433,21 @@ def plan_main_stream(
             "changes": changes, "keys": keys, "notes": notes}
 
 
+def drop_planned(plan: dict[str, Any], skip: set[str]) -> dict[str, Any]:
+    """`plan` without the changes whose "<format>:<setting>" key is in `skip`."""
+    keep = [(c, k) for c, k in zip(plan["changes"], plan["keys"]) if k not in skip]
+    settings: dict[int, dict[str, dict[str, str]]] = {}
+    for n, groups in plan["settings"].items():
+        mine = {g: v for g, v in groups.items() if f"{n}:{g}" not in skip}
+        if mine:
+            settings[n] = mine
+    return {**plan,
+            "changes": [c for c, _ in keep], "keys": [k for _, k in keep],
+            "resolution_formats": [n for n in plan["resolution_formats"]
+                                   if f"{n}:resolution" not in skip],
+            "settings": settings}
+
+
 #: Order settings are retried in, one at a time, when the camera rejects them
 #: together. Resolution is always set first (and alone): some cameras refuse
 #: H.264 at 4K but take it at 1080p.

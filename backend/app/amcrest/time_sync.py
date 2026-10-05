@@ -99,6 +99,11 @@ class TimeSyncManager:
         # racing the prober's online transition for the same camera).
         self._inflight: dict[str, ConnKey] = {}
         self._tasks: set[asyncio.Task] = set()
+        # Cameras (by conn key) that would not take an H.264 substream. Tried
+        # once per run, not every 30 minutes: each attempt is a write that can
+        # restart the camera's encoder (dropping every live viewer), and the
+        # later attempts change the substream's bitrate settings too.
+        self._sub_codec_refused: set[ConnKey] = set()
 
     def _config(self) -> tuple[bool, str]:
         ts = self._settings.time_sync
@@ -232,14 +237,18 @@ class TimeSyncManager:
             # poster image) and iPhones have no WebRTC H.265 decoder. Same
             # doorbell skip as below — its `_sub` is the main stream.
             provision_codec = getattr(client, "provision_substream_codec", None)
-            if provision_codec is not None and not _is_doorbell(cam):
+            if (provision_codec is not None and not _is_doorbell(cam)
+                    and key not in self._sub_codec_refused):
                 try:
                     sub = await provision_codec()
                     for line in sub.get("changed") or []:
                         log.info("substream-codec %s: %s", name, line)
                     for line in sub.get("failed") or []:
                         log.warning("substream-codec %s: %s — live view on this camera "
-                                    "will not work until it is H.264", name, line)
+                                    "will not work until it is H.264 (not retried until "
+                                    "restart)", name, line)
+                    if sub.get("failed"):
+                        self._sub_codec_refused.add(key)
                 except AmcrestError as exc:
                     log.info("substream-codec %s: not set yet (%s)", name, exc)
                 except Exception:  # noqa: BLE001 — never crash over codec provisioning

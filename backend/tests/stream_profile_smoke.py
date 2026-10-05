@@ -434,6 +434,21 @@ async def substream_checks() -> None:
         await mgr._provision(cam, ("1", "u", "p"), "UTC")
     check(called == ["dome"], "provisioned on connect; the doorbell (sub = main) is skipped")
 
+    refusing: list[str] = []
+
+    class Refuses(Probe):
+        async def provision_substream_codec(self):
+            refusing.append(self.cam["name"])
+            return {"changed": [], "failed": ["substream is MJPG; the camera would not take H.264"]}
+
+    mgr2 = TimeSyncManager(TS(), client_factory=Refuses)
+    dome = {"name": "dome", "ip": "1", "username": "u", "password": "p", "model": "IP4M-1041B"}
+    for _ in range(3):
+        await mgr2._provision(dome, ("1", "u", "p"), "UTC")
+    check(refusing == ["dome"],
+          f"a camera that refuses H.264 is tried once per run, not every 30 min ({refusing}) — "
+          "each attempt is an encoder restart that drops live viewers")
+
 
 # ---------------- C. manager ----------------
 
@@ -471,6 +486,36 @@ async def manager_checks() -> None:
     r = await noop.apply(a)
     check(r["ok"] and r.get("skipped"), "an all-keep profile never contacts the camera")
     check(m.last("a") is not None, "last result kept for status")
+
+    print("C2: a value the camera will not keep is not rewritten in the background")
+    # Every write can restart the camera's encoder, dropping every live viewer.
+    CAMERAS["10.0.0.33"] = sticky = FakeCamera(bitrate_ceiling=10000)
+    m2 = StreamProfileManager(Settings({"bitrate_kbps": 12000}))
+    e = {"name": "e", "ip": "10.0.0.33", "username": "u", "password": "p", "main_stream": None}
+    r = await m2.apply(e, background=True)
+    first = len(sticky.sets)
+    check(first > 0 and r["not_applied"], "the first pass writes, and reports it did not stick")
+    r = await m2.apply(e, background=True)
+    check(len(sticky.sets) == first,
+          f"the next background pass writes NOTHING ({len(sticky.sets) - first} writes)")
+    check(r["not_applied"] and "not retried" in r["not_applied"][0],
+          "and still reports it as not applied, saying why")
+    await m2.apply(e)
+    check(len(sticky.sets) > first, "a save (not background) retries it")
+    m3 = StreamProfileManager(Settings({"bitrate_kbps": 12000}))
+    m3._stuck = dict(m2._stuck)
+    m3._settings = Settings({"bitrate_kbps": 11000})
+    before = len(sticky.sets)
+    await m3.apply(e, background=True)
+    check(len(sticky.sets) > before, "a CHANGED profile is tried again in the background")
+
+    print("C3: reconnects re-apply at most once per cooldown")
+    m4 = StreamProfileManager(Settings({"bitrate_kbps": 12000}))
+    await m4.notify_reachable(e)
+    await m4.notify_reachable(e)
+    await m4.notify_reachable(e)
+    check(len(m4._tasks) <= 1, f"three reconnects in a row start one apply ({len(m4._tasks)})")
+    await asyncio.gather(*m4._tasks, return_exceptions=True)
 
 
 # ---------------- D. API ----------------

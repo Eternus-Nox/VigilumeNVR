@@ -713,7 +713,9 @@ class AmcrestClient:
                      self.ip, self.model or "?", n, variant, size)
         return False, None, why
 
-    async def apply_main_stream(self, profile: dict[str, Any]) -> dict[str, Any]:
+    async def apply_main_stream(
+        self, profile: dict[str, Any], skip: Optional[set[str]] = None,
+    ) -> dict[str, Any]:
         """Move the main stream to `profile`, then READ IT BACK: a Dahua
         setConfig can answer OK and keep the old value, so what is reported
         as changed is what the camera reports afterwards.
@@ -731,12 +733,20 @@ class AmcrestClient:
         codec / keyframes / bitrate together, falling back to one setting
         and one format at a time if the camera refuses the set.
 
-        Returns {changed, rejected, not_applied, notes, before, after} where
-        changed / rejected / not_applied are about the primary format only.
-        Raises AmcrestError only when the camera cannot be read at all."""
+        `skip` is a set of "<format>:<setting>" keys NOT to write — the ones
+        this camera would not keep last time. Re-writing a value a camera
+        will not keep changes nothing and can restart its encoder, dropping
+        every live viewer, so the background re-apply passes them.
+
+        Returns {changed, rejected, not_applied, notes, before, after,
+        stuck_keys} where changed / rejected / not_applied are about the
+        primary format only and stuck_keys is every key still differing
+        afterwards. Raises AmcrestError only when the camera cannot be read
+        at all."""
         profile = encode_profile.normalize_profile(profile)
         result: dict[str, Any] = {"changed": [], "rejected": [], "not_applied": [],
-                                  "notes": [], "before": None, "after": None}
+                                  "notes": [], "before": None, "after": None,
+                                  "stuck_keys": []}
         cfg = await self.get_config("Encode")
         result["before"] = encode_profile.current_main(cfg)
         if encode_profile.is_noop(profile):
@@ -746,6 +756,15 @@ class AmcrestClient:
         plan = encode_profile.plan_main_stream(cfg, caps, profile)
         notes: list[str] = list(plan["notes"])
         result["notes"] = notes
+        if skip:
+            skipped = [(c, k) for c, k in zip(plan["changes"], plan["keys"]) if k in skip]
+            result["stuck_keys"] = sorted(k for _, k in skipped)
+            for c, k in skipped:
+                if k.startswith(f"{plan['primary']}:"):
+                    result["not_applied"].append(
+                        f"{c[len('main '):]}: the camera kept its old value last time; "
+                        "not retried until the profile is saved again")
+            plan = encode_profile.drop_planned(plan, skip)
         if not plan["changes"]:
             result["after"] = result["before"]
             return result
@@ -796,6 +815,7 @@ class AmcrestClient:
         result["after"] = encode_profile.current_main(after_cfg)
         leftover = encode_profile.plan_main_stream(after_cfg, caps, profile)
         stuck = dict(zip(leftover["keys"], leftover["changes"]))
+        result["stuck_keys"] = sorted(stuck)
 
         def setting_of(key: str) -> str:
             return key.split(":", 1)[1]

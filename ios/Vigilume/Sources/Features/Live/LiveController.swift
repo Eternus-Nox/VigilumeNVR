@@ -210,6 +210,14 @@ final class LiveController: ObservableObject {
     /// WHEP gets this long to produce a real frame before we fall back to HLS.
     private static let whepFallbackWindow: UInt64 = 4_500_000_000  // 4.5 s
 
+    /// On HLS and NOT playing, WebRTC is tried again this often. Without it a
+    /// view that missed its first 4.5 s — a camera restarting its encoder, or
+    /// a dozen tiles negotiating at once on a slow link — fell to HLS, and if
+    /// HLS could not start either it sat on the poster image for as long as
+    /// it was open, with the stream long since back.
+    private static let whepRetryInterval: UInt64 = 10_000_000_000  // 10 s
+    private var whepRetryTask: Task<Void, Never>?
+
     /// - Parameter allowsAudio: pass `false` for permanently-muted surfaces (the
     ///   grid tiles). It stops WHEP negotiating an audio track at all, which is
     ///   what keeps WebRTC from opening the audio unit — and therefore the MIC —
@@ -612,8 +620,15 @@ final class LiveController: ObservableObject {
                 : Self.cautiousPromoteWindow
             hasDemoted = true
             switchTo(.low, force: true, recovering: true)
-        } else {
+        } else if adaptEnabled {
             switchTo(rung, force: true, recovering: true)
+        } else {
+            // A grid tile (or a camera with one rung): restart in place. The
+            // make-before-break path opens a SECOND session and decoder next
+            // to the frozen one, and on a grid of tiles that doubles exactly
+            // the load that can starve a tile's decoder in the first place.
+            // The poster image covers the gap.
+            startWHEPAttempt()
         }
     }
 
@@ -646,6 +661,7 @@ final class LiveController: ObservableObject {
         fallbackURL = nil
         suspended = false
         cancelFallbackTimer()
+        cancelWHEPRetry()
         cancelSwitch()
         whep.stop()
         hls.stop()
@@ -661,6 +677,7 @@ final class LiveController: ObservableObject {
     /// remember the source for `resume()`.
     func suspend() {
         cancelFallbackTimer()
+        cancelWHEPRetry()
         cancelSwitch()
         whep.stop()
         hls.suspend()
@@ -701,6 +718,7 @@ final class LiveController: ObservableObject {
     private func startWHEPAttempt() {
         suspended = false
         cancelFallbackTimer()
+        cancelWHEPRetry()
         // Never keep two live sessions alive at once.
         hls.stop()
         hlsPlayer = nil
@@ -774,11 +792,39 @@ final class LiveController: ObservableObject {
         // Hand the HLS model its untouched HD↔SD pair; it takes over state,
         // usingFallback, failureText and player via the bound sinks.
         hls.play(primary: primaryURL, fallback: fallbackURL, preferHD: preferHD)
+        scheduleWHEPRetry()
     }
 
     private func cancelFallbackTimer() {
         fallbackTask?.cancel()
         fallbackTask = nil
+    }
+
+    /// While on HLS, every `whepRetryInterval`: if nothing is playing, start
+    /// over on WebRTC from the small rung. A playing HLS view is left alone —
+    /// it is moving video — but is re-checked, so one that later stalls gets
+    /// the same second chance.
+    private func scheduleWHEPRetry() {
+        cancelWHEPRetry()
+        guard whepLowURL != nil || whepHighURL != nil else { return }
+        whepRetryTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: Self.whepRetryInterval)
+                if Task.isCancelled { return }
+                guard let self, self.mode == .hls, !self.suspended else { return }
+                if self.state == .playing { continue }
+                self.rung = self.whepLowURL != nil ? .low : .high
+                self.whepURL = self.whepLowURL ?? self.whepHighURL
+                self.resetQualityTracking()
+                self.startWHEPAttempt()
+                return
+            }
+        }
+    }
+
+    private func cancelWHEPRetry() {
+        whepRetryTask?.cancel()
+        whepRetryTask = nil
     }
 }
 

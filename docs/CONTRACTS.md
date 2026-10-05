@@ -379,8 +379,14 @@ changes until someone asks.
   stream's raw `Video.*` fields and every format's size, to diagnose a camera
   that still refuses.
 * **When:** on save (the API waits and returns each camera's result), on a
-  camera's reconnect (prober hook), and every 30 min — a factory reset or a
-  change made in the camera's web page drifts back. A size change makes the
+  camera's reconnect (prober hook, at most once per 15 min per camera), and
+  every 30 min — a factory reset or a change made in the camera's web page
+  drifts back. The reconnect and periodic passes do **not** rewrite a value the
+  camera answered OK to and did not keep last time with the same profile (it is
+  reported in `not_applied` as "not retried until the profile is saved
+  again"); only a save retries it. Every write can restart the camera's
+  encoder, dropping go2rtc and every live viewer for seconds, and a value that
+  never sticks was being rewritten on every pass. A size change makes the
   recording reader probe frame sizes per window for 2 min
   (`RecordingReplay.forget_dims`), since old- and new-size segments coexist.
 
@@ -428,7 +434,8 @@ the audio codec and substream keyframes, before the latter) sets the
 substream to H.264 when it is anything else, trying `Compression` alone, then
 with `Profile=Main`, then with an H.264-sized bitrate (a camera can refuse the
 codec at its MJPEG bitrate), reading back after each. A camera that keeps its
-old codec is logged as a warning. Doorbells are skipped (their `_sub` is the
+old codec is logged as a warning and is not tried again until the server
+restarts — each attempt can restart its encoder. Doorbells are skipped (their `_sub` is the
 main stream). `GET /api/cameras/{name}/main-stream` reports `live.substream`;
 the camera's Video quality screen shows it, in red when it is not H.264.
 
